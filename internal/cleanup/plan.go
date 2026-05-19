@@ -139,6 +139,7 @@ type Plan struct {
 	Root                  PlanRoot          `json:"root"`
 	Categories            []PlanCategory    `json:"categories,omitempty"`
 	Candidates            []Candidate       `json:"candidates"`
+	Warnings              []PlannerWarning  `json:"warnings,omitempty"`
 	Totals                PlanTotals        `json:"totals"`
 	Apply                 PlanApplyContract `json:"apply"`
 	HashInputs            []string          `json:"hashInputs"`
@@ -161,6 +162,7 @@ type NewPlanInput struct {
 	Root        PlanRoot
 	Categories  []PlanCategory
 	Candidates  []Candidate
+	Warnings    []PlannerWarning
 }
 
 type CleanApplyInvocation struct {
@@ -274,6 +276,7 @@ func DefaultPlanHashInputs() []string {
 		"root",
 		"categories",
 		"candidates",
+		"warnings",
 		"totals",
 		"apply",
 		"hashInputs",
@@ -313,6 +316,7 @@ func NewPlan(input NewPlanInput) (Plan, error) {
 		Root:                  input.Root,
 		Categories:            append([]PlanCategory(nil), input.Categories...),
 		Candidates:            append([]Candidate(nil), input.Candidates...),
+		Warnings:              append([]PlannerWarning(nil), input.Warnings...),
 		Apply:                 DefaultPlanApplyContract(),
 		HashInputs:            DefaultPlanHashInputs(),
 	}

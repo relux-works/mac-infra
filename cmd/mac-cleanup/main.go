@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,8 @@ var (
 	Commit    = "unknown"
 	BuildDate = "unknown"
 )
+
+var errFullDiskAccessRunnerNotImplemented = errors.New("not implemented: dedicated Full Disk Access runner is not implemented; granting Full Disk Access to Terminal, iTerm2, Cursor, VS Code, or another broad launcher is too risky because every process launched from it may inherit that access")
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -35,6 +38,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runPlanCommand(cleanup.PlanSourceTarget, args[1:], stdout, stderr)
 	case "xcode":
 		return runPlanCommand(cleanup.PlanSourceXcode, args[1:], stdout, stderr)
+	case "permissions":
+		return runPermissionsCommand(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "mac-cleanup %s %s %s\n", Version, Commit, BuildDate)
 		return 0
@@ -107,6 +112,38 @@ func runPlanCommand(source cleanup.PlanSource, args []string, stdout, stderr io.
 	return 0
 }
 
+func runPermissionsCommand(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("permissions", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	openSettings := fs.Bool("open", false, "open macOS Full Disk Access settings")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if len(fs.Args()) != 0 {
+		fmt.Fprintln(stderr, "permissions does not accept positional paths")
+		return 2
+	}
+
+	printPermissionsGuide(stdout)
+	if *openSettings {
+		if err := openFullDiskAccessSettings(); err != nil {
+			fmt.Fprintf(stderr, "permissions --open failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "")
+		fmt.Fprintln(stdout, "opened Full Disk Access settings")
+	}
+	return 0
+}
+
+func openFullDiskAccessSettings() error {
+	// Intentionally disabled for now. Opening the Full Disk Access pane from a
+	// terminal-launched CLI nudges the user toward granting access to a broad
+	// launcher, which would also cover arbitrary child processes. The safer
+	// future path is a dedicated narrow mac-infra runner/app.
+	return errFullDiskAccessRunnerNotImplemented
+}
+
 func buildPlanWithTimeout(options cleanup.PlannerOptions) (cleanup.PlannerResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -161,6 +198,7 @@ func printPlanTable(w io.Writer, result cleanup.PlannerResult) {
 		formatBytes(result.Plan.Totals.LogicalBytes),
 		formatBytes(result.Plan.Totals.SelectedLogicalBytes),
 	)
+	printPlannerWarnings(w, result.Warnings)
 }
 
 func printUsage(w io.Writer) {
@@ -170,9 +208,40 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  scan      plan allowlisted home cleanup categories")
 	fmt.Fprintln(w, "  target    plan cleanup candidates under an explicit target path")
 	fmt.Fprintln(w, "  xcode     plan Xcode cleanup candidates")
+	fmt.Fprintln(w, "  permissions show Full Disk Access guidance")
 	fmt.Fprintln(w, "  version   print version")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "scan/target/xcode are read-only planners; this binary has no deletion command.")
+}
+
+func printPermissionsGuide(w io.Writer) {
+	fmt.Fprintln(w, "mac-cleanup can produce partial plans without Full Disk Access, but macOS may hide protected paths.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Security note:")
+	fmt.Fprintln(w, "  Do not grant Full Disk Access to Terminal, iTerm2, Cursor, VS Code, or another broad launcher unless you accept that every process launched from it inherits that access.")
+	fmt.Fprintln(w, "  Prefer partial scans until mac-infra has a dedicated narrow Full Disk Access runner.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "mac-cleanup permissions --open is intentionally not implemented until a dedicated narrow runner exists.")
+}
+
+func printPlannerWarnings(w io.Writer, warnings []cleanup.PlannerWarning) {
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nwarnings: %d path(s) skipped or partially measured because macOS denied access.\n", len(warnings))
+	limit := len(warnings)
+	if limit > 8 {
+		limit = 8
+	}
+	for i := 0; i < limit; i++ {
+		warning := warnings[i]
+		fmt.Fprintf(w, "  %s: %s (%s)\n", warning.Operation, warning.Path, warning.Code)
+	}
+	if len(warnings) > limit {
+		fmt.Fprintf(w, "  ... %d more\n", len(warnings)-limit)
+	}
+	fmt.Fprintln(w, "for security guidance:")
+	fmt.Fprintln(w, "  mac-cleanup permissions")
 }
 
 func yesNo(value bool) string {

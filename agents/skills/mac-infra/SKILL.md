@@ -135,6 +135,20 @@ mac-cleanup target --json .temp/mac-cleanup/project-plan.json /path/to/project
 mac-cleanup xcode --json
 ```
 
+- If macOS denies access to protected paths or the scan reports permission
+  warnings, do not casually grant Full Disk Access to Terminal, iTerm2, Cursor,
+  VS Code, or another broad launcher. Every process launched from that app may
+  inherit the access. Prefer partial scans until a dedicated narrow mac-infra
+  Full Disk Access runner exists.
+- Show the guidance instead:
+
+```bash
+mac-cleanup permissions
+```
+
+- `mac-cleanup permissions --open` intentionally returns `not implemented`
+  until a dedicated narrow Full Disk Access runner exists.
+
 - `mac-cleanup` currently plans cleanup candidates only. It does not delete or
   move files.
 - Treat cleanup output as review material. Ask the user before any future apply

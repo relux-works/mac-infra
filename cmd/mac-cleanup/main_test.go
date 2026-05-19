@@ -119,6 +119,34 @@ func TestRunHasNoCleanDeletionCommand(t *testing.T) {
 	}
 }
 
+func TestRunPermissionsPrintsFullDiskAccessGuide(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"permissions"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Full Disk Access", "Terminal", "not implemented"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q: %s", want, out)
+		}
+	}
+}
+
+func TestRunPermissionsOpenReturnsNotImplemented(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"permissions", "--open"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run code = %d, want 1; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
+	}
+	errOut := stderr.String()
+	for _, want := range []string{"not implemented", "Terminal", "too risky"} {
+		if !strings.Contains(errOut, want) {
+			t.Fatalf("stderr missing %q: %s", want, errOut)
+		}
+	}
+}
+
 func readPlan(t *testing.T, path string) cleanup.Plan {
 	t.Helper()
 	data, err := os.ReadFile(path)

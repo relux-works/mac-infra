@@ -31,8 +31,22 @@ type PlannerOptions struct {
 }
 
 type PlannerResult struct {
-	Plan Plan
-	Rows []CategorySummary
+	Plan     Plan
+	Rows     []CategorySummary
+	Warnings []PlannerWarning
+}
+
+type PlannerWarningCode string
+
+const (
+	PlannerWarningPermissionDenied PlannerWarningCode = "permission_denied"
+)
+
+type PlannerWarning struct {
+	Code      PlannerWarningCode `json:"code"`
+	Path      string             `json:"path"`
+	Operation string             `json:"operation"`
+	Message   string             `json:"message"`
 }
 
 type CategorySummary struct {
@@ -89,6 +103,7 @@ func BuildPlan(ctx context.Context, options PlannerOptions) (PlannerResult, erro
 	}
 
 	var allCandidates []Candidate
+	var warnings []PlannerWarning
 	rows := make([]CategorySummary, 0, len(categories))
 	planCategories := make([]PlanCategory, 0, len(categories))
 	for _, category := range categories {
@@ -100,6 +115,7 @@ func BuildPlan(ctx context.Context, options PlannerOptions) (PlannerResult, erro
 			options:  options,
 			policy:   policy,
 			target:   targetRoot,
+			warnings: &warnings,
 		})
 		if err != nil {
 			return PlannerResult{}, err
@@ -121,11 +137,12 @@ func BuildPlan(ctx context.Context, options PlannerOptions) (PlannerResult, erro
 		Root:        planRoot,
 		Categories:  planCategories,
 		Candidates:  allCandidates,
+		Warnings:    warnings,
 	})
 	if err != nil {
 		return PlannerResult{}, err
 	}
-	return PlannerResult{Plan: plan, Rows: rows}, nil
+	return PlannerResult{Plan: plan, Rows: rows, Warnings: warnings}, nil
 }
 
 func SupportedCategoryIDs(source PlanSource) []CategoryID {
@@ -164,6 +181,7 @@ type categoryPlanInput struct {
 	options  PlannerOptions
 	policy   Policy
 	target   string
+	warnings *[]PlannerWarning
 }
 
 type candidateSpec struct {
@@ -258,6 +276,10 @@ func buildCategoryCandidates(ctx context.Context, input categoryPlanInput) ([]Ca
 		}
 		candidate, err := newPlannedCandidate(input.category, spec, input.policy.Safety, input.options.CurrentUID)
 		if err != nil {
+			if isPermissionError(err) {
+				addPermissionWarning(input.warnings, "measure candidate", spec.path, err)
+				continue
+			}
 			return nil, err
 		}
 		candidates = append(candidates, candidate)
@@ -268,26 +290,26 @@ func buildCategoryCandidates(ctx context.Context, input categoryPlanInput) ([]Ca
 func collectCandidateSpecs(ctx context.Context, input categoryPlanInput) ([]candidateSpec, error) {
 	switch input.category.ID {
 	case CategoryTargetGenerated:
-		return collectTargetGeneratedCandidates(input.category, input.target)
+		return collectTargetGeneratedCandidates(input.category, input.target, input.warnings)
 	case CategoryLargeFiles:
-		return collectLargeFileCandidates(ctx, input.category, input.target, input.options.LargeFileBytes)
+		return collectLargeFileCandidates(ctx, input.category, input.target, input.options.LargeFileBytes, input.warnings)
 	case CategoryOldFiles:
 		cutoff := input.options.GeneratedAt.Add(-input.options.OldFileAge)
-		return collectOldFileCandidates(ctx, input.category, input.target, cutoff)
+		return collectOldFileCandidates(ctx, input.category, input.target, cutoff, input.warnings)
 	case CategoryXcodeDerivedData:
-		return collectImmediateChildren(input.category, input.options.HomeDir, input.policy.Safety, input.options.CurrentUID)
+		return collectImmediateChildren(input.category, input.options.HomeDir, input.policy.Safety, input.options.CurrentUID, input.warnings)
 	case CategoryRotatedLogs:
-		return collectRotatedLogCandidates(ctx, input.category, input.options.HomeDir, input.policy.Safety, input.options.CurrentUID, input.options.GeneratedAt)
+		return collectRotatedLogCandidates(ctx, input.category, input.options.HomeDir, input.policy.Safety, input.options.CurrentUID, input.options.GeneratedAt, input.warnings)
 	case CategoryDownloads, CategoryAppCaches, CategoryIOSBackups, CategoryXcodeDeviceSupport, CategoryXcodeSimulators:
-		return collectImmediateChildren(input.category, input.options.HomeDir, input.policy.Safety, input.options.CurrentUID)
+		return collectImmediateChildren(input.category, input.options.HomeDir, input.policy.Safety, input.options.CurrentUID, input.warnings)
 	case CategoryXcodeArchives:
-		return collectXcodeArchiveCandidates(ctx, input.category, input.options.HomeDir, input.policy.Safety, input.options.CurrentUID)
+		return collectXcodeArchiveCandidates(ctx, input.category, input.options.HomeDir, input.policy.Safety, input.options.CurrentUID, input.warnings)
 	default:
 		return nil, fmt.Errorf("category %q has no planner", input.category.ID)
 	}
 }
 
-func collectTargetGeneratedCandidates(category Category, targetRoot string) ([]candidateSpec, error) {
+func collectTargetGeneratedCandidates(category Category, targetRoot string, warnings *[]PlannerWarning) ([]candidateSpec, error) {
 	if targetRoot == "" {
 		return nil, errors.New("target root is required for target-generated-data")
 	}
@@ -300,6 +322,10 @@ func collectTargetGeneratedCandidates(category Category, targetRoot string) ([]c
 			continue
 		}
 		if err != nil {
+			if isPermissionError(err) {
+				addPermissionWarning(warnings, "lstat candidate", candidatePath, err)
+				continue
+			}
 			return nil, fmt.Errorf("lstat target-generated candidate %q: %w", candidatePath, err)
 		}
 		if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
@@ -316,19 +342,19 @@ func collectTargetGeneratedCandidates(category Category, targetRoot string) ([]c
 	return specs, nil
 }
 
-func collectLargeFileCandidates(ctx context.Context, category Category, targetRoot string, threshold int64) ([]candidateSpec, error) {
+func collectLargeFileCandidates(ctx context.Context, category Category, targetRoot string, threshold int64, warnings *[]PlannerWarning) ([]candidateSpec, error) {
 	return collectTargetFiles(ctx, category, targetRoot, func(pathName string, info fs.FileInfo) bool {
 		return info.Mode().IsRegular() && info.Size() >= threshold
-	})
+	}, warnings)
 }
 
-func collectOldFileCandidates(ctx context.Context, category Category, targetRoot string, cutoff time.Time) ([]candidateSpec, error) {
+func collectOldFileCandidates(ctx context.Context, category Category, targetRoot string, cutoff time.Time, warnings *[]PlannerWarning) ([]candidateSpec, error) {
 	return collectTargetFiles(ctx, category, targetRoot, func(pathName string, info fs.FileInfo) bool {
 		return info.Mode().IsRegular() && !info.ModTime().After(cutoff)
-	})
+	}, warnings)
 }
 
-func collectTargetFiles(ctx context.Context, category Category, targetRoot string, keep func(string, fs.FileInfo) bool) ([]candidateSpec, error) {
+func collectTargetFiles(ctx context.Context, category Category, targetRoot string, keep func(string, fs.FileInfo) bool, warnings *[]PlannerWarning) ([]candidateSpec, error) {
 	if targetRoot == "" {
 		return nil, fmt.Errorf("target root is required for %s", category.ID)
 	}
@@ -339,6 +365,13 @@ func collectTargetFiles(ctx context.Context, category Category, targetRoot strin
 			return err
 		}
 		if walkErr != nil {
+			if isPermissionError(walkErr) {
+				addPermissionWarning(warnings, "walk target", pathName, walkErr)
+				if entry != nil && entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			return walkErr
 		}
 		if pathName == targetRoot {
@@ -346,6 +379,13 @@ func collectTargetFiles(ctx context.Context, category Category, targetRoot strin
 		}
 		info, err := entry.Info()
 		if err != nil {
+			if isPermissionError(err) {
+				addPermissionWarning(warnings, "stat target", pathName, err)
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
@@ -366,17 +406,25 @@ func collectTargetFiles(ctx context.Context, category Category, targetRoot strin
 		return nil
 	})
 	if err != nil {
+		if isPermissionError(err) {
+			addPermissionWarning(warnings, "walk target", targetRoot, err)
+			return specs, nil
+		}
 		return nil, fmt.Errorf("walk %s candidates under %q: %w", category.ID, targetRoot, err)
 	}
 	return specs, nil
 }
 
-func collectImmediateChildren(category Category, homeDir string, safety RootSafetyPolicy, uid uint32) ([]candidateSpec, error) {
+func collectImmediateChildren(category Category, homeDir string, safety RootSafetyPolicy, uid uint32, warnings *[]PlannerWarning) ([]candidateSpec, error) {
 	seen := map[string]bool{}
 	var specs []candidateSpec
 	for _, root := range category.Roots {
 		rootPath, ok, err := prepareCategoryRoot(root.Path, homeDir, safety, uid)
 		if err != nil {
+			if isPermissionError(err) {
+				addPermissionWarning(warnings, "prepare category root", expandHome(root.Path, homeDir), err)
+				continue
+			}
 			return nil, err
 		}
 		if !ok {
@@ -384,6 +432,10 @@ func collectImmediateChildren(category Category, homeDir string, safety RootSafe
 		}
 		entries, err := os.ReadDir(rootPath)
 		if err != nil {
+			if isPermissionError(err) {
+				addPermissionWarning(warnings, "read category root", rootPath, err)
+				continue
+			}
 			return nil, fmt.Errorf("read %s root %q: %w", category.ID, rootPath, err)
 		}
 		sort.Slice(entries, func(i, j int) bool {
@@ -402,13 +454,17 @@ func collectImmediateChildren(category Category, homeDir string, safety RootSafe
 	return specs, nil
 }
 
-func collectRotatedLogCandidates(ctx context.Context, category Category, homeDir string, safety RootSafetyPolicy, uid uint32, now time.Time) ([]candidateSpec, error) {
+func collectRotatedLogCandidates(ctx context.Context, category Category, homeDir string, safety RootSafetyPolicy, uid uint32, now time.Time, warnings *[]PlannerWarning) ([]candidateSpec, error) {
 	seen := map[string]bool{}
 	var specs []candidateSpec
 	cutoff := now.Add(-time.Duration(category.MinimumAgeDays) * 24 * time.Hour)
 	for _, root := range category.Roots {
 		rootPath, ok, err := prepareCategoryRoot(root.Path, homeDir, safety, uid)
 		if err != nil {
+			if isPermissionError(err) {
+				addPermissionWarning(warnings, "prepare category root", expandHome(root.Path, homeDir), err)
+				continue
+			}
 			return nil, err
 		}
 		if !ok {
@@ -419,6 +475,13 @@ func collectRotatedLogCandidates(ctx context.Context, category Category, homeDir
 				return err
 			}
 			if walkErr != nil {
+				if isPermissionError(walkErr) {
+					addPermissionWarning(warnings, "walk rotated logs", pathName, walkErr)
+					if entry != nil && entry.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				return walkErr
 			}
 			if pathName == rootPath {
@@ -426,6 +489,13 @@ func collectRotatedLogCandidates(ctx context.Context, category Category, homeDir
 			}
 			info, err := entry.Info()
 			if err != nil {
+				if isPermissionError(err) {
+					addPermissionWarning(warnings, "stat rotated log", pathName, err)
+					if entry.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				return err
 			}
 			if info.Mode()&os.ModeSymlink != 0 {
@@ -450,18 +520,26 @@ func collectRotatedLogCandidates(ctx context.Context, category Category, homeDir
 			return nil
 		})
 		if err != nil {
+			if isPermissionError(err) {
+				addPermissionWarning(warnings, "walk rotated logs", rootPath, err)
+				continue
+			}
 			return nil, fmt.Errorf("walk rotated logs under %q: %w", rootPath, err)
 		}
 	}
 	return specs, nil
 }
 
-func collectXcodeArchiveCandidates(ctx context.Context, category Category, homeDir string, safety RootSafetyPolicy, uid uint32) ([]candidateSpec, error) {
+func collectXcodeArchiveCandidates(ctx context.Context, category Category, homeDir string, safety RootSafetyPolicy, uid uint32, warnings *[]PlannerWarning) ([]candidateSpec, error) {
 	seen := map[string]bool{}
 	var specs []candidateSpec
 	for _, root := range category.Roots {
 		rootPath, ok, err := prepareCategoryRoot(root.Path, homeDir, safety, uid)
 		if err != nil {
+			if isPermissionError(err) {
+				addPermissionWarning(warnings, "prepare category root", expandHome(root.Path, homeDir), err)
+				continue
+			}
 			return nil, err
 		}
 		if !ok {
@@ -472,6 +550,13 @@ func collectXcodeArchiveCandidates(ctx context.Context, category Category, homeD
 				return err
 			}
 			if walkErr != nil {
+				if isPermissionError(walkErr) {
+					addPermissionWarning(warnings, "walk Xcode archives", pathName, walkErr)
+					if entry != nil && entry.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				return walkErr
 			}
 			if pathName == rootPath {
@@ -496,6 +581,10 @@ func collectXcodeArchiveCandidates(ctx context.Context, category Category, homeD
 			return nil
 		})
 		if err != nil {
+			if isPermissionError(err) {
+				addPermissionWarning(warnings, "walk Xcode archives", rootPath, err)
+				continue
+			}
 			return nil, fmt.Errorf("walk Xcode archives under %q: %w", rootPath, err)
 		}
 	}
@@ -655,6 +744,28 @@ func addSpec(specs *[]candidateSpec, seen map[string]bool, spec candidateSpec) {
 	}
 	seen[spec.path+"|"+string(spec.risk)+"|"+spec.reason] = true
 	*specs = append(*specs, spec)
+}
+
+func addPermissionWarning(warnings *[]PlannerWarning, operation string, pathName string, err error) {
+	if warnings == nil {
+		return
+	}
+	warning := PlannerWarning{
+		Code:      PlannerWarningPermissionDenied,
+		Path:      filepath.Clean(pathName),
+		Operation: operation,
+		Message:   err.Error(),
+	}
+	for _, existing := range *warnings {
+		if existing.Code == warning.Code && existing.Path == warning.Path && existing.Operation == warning.Operation {
+			return
+		}
+	}
+	*warnings = append(*warnings, warning)
+}
+
+func isPermissionError(err error) bool {
+	return errors.Is(err, fs.ErrPermission) || errors.Is(err, os.ErrPermission)
 }
 
 func sortCandidates(candidates []Candidate) {

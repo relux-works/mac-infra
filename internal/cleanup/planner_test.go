@@ -135,6 +135,54 @@ func TestBuildXcodePlanMarksArchivesReviewOnly(t *testing.T) {
 	}
 }
 
+func TestBuildScanPlanContinuesAfterPermissionDeniedCandidate(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-denied fixture is not meaningful as root")
+	}
+	home := localCleanupTempDir(t)
+	cacheRoot := filepath.Join(home, "Library", "Caches")
+	readable := filepath.Join(cacheRoot, "Readable")
+	protected := filepath.Join(cacheRoot, "CloudKit")
+	mustMkdirAll(t, readable)
+	mustWriteCleanupFile(t, filepath.Join(readable, "cache.bin"), "cache")
+	mustMkdirAll(t, protected)
+	mustWriteCleanupFile(t, filepath.Join(protected, "hidden.bin"), "hidden")
+	if err := os.Chmod(protected, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(protected, 0o700); err != nil && !os.IsNotExist(err) {
+			t.Errorf("restore protected permissions: %v", err)
+		}
+	})
+
+	result, err := BuildPlan(context.Background(), PlannerOptions{
+		Source:      PlanSourceScan,
+		HomeDir:     home,
+		GeneratedAt: time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC),
+		CategoryIDs: []CategoryID{CategoryAppCaches},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan scan: %v", err)
+	}
+
+	candidates := candidatesByCategory(result.Plan.Candidates)
+	got := candidates[CategoryAppCaches]
+	if len(got) != 1 || got[0].Identity.Path != readable {
+		t.Fatalf("app cache candidates = %#v, want only readable candidate", got)
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("warnings = %#v, want one permission warning", result.Warnings)
+	}
+	if len(result.Plan.Warnings) != 1 {
+		t.Fatalf("plan warnings = %#v, want one permission warning", result.Plan.Warnings)
+	}
+	warning := result.Warnings[0]
+	if warning.Code != PlannerWarningPermissionDenied || warning.Path != protected {
+		t.Fatalf("warning = %#v, want permission warning for %s", warning, protected)
+	}
+}
+
 func TestBuildPlanIsDeterministicForFixtures(t *testing.T) {
 	root := localCleanupTempDir(t)
 	mustMkdirAll(t, filepath.Join(root, ".temp"))
