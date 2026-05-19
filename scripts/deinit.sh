@@ -18,7 +18,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
-rm -f "$BIN_DIR/mac-audio-reset" "$BIN_DIR/mac-infra-core"
+rm -f "$BIN_DIR/mac-audio-reset" "$BIN_DIR/mac-load-profile" "$BIN_DIR/mac-disk-profile" "$BIN_DIR/mac-cleanup" "$BIN_DIR/mac-infra-core"
 rm -f "$HOME/.codex/skills/$SKILL_NAME" "$HOME/.claude/skills/$SKILL_NAME"
 rm -rf "$HOME/.agents/skills/$SKILL_NAME"
 

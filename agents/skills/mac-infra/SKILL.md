@@ -4,8 +4,27 @@ description: >
   macOS workstation infrastructure tooling for diagnosing and fixing local Mac
   audio crackling, CoreAudio daemon glitches, Simulator audio issues, Apple
   Music distortion, USB DAC output problems, Bluetooth output problems, and
-  related maintenance tasks.
+  broad CPU, memory, thermal, process load, and related maintenance tasks.
 triggers:
+  - mac load
+  - load profile
+  - CPU profile
+  - memory profile
+  - disk profile
+  - disk usage
+  - disk space
+  - storage profile
+  - cleanup plan
+  - mac cleanup
+  - cleanup mac
+  - high CPU
+  - high memory
+  - hot mac
+  - overheating mac
+  - process load
+  - top processes
+  - activity monitor
+  - Mac is hot
   - mac audio
   - macOS audio
   - audio crackle
@@ -33,12 +52,93 @@ triggers:
   - аудио на маке
   - кор аудио
   - кореаудио
+  - что жрет проц
+  - жрет процессор
+  - жрет память
+  - греется мак
+  - мак греется
+  - профайли нагрузку
+  - нагрузка на маке
+  - мониторинг компа
+  - что жрет диск
+  - жрет диск
+  - место на диске
+  - профайли диск
+  - почистить мак
+  - чистка мака
+  - клинап мака
 ---
 
 # mac-infra
 
 Use this skill for macOS local maintenance workflows backed by the `mac-infra`
 Go tools.
+
+## Load Profiling Workflow
+
+- For broad CPU, memory, thermal, pressure, and process evidence, start here:
+
+```bash
+mac-load-profile capture
+```
+
+- For quick terminal triage without writing a full bundle:
+
+```bash
+mac-load-profile snapshot --top 20
+```
+
+- To inspect one suspicious process or family:
+
+```bash
+mac-load-profile inspect sing-box
+mac-load-profile inspect 12345
+```
+
+- To gather a CPU sample, use it only when profiling needs stack evidence:
+
+```bash
+mac-load-profile inspect sing-box --sample 5
+```
+
+- Use specific profilers only after the broad profile points there. For tunnel
+  issues:
+
+```bash
+mac-load-profile tunnel
+```
+
+- `mac-load-profile` is read-only. It must not stop, restart, kill, or mutate
+  processes.
+
+## Disk Space Profiling Workflow
+
+- Use this when the user needs to understand where disk space went:
+
+```bash
+mac-disk-profile scan "$HOME" --depth 3 --json .temp/mac-disk-profile/home.json
+mac-disk-profile top "$HOME" --limit 30
+mac-disk-profile explain "$HOME/Library/Developer"
+```
+
+- `mac-disk-profile` is read-only. It must not delete, move, or mutate files.
+- Prefer `scan` when a persisted JSON artifact is useful for later analysis.
+- Use `explain` for one suspicious path after `scan` or `top` identifies it.
+
+## Cleanup Planning Workflow
+
+- Start with read-only planning only:
+
+```bash
+mac-cleanup scan --json
+mac-cleanup target --json .temp/mac-cleanup/project-plan.json /path/to/project
+mac-cleanup xcode --json
+```
+
+- `mac-cleanup` currently plans cleanup candidates only. It does not delete or
+  move files.
+- Treat cleanup output as review material. Ask the user before any future apply
+  flow removes or trashes files.
 
 ## Audio Crackle Workflow
 

@@ -58,13 +58,25 @@ go -C "$PROJECT_ROOT" test ./...
 mkdir -p "$BUILD_DIR" "$BIN_DIR"
 echo "Building mac-audio-reset..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-audio-reset" ./cmd/mac-audio-reset
+echo "Building mac-load-profile..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-load-profile" ./cmd/mac-load-profile
+echo "Building mac-disk-profile..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-disk-profile" ./cmd/mac-disk-profile
+echo "Building mac-cleanup..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-cleanup" ./cmd/mac-cleanup
 echo "Building mac-infra-core..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-infra-core" ./cmd/mac-infra-core
 
 ln -sf "$BUILD_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-reset"
+ln -sf "$BUILD_DIR/mac-load-profile" "$BIN_DIR/mac-load-profile"
+ln -sf "$BUILD_DIR/mac-disk-profile" "$BIN_DIR/mac-disk-profile"
+ln -sf "$BUILD_DIR/mac-cleanup" "$BIN_DIR/mac-cleanup"
 ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
 echo "Installed binary symlinks:"
 echo "  $BIN_DIR/mac-audio-reset -> $BUILD_DIR/mac-audio-reset"
+echo "  $BIN_DIR/mac-load-profile -> $BUILD_DIR/mac-load-profile"
+echo "  $BIN_DIR/mac-disk-profile -> $BUILD_DIR/mac-disk-profile"
+echo "  $BIN_DIR/mac-cleanup     -> $BUILD_DIR/mac-cleanup"
 echo "  $BIN_DIR/mac-infra-core  -> $BUILD_DIR/mac-infra-core"
 
 if [[ ! -d "$SKILL_SOURCE" ]]; then
