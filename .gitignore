@@ -1,0 +1,10 @@
+.temp/
+bin/
+dist/
+build/
+*.test
+*.out
+*.prof
+coverage.out
+.coverage/
+.DS_Store
