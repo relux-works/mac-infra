@@ -1,0 +1,80 @@
+digraph cleanup_disk_work_packages {
+  graph [
+    label="EPIC-260519-32t1eh work package dependencies",
+    labelloc=t,
+    fontsize=18,
+    rankdir=LR
+  ];
+
+  node [shape=box, style="rounded,filled", fillcolor="#f7f7f7", color="#555555", fontname="Helvetica", fontsize=10];
+  edge [color="#555555", arrowsize=0.7];
+
+  subgraph cluster_disk {
+    label="Disk profiler";
+    color="#2f6f9f";
+    d_model [label="TASK-3vfq4z\nDisk scan model"];
+    d_controls [label="TASK-1mlvet\nResource controls"];
+    d_cli [label="TASK-204kn4\nscan/top/explain CLI"];
+    d_summary [label="TASK-2lvhmz\nExtension/type summary"];
+    d_json [label="TASK-i018bt\nJSON artifacts"];
+    d_verify [label="TASK-mw0wqd\nLive verification"];
+  }
+
+  subgraph cluster_scanner {
+    label="Cleanup scanner";
+    color="#6a8f2a";
+    c_policy [label="TASK-4m0vph\nCategory policy"];
+    c_contract [label="TASK-2cplpc\nPlan/apply contract"];
+    c_scan [label="TASK-3ilnxy\nRead-only scan CLI"];
+    c_tests [label="TASK-19vo5i\nSafety guard tests"];
+  }
+
+  subgraph cluster_executor {
+    label="Cleanup executor";
+    color="#b5651d";
+    e_trash [label="TASK-1sjp9e\nTrash semantics"];
+    e_manifest [label="TASK-3jvypc\nManifest"];
+    e_guard [label="TASK-3m5108\nApply revalidation guards"];
+    e_exec [label="TASK-1g0cy0\nTrash-first executor"];
+    e_perm [label="TASK-1q0s32\nPermanent delete friction"];
+  }
+
+  subgraph cluster_categories {
+    label="Cleanup categories";
+    color="#855c9d";
+    cat_xcode [label="TASK-2mxj1n\nXcode categories"];
+    cat_target [label="TASK-r7v7eg\nTarget-folder categories"];
+    cat_large [label="TASK-2mafct\nLarge/old review-only"];
+  }
+
+  subgraph cluster_integration {
+    label="Integration";
+    color="#777777";
+    setup [label="TASK-15f9x6\nSetup/deinit"];
+    docs [label="TASK-2u5agy\nREADME + skill"];
+    smoke [label="TASK-2q8yv3\nGlobal smoke verify"];
+  }
+
+  d_model -> d_controls -> d_cli -> d_summary -> d_json -> d_verify -> setup;
+  c_policy -> c_contract -> c_scan -> c_tests -> e_exec;
+  c_policy -> c_scan;
+  c_scan -> e_manifest;
+  c_contract -> e_trash;
+  c_contract -> e_guard;
+  c_scan -> e_guard;
+  e_trash -> e_exec;
+  e_manifest -> e_exec;
+  e_guard -> e_exec -> e_perm -> setup;
+
+  c_scan -> cat_xcode;
+  c_scan -> cat_target;
+  c_scan -> cat_large;
+  c_policy -> cat_xcode;
+  c_policy -> cat_target;
+  c_policy -> cat_large;
+
+  cat_xcode -> docs;
+  cat_target -> docs;
+  cat_large -> docs;
+  setup -> docs -> smoke;
+}
