@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/relux-works/mac-infra/internal/anyconnect"
 	"github.com/relux-works/mac-infra/internal/loadprofile"
 )
 
@@ -41,6 +42,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runInspect(args[1:], stdout, stderr)
 	case "tunnel":
 		return runTunnel(args[1:], stdout, stderr)
+	case "anyconnect":
+		return runAnyConnect(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "mac-load-profile %s %s %s\n", Version, Commit, BuildDate)
 		return 0
@@ -237,6 +240,54 @@ func runTunnel(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runAnyConnect(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("anyconnect", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	includeLogs := fs.Bool("logs", false, "include recent acsockext NetworkExtension log hints")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	processes, err := collectProcesses()
+	if err != nil {
+		fmt.Fprintf(stderr, "anyconnect profile failed: %v\n", err)
+		return 1
+	}
+	processes = withoutProfilerProcess(processes)
+
+	vpnStatus, vpnStatusErr := runOptionalCommand(5*time.Second, "/opt/cisco/anyconnect/bin/vpn", "status")
+	systemExtensions, systemExtensionsErr := runOptionalCommand(5*time.Second, "/usr/bin/systemextensionsctl", "list")
+	logHints := ""
+	logErr := ""
+	if *includeLogs {
+		logHints, logErr = runOptionalCommand(
+			10*time.Second,
+			"/usr/bin/log",
+			"show",
+			"--style",
+			"compact",
+			"--last",
+			"5m",
+			"--predicate",
+			`process == "com.cisco.anyconnect.macos.acsockext" || eventMessage CONTAINS[c] "acsockext" || eventMessage CONTAINS[c] "NEFlow"`,
+		)
+	}
+
+	statusErrText := vpnStatusErr
+	if systemExtensionsErr != "" {
+		statusErrText = strings.TrimSpace(statusErrText + "; systemextensionsctl: " + systemExtensionsErr)
+	}
+	if logErr != "" {
+		statusErrText = strings.TrimSpace(statusErrText + "; log: " + logErr)
+	}
+	diagnostic := anyconnect.Analyze(processes, vpnStatus, statusErrText, systemExtensions, logHints)
+	anyconnect.PrintDiagnostic(stdout, diagnostic)
+	if !*includeLogs {
+		fmt.Fprintln(stdout, "log_hints_note: pass --logs to include recent bounded acsockext/NEFlow log hints")
+	}
+	return 0
+}
+
 func collectProcesses() ([]loadprofile.Process, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -249,6 +300,24 @@ func collectProcesses() ([]loadprofile.Process, error) {
 		return nil, fmt.Errorf("ps: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return loadprofile.ParsePS(out)
+}
+
+func runOptionalCommand(timeout time.Duration, name string, args ...string) (string, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	output := strings.TrimSpace(string(out))
+	if ctx.Err() == context.DeadlineExceeded {
+		return output, fmt.Sprintf("%s timed out after %s", name, timeout)
+	}
+	if err != nil {
+		if output != "" {
+			return output, fmt.Sprintf("%s: %v (%s)", name, err, output)
+		}
+		return output, fmt.Sprintf("%s: %v", name, err)
+	}
+	return output, ""
 }
 
 func runCaptureCommand(path string, command loadprofile.CaptureCommand) error {
@@ -363,5 +432,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  mac-load-profile snapshot [--top N] [--query TEXT]")
 	fmt.Fprintln(w, "  mac-load-profile inspect [--children=true] [--sample SECONDS] PID_OR_QUERY")
 	fmt.Fprintln(w, "  mac-load-profile tunnel [--hot-cpu PERCENT] [--sample SECONDS]")
+	fmt.Fprintln(w, "  mac-load-profile anyconnect [--logs]")
 	fmt.Fprintln(w, "  mac-load-profile version")
 }

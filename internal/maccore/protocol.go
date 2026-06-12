@@ -3,6 +3,7 @@ package maccore
 type Request struct {
 	Action          string `json:"action"`
 	IncludeUSBAudio bool   `json:"include_usb_audio,omitempty"`
+	Force           bool   `json:"force,omitempty"`
 }
 
 type Response struct {

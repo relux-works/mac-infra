@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/relux-works/mac-infra/internal/anyconnect"
 )
 
 const commandTimeout = 10 * time.Second
@@ -72,6 +74,17 @@ func RestartAudio(cfg ServiceConfig, includeUSBAudio bool) (Response, error) {
 		Action:          "restart_audio",
 		IncludeUSBAudio: includeUSBAudio,
 	})
+}
+
+func CleanupAnyConnect(cfg ServiceConfig, force bool) (Response, error) {
+	return Call(cfg, Request{
+		Action: "cleanup_anyconnect",
+		Force:  force,
+	})
+}
+
+func RequestSudoCredentials() error {
+	return ensureSudoCredentials()
 }
 
 func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID int) error {
@@ -211,6 +224,13 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 			response.OK = false
 			response.Error = err.Error()
 		}
+	case "cleanup_anyconnect":
+		results, err := cleanupAnyConnect(request.Force)
+		response.Commands = results
+		if err != nil {
+			response.OK = false
+			response.Error = err.Error()
+		}
 	default:
 		response.OK = false
 		response.Error = fmt.Sprintf("unsupported mac-infra-core action %q", request.Action)
@@ -260,6 +280,91 @@ func restartAudioDaemons(includeUSBAudio bool) ([]CommandResult, error) {
 		}
 	}
 	return results, nil
+}
+
+func cleanupAnyConnect(force bool) ([]CommandResult, error) {
+	var results []CommandResult
+	if !force {
+		result, state, err := verifyAnyConnectDisconnected()
+		results = append(results, result)
+		if err != nil {
+			return results, err
+		}
+		if state != anyconnect.VPNStateDisconnected {
+			return results, fmt.Errorf("refusing AnyConnect cleanup while vpn state is %q; disconnect first or pass --force", state)
+		}
+	}
+
+	for _, item := range []struct {
+		name          string
+		args          []string
+		optionalNoOp  bool
+		noOpExitCodes map[int]bool
+	}{
+		{
+			name:         "/usr/bin/pkill",
+			args:         []string{"-TERM", "-f", "com[.]cisco[.]anyconnect[.]macos[.]acsockext"},
+			optionalNoOp: true,
+			noOpExitCodes: map[int]bool{
+				1: true,
+			},
+		},
+		{
+			name: "/bin/launchctl",
+			args: []string{"kickstart", "-k", "system/" + anyconnect.VPNAgentLabel},
+		},
+	} {
+		result, err := runCoreCommand(item.name, item.args...)
+		results = append(results, result)
+		if err != nil {
+			if item.optionalNoOp && item.noOpExitCodes[exitCode(err)] {
+				continue
+			}
+			return results, err
+		}
+	}
+	return results, nil
+}
+
+func verifyAnyConnectDisconnected() (CommandResult, anyconnect.VPNState, error) {
+	result, err := runCoreCommand("/opt/cisco/anyconnect/bin/vpn", "status")
+	state := anyconnect.ParseVPNState(result.Output)
+	if err != nil {
+		return result, state, fmt.Errorf("verify AnyConnect status: %w", err)
+	}
+	if state == anyconnect.VPNStateUnknown {
+		return result, state, fmt.Errorf("could not determine AnyConnect state from vpn status output")
+	}
+	return result, state, nil
+}
+
+func runCoreCommand(name string, args ...string) (CommandResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	cmd := execCommandContextCore(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	result := CommandResult{
+		Command: strings.Join(append([]string{name}, args...), " "),
+		Output:  strings.TrimSpace(string(out)),
+	}
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return result, fmt.Errorf("%s timed out after %s", result.Command, commandTimeout)
+		}
+		if result.Output != "" {
+			return result, fmt.Errorf("%s: %w (%s)", result.Command, err, result.Output)
+		}
+		return result, fmt.Errorf("%s: %w", result.Command, err)
+	}
+	return result, nil
+}
+
+func exitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
 
 func RenderServicePlist(cfg ServiceConfig, binaryPath string, clientUID, clientGID int) []byte {

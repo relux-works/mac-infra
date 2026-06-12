@@ -16,6 +16,12 @@ var (
 	BuildDate = "unknown"
 )
 
+var (
+	inspectService         = maccore.InspectService
+	requestSudoCredentials = maccore.RequestSudoCredentials
+	cleanupAnyConnect      = maccore.CleanupAnyConnect
+)
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -33,6 +39,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runUninstall(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
+	case "request-permissions":
+		return runRequestPermissions(args[1:], stdout, stderr)
+	case "anyconnect-cleanup":
+		return runAnyConnectCleanup(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "mac-infra-core %s %s %s\n", Version, Commit, BuildDate)
 		return 0
@@ -104,7 +114,7 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	status, err := maccore.InspectService(maccore.DefaultServiceConfig())
+	status, err := inspectService(maccore.DefaultServiceConfig())
 	if err != nil {
 		fmt.Fprintf(stderr, "status failed: %v\n", err)
 		return 1
@@ -119,6 +129,95 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	} else {
 		fmt.Fprintln(stdout, "state: missing")
 	}
+	return 0
+}
+
+func runRequestPermissions(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("request-permissions", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		printRequestPermissionsUsage(stderr)
+		return 2
+	}
+
+	permission := fs.Arg(0)
+	switch permission {
+	case "sudo":
+		return runRequestSudoPermission(stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown permission %q\n", permission)
+		printRequestPermissionsUsage(stderr)
+		return 2
+	}
+}
+
+func runRequestSudoPermission(stdout, stderr io.Writer) int {
+	if err := requestSudoCredentials(); err != nil {
+		fmt.Fprintf(stderr, "request-permissions sudo failed: %v\n", err)
+		return 1
+	}
+
+	cfg := maccore.DefaultServiceConfig()
+	status, err := inspectService(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "request-permissions sudo failed: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintln(stdout, "sudo: ready")
+	fmt.Fprintln(stdout, "permission: sudo")
+	fmt.Fprintln(stdout, "scope: mac-infra-core privileged setup/actions")
+	fmt.Fprintln(stdout, "note: this does not grant Full Disk Access and does not grant anything to Terminal, iTerm2, Cursor, or VS Code.")
+	fmt.Fprintf(stdout, "label: %s\n", cfg.Label)
+	fmt.Fprintf(stdout, "plist: %s\n", cfg.PlistPath)
+	fmt.Fprintf(stdout, "socket: %s\n", cfg.SocketPath)
+	if status.Reachable {
+		fmt.Fprintln(stdout, "state: reachable")
+		fmt.Fprintf(stdout, "daemon_pid: %d\n", status.DaemonPID)
+	} else {
+		fmt.Fprintln(stdout, "state: missing")
+		fmt.Fprintln(stdout, "next: mac-infra-core install")
+	}
+	return 0
+}
+
+func runAnyConnectCleanup(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("anyconnect-cleanup", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	apply := fs.Bool("apply", false, "execute the cleanup through mac-infra-core")
+	force := fs.Bool("force", false, "allow cleanup even when AnyConnect state is not confirmed disconnected")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	if !*apply {
+		fmt.Fprintln(stdout, "mode: dry-run")
+		fmt.Fprintln(stdout, "refuse_if_connected: true")
+		if *force {
+			fmt.Fprintln(stdout, "force: true")
+		}
+		fmt.Fprintln(stdout, "actions:")
+		fmt.Fprintln(stdout, "- verify AnyConnect state with /opt/cisco/anyconnect/bin/vpn status")
+		fmt.Fprintln(stdout, "- terminate Cisco socket filter: /usr/bin/pkill -TERM -f com[.]cisco[.]anyconnect[.]macos[.]acsockext")
+		fmt.Fprintln(stdout, "- restart AnyConnect agent: /bin/launchctl kickstart -k system/com.cisco.anyconnect.vpnagentd")
+		fmt.Fprintln(stdout, "apply: mac-infra-core anyconnect-cleanup --apply")
+		return 0
+	}
+
+	resp, err := cleanupAnyConnect(maccore.DefaultServiceConfig(), *force)
+	if err != nil {
+		fmt.Fprintf(stderr, "anyconnect-cleanup failed: %v\n", err)
+		if len(resp.Commands) > 0 {
+			printCommandResults(stderr, resp.Commands)
+		}
+		return 1
+	}
+
+	fmt.Fprintln(stdout, "anyconnect-cleanup: applied")
+	printCommandResults(stdout, resp.Commands)
 	return 0
 }
 
@@ -147,7 +246,26 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  mac-infra-core install")
 	fmt.Fprintln(w, "  mac-infra-core uninstall")
 	fmt.Fprintln(w, "  mac-infra-core status")
+	fmt.Fprintln(w, "  mac-infra-core request-permissions sudo")
+	fmt.Fprintln(w, "  mac-infra-core anyconnect-cleanup [--apply] [--force]")
 	fmt.Fprintln(w, "  mac-infra-core version")
+}
+
+func printRequestPermissionsUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  mac-infra-core request-permissions sudo")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Available permissions:")
+	fmt.Fprintln(w, "  sudo    cache sudo credentials for mac-infra-core privileged setup/actions")
+}
+
+func printCommandResults(w io.Writer, results []maccore.CommandResult) {
+	for _, result := range results {
+		fmt.Fprintf(w, "command: %s\n", result.Command)
+		if result.Output != "" {
+			fmt.Fprintf(w, "output: %s\n", result.Output)
+		}
+	}
 }
 
 func resolveExecutablePath() (string, error) {

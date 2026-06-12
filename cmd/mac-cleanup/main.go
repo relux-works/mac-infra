@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/relux-works/mac-infra/internal/cleanup"
+	"github.com/relux-works/mac-infra/internal/simcleanup"
 )
 
 var (
@@ -38,6 +41,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runPlanCommand(cleanup.PlanSourceTarget, args[1:], stdout, stderr)
 	case "xcode":
 		return runPlanCommand(cleanup.PlanSourceXcode, args[1:], stdout, stderr)
+	case "xcode-runtimes":
+		return runXcodeRuntimesCommand(args[1:], stdout, stderr)
 	case "permissions":
 		return runPermissionsCommand(args[1:], stdout, stderr)
 	case "version":
@@ -51,6 +56,62 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printUsage(stderr)
 		return 2
 	}
+}
+
+func runXcodeRuntimesCommand(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("xcode-runtimes", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	deleteCandidates := fs.Bool("delete", false, "delete unsupported simulator runtimes with simctl runtime delete")
+	jsonPath := fs.String("json", "", "write RuntimeCleanupReport JSON to PATH; use --json without PATH for .temp/mac-cleanup/xcode-runtimes-report.json")
+	xcrunPath := fs.String("xcrun", "/usr/bin/xcrun", "path to xcrun")
+	if err := fs.Parse(normalizeJSONFlag(args, ".temp/mac-cleanup/xcode-runtimes-report.json")); err != nil {
+		return 2
+	}
+	if len(fs.Args()) != 0 {
+		fmt.Fprintln(stderr, "xcode-runtimes does not accept positional paths")
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	report, err := simcleanup.DetectUnsupportedRuntimes(ctx, *xcrunPath, time.Now().UTC())
+	if err != nil {
+		fmt.Fprintf(stderr, "xcode-runtimes failed: %v\n", err)
+		return 1
+	}
+	if strings.TrimSpace(*jsonPath) != "" {
+		if err := writeJSONArtifact(*jsonPath, report); err != nil {
+			fmt.Fprintf(stderr, "xcode-runtimes failed: write json: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "json: %s\n", *jsonPath)
+	}
+
+	printRuntimeCleanupReport(stdout, report)
+	if len(report.Candidates) == 0 {
+		return 0
+	}
+	if !*deleteCandidates {
+		fmt.Fprintln(stdout, "")
+		fmt.Fprintln(stdout, "dry-run: pass --delete to remove these runtimes with simctl runtime delete")
+		return 0
+	}
+
+	for _, candidate := range report.Candidates {
+		output, err := simcleanup.DeleteRuntime(ctx, *xcrunPath, candidate.Identifier)
+		if len(output) > 0 {
+			fmt.Fprint(stdout, string(output))
+			if !strings.HasSuffix(string(output), "\n") {
+				fmt.Fprintln(stdout)
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "delete %s failed: %v\n", candidate.Identifier, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "deleted: %s %s (%s)\n", candidate.Platform, candidate.Version, candidate.Identifier)
+	}
+	return 0
 }
 
 func runPlanCommand(source cleanup.PlanSource, args []string, stdout, stderr io.Writer) int {
@@ -110,6 +171,18 @@ func runPlanCommand(source cleanup.PlanSource, args []string, stdout, stderr io.
 	}
 	printPlanTable(stdout, result)
 	return 0
+}
+
+func writeJSONArtifact(path string, value any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o600)
 }
 
 func runPermissionsCommand(args []string, stdout, stderr io.Writer) int {
@@ -208,10 +281,35 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  scan      plan allowlisted home cleanup categories")
 	fmt.Fprintln(w, "  target    plan cleanup candidates under an explicit target path")
 	fmt.Fprintln(w, "  xcode     plan Xcode cleanup candidates")
+	fmt.Fprintln(w, "  xcode-runtimes detect and optionally delete unsupported simulator runtimes")
 	fmt.Fprintln(w, "  permissions show Full Disk Access guidance")
 	fmt.Fprintln(w, "  version   print version")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "scan/target/xcode are read-only planners; this binary has no deletion command.")
+	fmt.Fprintln(w, "scan/target/xcode are read-only planners; xcode-runtimes deletes only with --delete.")
+}
+
+func printRuntimeCleanupReport(w io.Writer, report simcleanup.RuntimeCleanupReport) {
+	fmt.Fprintf(w, "%-28s %8s %-10s %-26s %12s  %s\n", "category", "platform", "version", "identifier", "bytes", "reason")
+	for _, candidate := range report.Candidates {
+		fmt.Fprintf(
+			w,
+			"%-28s %8s %-10s %-26s %12s  %s\n",
+			"xcode-simulator-runtimes",
+			candidate.Platform,
+			candidate.Version,
+			shortIdentifier(candidate.Identifier),
+			formatBytes(candidate.SizeBytes),
+			candidate.Reason,
+		)
+	}
+	fmt.Fprintf(w, "\ntotals: candidates=%d logical=%s\n", report.Totals.CandidateCount, formatBytes(report.Totals.Bytes))
+}
+
+func shortIdentifier(identifier string) string {
+	if len(identifier) <= 26 {
+		return identifier
+	}
+	return identifier[:8] + "..." + identifier[len(identifier)-15:]
 }
 
 func printPermissionsGuide(w io.Writer) {

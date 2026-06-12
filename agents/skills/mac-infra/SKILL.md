@@ -108,6 +108,13 @@ mac-load-profile inspect sing-box --sample 5
 mac-load-profile tunnel
 ```
 
+- For Cisco AnyConnect disconnected-state socket filter leaks:
+
+```bash
+mac-load-profile anyconnect
+mac-load-profile anyconnect --logs
+```
+
 - `mac-load-profile` is read-only. It must not stop, restart, kill, or mutate
   processes.
 
@@ -133,6 +140,7 @@ mac-disk-profile explain "$HOME/Library/Developer"
 mac-cleanup scan --json
 mac-cleanup target --json .temp/mac-cleanup/project-plan.json /path/to/project
 mac-cleanup xcode --json
+mac-cleanup xcode-runtimes --json
 ```
 
 - If macOS denies access to protected paths or the scan reports permission
@@ -149,10 +157,18 @@ mac-cleanup permissions
 - `mac-cleanup permissions --open` intentionally returns `not implemented`
   until a dedicated narrow Full Disk Access runner exists.
 
-- `mac-cleanup` currently plans cleanup candidates only. It does not delete or
-  move files.
+- `mac-cleanup xcode-runtimes` detects unsupported CoreSimulator runtimes that
+  Xcode can still list even after their devices are gone. It is dry-run by
+  default and deletes only with explicit `--delete`.
+- Other `mac-cleanup` flows currently plan cleanup candidates only. They do not
+  delete or move files.
 - Treat cleanup output as review material. Ask the user before any future apply
   flow removes or trashes files.
+
+```bash
+mac-cleanup xcode-runtimes
+mac-cleanup xcode-runtimes --delete
+```
 
 ## Audio Crackle Workflow
 
@@ -182,11 +198,46 @@ mac-audio-reset reset
 - One-time privileged helper setup:
 
 ```bash
+mac-infra-core request-permissions sudo
 mac-infra-core install
 mac-infra-core status
 ```
 
+- Use `mac-infra-core request-permissions sudo` when sudo credentials are
+  needed. Do not run ad hoc `sudo` commands from the shell for mac-infra work;
+  let the Go CLI own the sudo prompt and permission scope.
+- This is separate from Full Disk Access. Do not grant Full Disk Access to
+  Terminal, iTerm2, Cursor, VS Code, or another broad launcher.
+
 After installation, `mac-audio-reset reset` should not need interactive `sudo`.
+
+## AnyConnect Socket Filter Cleanup Workflow
+
+- Start with read-only diagnostics:
+
+```bash
+mac-load-profile anyconnect
+```
+
+- If AnyConnect reports disconnected but `com.cisco.anyconnect.macos.acsockext`
+  is still hot or large, inspect the cleanup plan:
+
+```bash
+mac-infra-core anyconnect-cleanup
+```
+
+- Run cleanup only when the user explicitly asks to kill/clean/reset Cisco
+  AnyConnect, or after they approve the dry-run plan:
+
+```bash
+mac-infra-core anyconnect-cleanup --apply
+```
+
+- The apply path is allowlisted in `mac-infra-core`: it verifies AnyConnect is
+  disconnected, terminates the Cisco socket-filter extension process, and
+  restarts `com.cisco.anyconnect.vpnagentd` through `launchctl kickstart`.
+- Do not use ad hoc `sudo`, broad `killall`, packet capture, traffic blocking,
+  or TLS interception for this workflow.
 
 ## Operational Notes
 

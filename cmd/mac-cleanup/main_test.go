@@ -119,6 +119,47 @@ func TestRunHasNoCleanDeletionCommand(t *testing.T) {
 	}
 }
 
+func TestRunXcodeRuntimesDryRunDoesNotDelete(t *testing.T) {
+	workspace := localCLITempDir(t)
+	fakeXcrun, deleteLog := writeFakeXcrun(t, workspace)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"xcode-runtimes", "--xcrun", fakeXcrun}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"xcode-simulator-runtimes", "iOS", "13.5", "dry-run", "pass --delete"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q: %s", want, out)
+		}
+	}
+	if _, err := os.Stat(deleteLog); !os.IsNotExist(err) {
+		t.Fatalf("delete log exists after dry-run or stat errored: %v", err)
+	}
+}
+
+func TestRunXcodeRuntimesDeleteCallsSimctlRuntimeDelete(t *testing.T) {
+	workspace := localCLITempDir(t)
+	fakeXcrun, deleteLog := writeFakeXcrun(t, workspace)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"xcode-runtimes", "--delete", "--xcrun", fakeXcrun}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "deleted: iOS 13.5") {
+		t.Fatalf("stdout missing delete confirmation: %s", stdout.String())
+	}
+	data, err := os.ReadFile(deleteLog)
+	if err != nil {
+		t.Fatalf("read delete log: %v", err)
+	}
+	if !strings.Contains(string(data), "simctl runtime delete C20712BB-6F3A-4658-9C37-114C434C8CC5") {
+		t.Fatalf("delete log = %s", string(data))
+	}
+}
+
 func TestRunPermissionsPrintsFullDiskAccessGuide(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"permissions"}, &stdout, &stderr)
@@ -190,4 +231,62 @@ func localCLITempDir(t *testing.T) string {
 		}
 	})
 	return abs
+}
+
+func writeFakeXcrun(t *testing.T, workspace string) (string, string) {
+	t.Helper()
+	deleteLog := filepath.Join(workspace, "delete.log")
+	scriptPath := filepath.Join(workspace, "xcrun")
+	script := `#!/bin/sh
+case "$*" in
+  "simctl runtime list --json")
+    cat <<'JSON'
+{
+  "C20712BB-6F3A-4658-9C37-114C434C8CC5" : {
+    "build" : "17F61",
+    "deletable" : true,
+    "identifier" : "C20712BB-6F3A-4658-9C37-114C434C8CC5",
+    "kind" : "Legacy Download",
+    "path" : "/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 13.5.simruntime",
+    "platformIdentifier" : "com.apple.platform.iphonesimulator",
+    "runtimeIdentifier" : "com.apple.CoreSimulator.SimRuntime.iOS-13-5",
+    "sizeBytes" : 6568505344,
+    "state" : "Ready",
+    "version" : "13.5"
+  },
+  "63DFA8B0-4C1D-41FC-B7AB-9F3C93C47234" : {
+    "build" : "23E244",
+    "deletable" : true,
+    "identifier" : "63DFA8B0-4C1D-41FC-B7AB-9F3C93C47234",
+    "kind" : "Patchable Cryptex Disk Image",
+    "path" : "/System/Library/AssetsV2/current/Restore/current.dmg",
+    "platformIdentifier" : "com.apple.platform.iphonesimulator",
+    "runtimeIdentifier" : "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
+    "sizeBytes" : 8485747282,
+    "state" : "Ready",
+    "version" : "26.4"
+  }
+}
+JSON
+    ;;
+  "simctl list runtimes")
+    cat <<'TEXT'
+== Runtimes ==
+iOS 13.5 (13.5 - 17F61) - com.apple.CoreSimulator.SimRuntime.iOS-13-5 (unavailable, The iOS 13.5 simulator runtime is not supported on this host.)
+iOS 26.4 (26.4 - 23E244) - com.apple.CoreSimulator.SimRuntime.iOS-26-4
+TEXT
+    ;;
+  "simctl runtime delete C20712BB-6F3A-4658-9C37-114C434C8CC5")
+    echo "$*" >> "` + deleteLog + `"
+    ;;
+  *)
+    echo "unexpected args: $*" >&2
+    exit 99
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return scriptPath, deleteLog
 }

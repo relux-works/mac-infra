@@ -3,6 +3,24 @@
 > Institutional memory. Concise, factual, high-signal.
 > Newest entries first. One block per insight.
 
+## 2026-06-12
+
+### 1337 - AnyConnect Socket Filter Cleanup
+- FINDING: Cisco AnyConnect can report `Disconnected` while `com.cisco.anyconnect.macos.acsockext` remains activated/enabled and resident around `869MB`.
+- FIX: Added `mac-load-profile anyconnect` for read-only VPN state, system extension, `acsockext`, and `vpnagentd` diagnostics.
+- FIX: Added `mac-infra-core anyconnect-cleanup` dry-run plus allowlisted `cleanup_anyconnect` apply action guarded by `vpn status == Disconnected`.
+- SCOPE: `internal/anyconnect`, `cmd/mac-load-profile`, `cmd/mac-infra-core`, `internal/maccore`, `README.md`, `agents/skills/mac-infra/SKILL.md`.
+- STATUS: User-level setup installed updated CLI/skill; root daemon reinstall is pending interactive sudo before `--apply` can run live.
+
+## 2026-05-21
+
+### 1121 - CoreSimulator Runtime Cleanup
+- ROOT CAUSE: Xcode stale simulator entries came from unsupported legacy `.simruntime` bundles under `/Library/Developer/CoreSimulator/Profiles/Runtimes`, not from unavailable device records.
+- FIX: Removed iOS 13.5, 14.2, 14.5, and 15.0 runtimes with `xcrun simctl runtime delete`; `simctl list runtimes` now shows only supported installed runtimes.
+- FIX: Added `mac-cleanup xcode-runtimes` to detect `unavailable` + `deletable` runtimes and delete them only with explicit `--delete`.
+- SCOPE: `cmd/mac-cleanup/main.go`, `internal/simcleanup/runtime.go`, `agents/skills/mac-infra/SKILL.md`, `README.md`.
+- STATUS: Verified with `go test ./...`, `scripts/setup.sh`, and installed `mac-cleanup xcode-runtimes`.
+
 ## 2026-05-19
 
 ### 1600 - Cleanup Planner Test Roots

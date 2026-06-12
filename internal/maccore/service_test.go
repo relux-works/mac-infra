@@ -1,8 +1,10 @@
 package maccore
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,6 +71,51 @@ func TestDaemonRejectsUnsupportedAction(t *testing.T) {
 	}
 }
 
+func TestCleanupAnyConnectRefusesConnectedVPN(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	withFakeCoreCommand(t, logPath)
+	t.Setenv("MAC_INFRA_TEST_VPN_STATUS", ">> state: Connected")
+
+	results, err := cleanupAnyConnect(false)
+
+	if err == nil {
+		t.Fatal("cleanupAnyConnect error = nil, want refusal")
+	}
+	if !strings.Contains(err.Error(), "refusing AnyConnect cleanup") {
+		t.Fatalf("error = %q, want refusal", err)
+	}
+	if got, want := len(results), 1; got != want {
+		t.Fatalf("len(results) = %d, want %d", got, want)
+	}
+	if calls := readCommandLog(t, logPath); calls != "/opt/cisco/anyconnect/bin/vpn status\n" {
+		t.Fatalf("calls = %q, want only vpn status", calls)
+	}
+}
+
+func TestCleanupAnyConnectRunsAllowlistedCommandsWhenDisconnected(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	withFakeCoreCommand(t, logPath)
+	t.Setenv("MAC_INFRA_TEST_VPN_STATUS", ">> state: Disconnected")
+
+	results, err := cleanupAnyConnect(false)
+
+	if err != nil {
+		t.Fatalf("cleanupAnyConnect error = %v", err)
+	}
+	if got, want := len(results), 3; got != want {
+		t.Fatalf("len(results) = %d, want %d", got, want)
+	}
+	wantCalls := strings.Join([]string{
+		"/opt/cisco/anyconnect/bin/vpn status",
+		"/usr/bin/pkill -TERM -f com[.]cisco[.]anyconnect[.]macos[.]acsockext",
+		"/bin/launchctl kickstart -k system/com.cisco.anyconnect.vpnagentd",
+		"",
+	}, "\n")
+	if calls := readCommandLog(t, logPath); calls != wantCalls {
+		t.Fatalf("calls = %q, want %q", calls, wantCalls)
+	}
+}
+
 func tempSocketPath(t *testing.T, prefix string) string {
 	t.Helper()
 	path := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d.sock", prefix, time.Now().UnixNano()))
@@ -98,4 +145,65 @@ func waitForSocket(t *testing.T, cfg ServiceConfig, errCh <-chan error) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("socket %s did not become reachable", cfg.SocketPath)
+}
+
+func withFakeCoreCommand(t *testing.T, logPath string) {
+	t.Helper()
+	original := execCommandContextCore
+	execCommandContextCore = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		helperArgs := []string{"-test.run=TestCoreCommandHelperProcess", "--", name}
+		helperArgs = append(helperArgs, args...)
+		cmd := exec.CommandContext(ctx, os.Args[0], helperArgs...)
+		cmd.Env = append(os.Environ(),
+			"GO_WANT_CORE_COMMAND_HELPER=1",
+			"MAC_INFRA_TEST_COMMAND_LOG="+logPath,
+		)
+		return cmd
+	}
+	t.Cleanup(func() {
+		execCommandContextCore = original
+	})
+}
+
+func readCommandLog(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	return string(raw)
+}
+
+func TestCoreCommandHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_CORE_COMMAND_HELPER") != "1" {
+		return
+	}
+	args := os.Args
+	separator := -1
+	for idx, arg := range args {
+		if arg == "--" {
+			separator = idx
+			break
+		}
+	}
+	if separator < 0 || separator+1 >= len(args) {
+		os.Exit(2)
+	}
+	command := strings.Join(args[separator+1:], " ")
+	if logPath := os.Getenv("MAC_INFRA_TEST_COMMAND_LOG"); logPath != "" {
+		file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprintln(file, command)
+		_ = file.Close()
+	}
+	switch args[separator+1] {
+	case "/opt/cisco/anyconnect/bin/vpn":
+		fmt.Fprintln(os.Stdout, os.Getenv("MAC_INFRA_TEST_VPN_STATUS"))
+	case "/usr/bin/pkill", "/bin/launchctl":
+	default:
+		os.Exit(127)
+	}
+	os.Exit(0)
 }
