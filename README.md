@@ -10,9 +10,10 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-load-profile` | Capture read-only CPU, memory, process, thermal, pressure, disk, and network diagnostics | `mac-load-profile capture`, `mac-load-profile snapshot`, `mac-load-profile inspect sing-box`, `mac-load-profile tunnel`, `mac-load-profile anyconnect` | `.temp/mac-load-profile/capture-*`, optional `sample-*.txt` |
 | `mac-disk-profile` | Profile disk usage and explain heavy paths without deleting files | `mac-disk-profile scan PATH`, `mac-disk-profile top PATH`, `mac-disk-profile explain PATH` | optional JSON artifact via `--json PATH` |
 | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
+| `mac-safari-session` | Read and harvest authenticated Safari pages through Apple Events without exporting cookies | `mac-safari-session open-bg URL`, `mac-safari-session check-js`, `mac-safari-session snapshot --url URL --json PATH`, `mac-safari-session fetch-file --page URL --resource URL --out PATH` | temporary JS under `.temp/mac-safari-session/`, optional snapshots/download metadata wherever specified |
 | `mac-infra-core` | Privileged LaunchDaemon helper for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | `/Library/LaunchDaemons/works.relux.mac-infra-core.plist`, `/var/run/works.relux.mac-infra-core.sock` |
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
-| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-load-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
+| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-load-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
 | `scripts/deinit.sh` | Remove user-level installation | `./scripts/deinit.sh` | removes symlinks and runtime skill copy |
 
 ## Audio Reset Workflow
@@ -105,3 +106,60 @@ mac-cleanup permissions
 `scan`, `target`, and `xcode` are read-only planners. They print category, risk, default selection, byte totals, candidate counts, and reasons. If macOS denies access to protected paths, the plan continues with warnings. Avoid granting Full Disk Access to broad launchers such as Terminal, iTerm2, Cursor, or VS Code; every process launched from that app may inherit the access. `mac-cleanup permissions --open` intentionally returns `not implemented` until a dedicated narrow Full Disk Access runner exists. The optional JSON output is a versioned cleanup `Plan` written with `0600` file permissions; using `--json` without a path writes under `.temp/mac-cleanup/`.
 
 `mac-cleanup xcode-runtimes` is a narrow exception for stale simulator runtimes: it cross-checks `xcrun simctl runtime list --json` with `xcrun simctl list runtimes`, reports only `unavailable` and `deletable` runtimes, and is dry-run by default. Pass `--delete` to remove those runtimes via `xcrun simctl runtime delete <identifier>`.
+
+## Safari Browser Session Workflow
+
+Use this when an agent needs to inspect or harvest a page that is already authenticated in the user's Safari profile.
+
+Core safety rule: Safari keeps the cookies. `mac-safari-session` does not export, print, copy, or persist cookies, authorization headers, or browser storage. Authenticated downloads are performed inside the Safari page context with `fetch(..., { credentials: "include" })`, and only the response body plus sanitized response metadata are returned to the local project.
+
+Before JavaScript extraction works, enable Safari automation manually:
+
+```bash
+# Safari UI
+Safari -> Settings -> Advanced -> Show features for web developers
+Develop -> Allow JavaScript from Apple Events
+```
+
+Check the permission:
+
+```bash
+mac-safari-session check-js
+```
+
+Open a page without activating Safari and minimize the new Safari window:
+
+```bash
+mac-safari-session open-bg "https://example.com/private/page"
+```
+
+Capture page text and links:
+
+```bash
+mac-safari-session snapshot \
+  --url "https://example.com/private/page" \
+  --json .temp/mac-safari-session/page-snapshot.json
+```
+
+Run guarded DOM JavaScript against the current Safari front document:
+
+```bash
+mac-safari-session run-js --script 'document.body.innerText.slice(0, 5000)'
+mac-safari-session run-js --file .temp/mac-safari-session/extract.js --out .temp/mac-safari-session/result.txt
+```
+
+The guarded JS path refuses obvious browser-secret reads such as `document.cookie`, `cookieStore`, `localStorage`, and `sessionStorage`. Use it for DOM extraction and page-state inspection, not credential dumping.
+
+Fetch a resource that direct `curl` cannot access because authentication lives in Safari:
+
+```bash
+mac-safari-session fetch-file \
+  --page "https://example.com/private/page" \
+  --resource "/api/private/file.pdf" \
+  --out documents/raw/file.pdf \
+  --meta documents/raw/file.pdf.json
+```
+
+`fetch-file` stores the base64 body in Safari memory as chunks, pulls the chunks back through Apple Events, decodes locally, writes the output file with `0600` permissions, and clears the Safari fetch job after the final chunk.
+
+Safari has no true headless mode with the live user profile. Background mode avoids focus churn by using Apple Events without `activate` and then minimizing the created Safari window. Screenshots are intentionally outside this CLI because they require Screen Recording permission for the terminal app.

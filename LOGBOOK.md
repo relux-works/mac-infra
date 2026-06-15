@@ -3,6 +3,15 @@
 > Institutional memory. Concise, factual, high-signal.
 > Newest entries first. One block per insight.
 
+## 2026-06-15
+
+### 1632 - Safari Browser Session Harvest
+- DECISION: Authenticated browser harvest uses Safari Apple Events and page-context `fetch(..., { credentials: "include" })`; cookies and browser storage stay inside Safari.
+- FIX: Added `mac-safari-session` CLI plus reusable `internal/safarictl` package for background open, JS permission check, DOM snapshot, guarded JS, and chunked authenticated file fetch.
+- FIX: Guard rejects obvious secret reads: `document.cookie`, `cookieStore`, `localStorage`, and `sessionStorage`; response metadata drops sensitive headers.
+- SCOPE: `cmd/mac-safari-session`, `internal/safarictl`, `README.md`, `agents/skills/mac-infra/SKILL.md`, `scripts/setup.sh`, `scripts/deinit.sh`.
+- STATUS: Verified with `go test ./...`, `./scripts/setup.sh`, installed CLI help, cookie guard smoke, live `mac-safari-session check-js`, and `task-board validate`.
+
 ## 2026-06-12
 
 ### 1337 - AnyConnect Socket Filter Cleanup

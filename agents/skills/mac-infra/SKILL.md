@@ -3,8 +3,9 @@ name: mac-infra
 description: >
   macOS workstation infrastructure tooling for diagnosing and fixing local Mac
   audio crackling, CoreAudio daemon glitches, Simulator audio issues, Apple
-  Music distortion, USB DAC output problems, Bluetooth output problems, and
-  broad CPU, memory, thermal, process load, and related maintenance tasks.
+  Music distortion, USB DAC output problems, Bluetooth output problems,
+  authenticated Safari browser-session inspection/harvesting, and broad CPU,
+  memory, thermal, process load, and related maintenance tasks.
 triggers:
   - mac load
   - load profile
@@ -67,12 +68,101 @@ triggers:
   - почистить мак
   - чистка мака
   - клинап мака
+  - safari automation
+  - Safari Apple Events
+  - browser automation
+  - browser harvest
+  - authenticated browser
+  - authenticated Safari
+  - Safari cookies
+  - reuse browser cookies
+  - read browser page
+  - harvest browser page
+  - сафари
+  - браузер
+  - автоматизация сафари
+  - кукисы
+  - вычитать браузер
+  - потрошить браузер
+  - харвестить браузер
 ---
 
 # mac-infra
 
 Use this skill for macOS local maintenance workflows backed by the `mac-infra`
 Go tools.
+
+## Safari Browser Session Workflow
+
+Use this when the user asks to inspect, click, extract, or download from a page
+that is already authenticated in their local Safari profile.
+
+Core rule: use Safari as the authenticated browser and do not export, dump, copy,
+log, or persist cookies, browser storage, authorization headers, or tokens. Let
+Safari make same-origin/authenticated requests. Persist only page content,
+downloaded files, sanitized response metadata, endpoint shapes, and notes.
+
+Safari has no real headless mode with the user's live profile. Prefer background
+Apple Events to avoid focus churn:
+
+```bash
+mac-safari-session open-bg "https://example.com/private/page"
+```
+
+Before DOM extraction or page-context fetch, verify JavaScript-from-Apple-Events
+permission:
+
+```bash
+mac-safari-session check-js
+```
+
+If Safari blocks the command, the user must enable it manually:
+
+```text
+Safari -> Settings -> Advanced -> Show features for web developers
+Develop -> Allow JavaScript from Apple Events
+```
+
+For a page read, capture DOM text and links:
+
+```bash
+mac-safari-session snapshot \
+  --url "https://example.com/private/page" \
+  --json .temp/mac-safari-session/page-snapshot.json
+```
+
+For custom DOM extraction, use guarded JavaScript:
+
+```bash
+mac-safari-session run-js --script 'document.body.innerText.slice(0, 5000)'
+mac-safari-session run-js --file .temp/mac-safari-session/extract.js --out .temp/mac-safari-session/result.txt
+```
+
+`run-js` refuses obvious browser-secret reads such as `document.cookie`,
+`cookieStore`, `localStorage`, and `sessionStorage`. Do not bypass this by
+writing ad hoc AppleScript for secret extraction.
+
+For authenticated downloads where direct `curl` returns `401` or otherwise lacks
+the Safari session, fetch inside the page context and pull the response body back
+as base64 chunks:
+
+```bash
+mac-safari-session fetch-file \
+  --page "https://example.com/private/page" \
+  --resource "/api/private/file.pdf" \
+  --out documents/raw/file.pdf \
+  --meta documents/raw/file.pdf.json
+```
+
+Operational notes:
+
+- `fetch-file` uses `fetch(..., { credentials: "include" })` inside Safari.
+- The CLI writes output files with `0600` permissions.
+- Response headers are sanitized before metadata is written.
+- Screenshots are not part of this CLI because they require Screen Recording
+  permission for the terminal app.
+- Store durable endpoint/selector/limitation notes in the active project's
+  research or task flow. Do not leave browser-harvest discoveries only in chat.
 
 ## Load Profiling Workflow
 
