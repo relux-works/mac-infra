@@ -8,12 +8,13 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | --- | --- | --- | --- |
 | `mac-audio-reset` | Diagnose and reset CoreAudio glitches without rebooting the Mac | `mac-audio-reset diagnose`, `mac-audio-reset reset --dry-run`, `mac-audio-reset reset` | none; diagnostic output only |
 | `mac-load-profile` | Capture read-only CPU, memory, process, thermal, pressure, disk, and network diagnostics | `mac-load-profile capture`, `mac-load-profile snapshot`, `mac-load-profile inspect sing-box`, `mac-load-profile tunnel`, `mac-load-profile anyconnect` | `.temp/mac-load-profile/capture-*`, optional `sample-*.txt` |
+| `mac-video-profile` | Diagnose macOS video/display smoothness loss, WindowServer/GPU pressure, and Docker/VM rendering load | `mac-video-profile snapshot`, `mac-video-profile capture --logs` | `.temp/mac-video-profile/capture-*` |
 | `mac-disk-profile` | Profile disk usage and explain heavy paths without deleting files | `mac-disk-profile scan PATH`, `mac-disk-profile top PATH`, `mac-disk-profile explain PATH` | optional JSON artifact via `--json PATH` |
 | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
 | `mac-safari-session` | Read and harvest authenticated Safari pages through Apple Events without exporting cookies | `mac-safari-session open-bg URL`, `mac-safari-session check-js`, `mac-safari-session snapshot --url URL --json PATH`, `mac-safari-session fetch-file --page URL --resource URL --out PATH` | temporary JS under `.temp/mac-safari-session/`, optional snapshots/download metadata wherever specified |
 | `mac-infra-core` | Privileged LaunchDaemon helper for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | `/Library/LaunchDaemons/works.relux.mac-infra-core.plist`, `/var/run/works.relux.mac-infra-core.sock` |
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
-| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-load-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
+| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
 | `scripts/deinit.sh` | Remove user-level installation | `./scripts/deinit.sh` | removes symlinks and runtime skill copy |
 
 ## Audio Reset Workflow
@@ -78,6 +79,24 @@ mac-load-profile tunnel
 ```
 
 `capture` writes a broad read-only artifact bundle under `.temp/mac-load-profile/capture-*`. It includes process, CPU, memory, pressure, thermal, disk, network, power assertion, route, and OS/hardware evidence. It does not stop, restart, kill, or mutate processes. Use `--logs` only when recent system pressure logs are needed.
+
+## Video Smoothness Workflow
+
+Use this when video playback, scrolling, UI animations, or Docker/VM-heavy work
+start looking discrete or slideshow-like while the Mac still responds.
+
+```bash
+mac-video-profile snapshot --top 20
+mac-video-profile capture --logs
+```
+
+`snapshot` prints read-only triage for compositor, display services, GPU/media,
+Docker/virtualization, and browser/Electron/video process groups. `capture`
+writes a durable bundle under `.temp/mac-video-profile/capture-*` with
+`summary.txt`, display/GPU topology, thermal and memory pressure, power
+assertions, process snapshots, display registry state, and optional bounded
+WindowServer/display/GPU/Metal/frame logs. It does not reset WindowServer, kill
+apps, change refresh rate, or require privileged sampling.
 
 ## Disk Profiling Workflow
 

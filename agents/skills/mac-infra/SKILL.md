@@ -3,9 +3,10 @@ name: mac-infra
 description: >
   macOS workstation infrastructure tooling for diagnosing and fixing local Mac
   audio crackling, CoreAudio daemon glitches, Simulator audio issues, Apple
-  Music distortion, USB DAC output problems, Bluetooth output problems,
-  authenticated Safari browser-session inspection/harvesting, and broad CPU,
-  memory, thermal, process load, and related maintenance tasks.
+  Music distortion, USB DAC output problems, Bluetooth output problems, macOS
+  video/display smoothness loss, WindowServer/GPU stutter, Docker/VM slideshow
+  symptoms, and broad CPU, memory, thermal, process load, authenticated Safari
+  browser-session inspection/harvesting, and related maintenance tasks.
 triggers:
   - mac load
   - load profile
@@ -26,6 +27,21 @@ triggers:
   - top processes
   - activity monitor
   - Mac is hot
+  - mac video
+  - macOS video
+  - video stutter
+  - display stutter
+  - WindowServer
+  - GPU stutter
+  - slideshow
+  - Docker slideshow
+  - video smoothness
+  - плавность видео
+  - видео лагает
+  - слайдшоу на маке
+  - дискретность видео
+  - дергается видео
+  - WindowServer жрет
   - mac audio
   - macOS audio
   - audio crackle
@@ -207,6 +223,30 @@ mac-load-profile anyconnect --logs
 
 - `mac-load-profile` is read-only. It must not stop, restart, kill, or mutate
   processes.
+
+## Video Smoothness Workflow
+
+- For subtle slideshow-like video/UI animation stutter, especially when Docker
+  or VM work is active, start with read-only video/display triage:
+
+```bash
+mac-video-profile snapshot --top 20
+```
+
+- For a durable bundle with display/GPU topology, WindowServer/process evidence,
+  thermal and memory pressure, power assertions, display registry state, and
+  optional recent WindowServer/display/GPU/Metal/frame logs:
+
+```bash
+mac-video-profile capture --logs
+```
+
+- Capture artifacts are written under `.temp/mac-video-profile/capture-*`.
+- `mac-video-profile` is read-only. It must not reset WindowServer, kill apps,
+  change refresh rate, change display settings, run privileged `powermetrics`,
+  or mutate Docker/VM state.
+- Use `mac-load-profile capture` after this only when the evidence points to a
+  broader CPU, memory, thermal, disk, network, or process-load issue.
 
 ## Disk Space Profiling Workflow
 
