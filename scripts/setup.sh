@@ -60,6 +60,8 @@ echo "Building mac-audio-reset..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-audio-reset" ./cmd/mac-audio-reset
 echo "Building mac-load-profile..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-load-profile" ./cmd/mac-load-profile
+echo "Building mac-video-profile..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-video-profile" ./cmd/mac-video-profile
 echo "Building mac-disk-profile..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-disk-profile" ./cmd/mac-disk-profile
 echo "Building mac-cleanup..."
@@ -71,6 +73,7 @@ go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-inf
 
 ln -sf "$BUILD_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-reset"
 ln -sf "$BUILD_DIR/mac-load-profile" "$BIN_DIR/mac-load-profile"
+ln -sf "$BUILD_DIR/mac-video-profile" "$BIN_DIR/mac-video-profile"
 ln -sf "$BUILD_DIR/mac-disk-profile" "$BIN_DIR/mac-disk-profile"
 ln -sf "$BUILD_DIR/mac-cleanup" "$BIN_DIR/mac-cleanup"
 ln -sf "$BUILD_DIR/mac-safari-session" "$BIN_DIR/mac-safari-session"
@@ -78,6 +81,7 @@ ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
 echo "Installed binary symlinks:"
 echo "  $BIN_DIR/mac-audio-reset -> $BUILD_DIR/mac-audio-reset"
 echo "  $BIN_DIR/mac-load-profile -> $BUILD_DIR/mac-load-profile"
+echo "  $BIN_DIR/mac-video-profile -> $BUILD_DIR/mac-video-profile"
 echo "  $BIN_DIR/mac-disk-profile -> $BUILD_DIR/mac-disk-profile"
 echo "  $BIN_DIR/mac-cleanup     -> $BUILD_DIR/mac-cleanup"
 echo "  $BIN_DIR/mac-safari-session -> $BUILD_DIR/mac-safari-session"
