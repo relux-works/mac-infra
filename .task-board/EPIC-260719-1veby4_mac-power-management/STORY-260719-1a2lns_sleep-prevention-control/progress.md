@@ -1,14 +1,11 @@
 ## Status
-to-review
+done
 
-## Assigned To
-(none)
+## Review
+required
 
-## Created
-2026-06-15T10:57:44Z
-
-## Last Update
-2026-07-23T15:30:12Z
+## Task Class
+code
 
 ## Blocked By
 - (none)
@@ -26,3 +23,9 @@ to-review
 
 ## Outcome Resources
 (none)
+
+## Created
+2026-07-19T14:17:22Z
+
+## Last Update
+2026-07-19T14:53:56Z
