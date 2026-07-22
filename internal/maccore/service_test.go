@@ -71,6 +71,73 @@ func TestDaemonRejectsUnsupportedAction(t *testing.T) {
 	}
 }
 
+func TestDaemonSleepPreventionActionsRunOnlyFixedPMSetCommands(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	withFakeCoreCommand(t, logPath)
+	socketPath := tempSocketPath(t, "mic-sp")
+	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+	}()
+	waitForSocket(t, cfg, errCh)
+
+	enableResponse, err := EnableSleepPrevention(cfg)
+	if err != nil {
+		t.Fatalf("EnableSleepPrevention error = %v", err)
+	}
+	disableResponse, err := DisableSleepPrevention(cfg)
+	if err != nil {
+		t.Fatalf("DisableSleepPrevention error = %v", err)
+	}
+
+	if got, want := len(enableResponse.Commands), 1; got != want {
+		t.Fatalf("len(enableResponse.Commands) = %d, want %d", got, want)
+	}
+	if got, want := enableResponse.Commands[0].Command, "/usr/bin/pmset -a disablesleep 1"; got != want {
+		t.Fatalf("enable command = %q, want %q", got, want)
+	}
+	if got, want := len(disableResponse.Commands), 1; got != want {
+		t.Fatalf("len(disableResponse.Commands) = %d, want %d", got, want)
+	}
+	if got, want := disableResponse.Commands[0].Command, "/usr/bin/pmset -a disablesleep 0"; got != want {
+		t.Fatalf("disable command = %q, want %q", got, want)
+	}
+	wantCalls := "/usr/bin/pmset -a disablesleep 1\n/usr/bin/pmset -a disablesleep 0\n"
+	if calls := readCommandLog(t, logPath); calls != wantCalls {
+		t.Fatalf("calls = %q, want %q", calls, wantCalls)
+	}
+}
+
+func TestDaemonSleepPreventionReturnsCommandFailure(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	withFakeCoreCommand(t, logPath)
+	t.Setenv("MAC_INFRA_TEST_PMSET_FAIL_COMMAND", "/usr/bin/pmset -a disablesleep 1")
+	t.Setenv("MAC_INFRA_TEST_PMSET_FAILURE", "operation not permitted")
+	socketPath := tempSocketPath(t, "mic-sp-fail")
+	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+	}()
+	waitForSocket(t, cfg, errCh)
+
+	response, err := EnableSleepPrevention(cfg)
+
+	if err == nil || !strings.Contains(err.Error(), "operation not permitted") {
+		t.Fatalf("EnableSleepPrevention error = %v, want command failure", err)
+	}
+	if response.OK {
+		t.Fatalf("response.OK = true, want false")
+	}
+	if got, want := len(response.Commands), 1; got != want {
+		t.Fatalf("len(response.Commands) = %d, want %d", got, want)
+	}
+	if got, want := response.Commands[0].Command, "/usr/bin/pmset -a disablesleep 1"; got != want {
+		t.Fatalf("command = %q, want %q", got, want)
+	}
+}
+
 func TestCleanupAnyConnectRefusesConnectedVPN(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "commands.log")
 	withFakeCoreCommand(t, logPath)
@@ -202,6 +269,14 @@ func TestCoreCommandHelperProcess(t *testing.T) {
 	case "/opt/cisco/anyconnect/bin/vpn":
 		fmt.Fprintln(os.Stdout, os.Getenv("MAC_INFRA_TEST_VPN_STATUS"))
 	case "/usr/bin/pkill", "/bin/launchctl":
+	case "/usr/bin/pmset":
+		if os.Getenv("MAC_INFRA_TEST_PMSET_FAIL_COMMAND") == command {
+			fmt.Fprintln(os.Stderr, os.Getenv("MAC_INFRA_TEST_PMSET_FAILURE"))
+			os.Exit(9)
+		}
+		if command == "/usr/bin/pmset -g" {
+			fmt.Fprintln(os.Stdout, os.Getenv("MAC_INFRA_TEST_PMSET_OUTPUT"))
+		}
 	default:
 		os.Exit(127)
 	}

@@ -1,7 +1,17 @@
 package maccore
 
+type Action string
+
+const (
+	ActionPing                   Action = "ping"
+	ActionRestartAudio           Action = "restart_audio"
+	ActionCleanupAnyConnect      Action = "cleanup_anyconnect"
+	ActionSleepPreventionEnable  Action = "sleep_prevention_enable"
+	ActionSleepPreventionDisable Action = "sleep_prevention_disable"
+)
+
 type Request struct {
-	Action          string `json:"action"`
+	Action          Action `json:"action"`
 	IncludeUSBAudio bool   `json:"include_usb_audio,omitempty"`
 	Force           bool   `json:"force,omitempty"`
 }

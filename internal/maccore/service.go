@@ -34,7 +34,7 @@ func InspectService(cfg ServiceConfig) (ServiceStatus, error) {
 		PlistPath:  cfg.PlistPath,
 		SocketPath: cfg.SocketPath,
 	}
-	resp, err := Call(cfg, Request{Action: "ping"})
+	resp, err := Call(cfg, Request{Action: ActionPing})
 	if err != nil {
 		if isUnavailable(err) {
 			return status, nil
@@ -71,16 +71,24 @@ func Call(cfg ServiceConfig, request Request) (Response, error) {
 
 func RestartAudio(cfg ServiceConfig, includeUSBAudio bool) (Response, error) {
 	return Call(cfg, Request{
-		Action:          "restart_audio",
+		Action:          ActionRestartAudio,
 		IncludeUSBAudio: includeUSBAudio,
 	})
 }
 
 func CleanupAnyConnect(cfg ServiceConfig, force bool) (Response, error) {
 	return Call(cfg, Request{
-		Action: "cleanup_anyconnect",
+		Action: ActionCleanupAnyConnect,
 		Force:  force,
 	})
+}
+
+func EnableSleepPrevention(cfg ServiceConfig) (Response, error) {
+	return Call(cfg, Request{Action: ActionSleepPreventionEnable})
+}
+
+func DisableSleepPrevention(cfg ServiceConfig) (Response, error) {
+	return Call(cfg, Request{Action: ActionSleepPreventionDisable})
 }
 
 func RequestSudoCredentials() error {
@@ -216,16 +224,23 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 
 	response := Response{OK: true, DaemonPID: os.Getpid()}
 	switch request.Action {
-	case "ping":
-	case "restart_audio":
+	case ActionPing:
+	case ActionRestartAudio:
 		results, err := restartAudioDaemons(request.IncludeUSBAudio)
 		response.Commands = results
 		if err != nil {
 			response.OK = false
 			response.Error = err.Error()
 		}
-	case "cleanup_anyconnect":
+	case ActionCleanupAnyConnect:
 		results, err := cleanupAnyConnect(request.Force)
+		response.Commands = results
+		if err != nil {
+			response.OK = false
+			response.Error = err.Error()
+		}
+	case ActionSleepPreventionEnable, ActionSleepPreventionDisable:
+		results, err := applySleepPrevention(request.Action)
 		response.Commands = results
 		if err != nil {
 			response.OK = false

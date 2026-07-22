@@ -18,8 +18,11 @@ var (
 
 var (
 	inspectService         = maccore.InspectService
+	inspectSleepPrevention = maccore.InspectSleepPrevention
 	requestSudoCredentials = maccore.RequestSudoCredentials
 	cleanupAnyConnect      = maccore.CleanupAnyConnect
+	enableSleepPrevention  = maccore.EnableSleepPrevention
+	disableSleepPrevention = maccore.DisableSleepPrevention
 )
 
 func main() {
@@ -43,6 +46,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runRequestPermissions(args[1:], stdout, stderr)
 	case "anyconnect-cleanup":
 		return runAnyConnectCleanup(args[1:], stdout, stderr)
+	case "sleep-prevention":
+		return runSleepPrevention(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "mac-infra-core %s %s %s\n", Version, Commit, BuildDate)
 		return 0
@@ -221,6 +226,70 @@ func runAnyConnectCleanup(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runSleepPrevention(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		printSleepPreventionUsage(stderr)
+		return 2
+	}
+
+	switch args[0] {
+	case "enable":
+		return runSleepPreventionMutation(
+			"enable",
+			maccore.SleepPreventionStateEnabled,
+			enableSleepPrevention,
+			stdout,
+			stderr,
+		)
+	case "disable":
+		return runSleepPreventionMutation(
+			"disable",
+			maccore.SleepPreventionStateDisabled,
+			disableSleepPrevention,
+			stdout,
+			stderr,
+		)
+	case "status":
+		status, err := inspectSleepPrevention()
+		printSleepPreventionStatus(stdout, status)
+		if err != nil {
+			fmt.Fprintf(stderr, "sleep-prevention status failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "help", "--help", "-h":
+		printSleepPreventionUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown sleep-prevention command %q\n", args[0])
+		printSleepPreventionUsage(stderr)
+		return 2
+	}
+}
+
+func runSleepPreventionMutation(
+	operation string,
+	state maccore.SleepPreventionState,
+	call func(maccore.ServiceConfig) (maccore.Response, error),
+	stdout, stderr io.Writer,
+) int {
+	resp, err := call(maccore.DefaultServiceConfig())
+	if err != nil {
+		fmt.Fprintf(stderr, "sleep-prevention %s failed: %v\n", operation, err)
+		if len(resp.Commands) > 0 {
+			printCommandResults(stderr, resp.Commands)
+		}
+		return 1
+	}
+
+	printSleepPreventionStatus(stdout, maccore.SleepPreventionStatus{
+		State:     state,
+		AppliesTo: maccore.SleepPreventionAppliesTo,
+	})
+	printCommandResults(stdout, resp.Commands)
+	return 0
+}
+
 func runDaemon(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("_daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -248,6 +317,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  mac-infra-core status")
 	fmt.Fprintln(w, "  mac-infra-core request-permissions sudo")
 	fmt.Fprintln(w, "  mac-infra-core anyconnect-cleanup [--apply] [--force]")
+	fmt.Fprintln(w, "  mac-infra-core sleep-prevention enable|disable|status")
 	fmt.Fprintln(w, "  mac-infra-core version")
 }
 
@@ -257,6 +327,18 @@ func printRequestPermissionsUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Available permissions:")
 	fmt.Fprintln(w, "  sudo    cache sudo credentials for mac-infra-core privileged setup/actions")
+}
+
+func printSleepPreventionUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  mac-infra-core sleep-prevention enable")
+	fmt.Fprintln(w, "  mac-infra-core sleep-prevention disable")
+	fmt.Fprintln(w, "  mac-infra-core sleep-prevention status")
+}
+
+func printSleepPreventionStatus(w io.Writer, status maccore.SleepPreventionStatus) {
+	fmt.Fprintf(w, "sleep_prevention: %s\n", status.State)
+	fmt.Fprintf(w, "applies_to: %s\n", status.AppliesTo)
 }
 
 func printCommandResults(w io.Writer, results []maccore.CommandResult) {
