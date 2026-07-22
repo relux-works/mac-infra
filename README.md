@@ -7,15 +7,61 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | Tool | Purpose | Command | Artifacts |
 | --- | --- | --- | --- |
 | `mac-audio-reset` | Diagnose and reset CoreAudio glitches without rebooting the Mac | `mac-audio-reset diagnose`, `mac-audio-reset reset --dry-run`, `mac-audio-reset reset` | none; diagnostic output only |
+| `mac-audio-sweep` | Generate and play local frequency sweeps without streaming-platform compression or silent sample-rate mismatch | `mac-audio-sweep device`, `mac-audio-sweep tui`, `mac-audio-sweep tui --rerender`, `mac-audio-sweep generate --out .temp/mac-audio-sweep/sweep.wav` | cached TUI WAVs in `.temp/mac-audio-sweep/cache/*.wav`; one-shot/generated WAVs under `.temp/mac-audio-sweep/` unless `--out` points elsewhere |
 | `mac-load-profile` | Capture read-only CPU, memory, process, thermal, pressure, disk, and network diagnostics | `mac-load-profile capture`, `mac-load-profile snapshot`, `mac-load-profile inspect sing-box`, `mac-load-profile tunnel`, `mac-load-profile anyconnect` | `.temp/mac-load-profile/capture-*`, optional `sample-*.txt` |
 | `mac-video-profile` | Diagnose macOS video/display smoothness loss, WindowServer/GPU pressure, and Docker/VM rendering load | `mac-video-profile snapshot`, `mac-video-profile capture --logs` | `.temp/mac-video-profile/capture-*` |
 | `mac-disk-profile` | Profile disk usage and explain heavy paths without deleting files | `mac-disk-profile scan PATH`, `mac-disk-profile top PATH`, `mac-disk-profile explain PATH` | optional JSON artifact via `--json PATH` |
 | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
-| `mac-safari-session` | Read and harvest authenticated Safari pages through Apple Events without exporting cookies | `mac-safari-session open-bg URL`, `mac-safari-session check-js`, `mac-safari-session snapshot --url URL --json PATH`, `mac-safari-session fetch-file --page URL --resource URL --out PATH` | temporary JS under `.temp/mac-safari-session/`, optional snapshots/download metadata wherever specified |
-| `mac-infra-core` | Privileged LaunchDaemon helper for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | `/Library/LaunchDaemons/works.relux.mac-infra-core.plist`, `/var/run/works.relux.mac-infra-core.sock` |
+| `mac-safari-session` | Read and harvest authenticated Safari pages through Apple Events without exporting cookies | `mac-safari-session open-bg URL`, `mac-safari-session close-window --id ID`, `mac-safari-session check-js`, `mac-safari-session snapshot --url URL --json PATH`, `mac-safari-session fetch-file --page URL --resource URL --out PATH` | temporary JS under `.temp/mac-safari-session/`, optional snapshots/download metadata wherever specified |
+| `mac-infra-core` | Privileged LaunchDaemon helper for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention status`, `mac-infra-core sleep-prevention enable`, `mac-infra-core sleep-prevention disable`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | `/Library/LaunchDaemons/works.relux.mac-infra-core.plist`, `/var/run/works.relux.mac-infra-core.sock` |
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
-| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
+| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
 | `scripts/deinit.sh` | Remove user-level installation | `./scripts/deinit.sh` | removes symlinks and runtime skill copy |
+
+## Sleep Prevention Workflow
+
+Inspect the current policy without changing it:
+
+```bash
+mac-infra-core sleep-prevention status
+```
+
+The status command reads the one system-wide `SleepDisabled` value from `/usr/bin/pmset -g`. Output reports `sleep_prevention: enabled`, `disabled`, or `unavailable` and `applies_to: AC,battery`. AC and battery do not have independent `disablesleep` values; the coverage line describes the two power sources governed by the global setting.
+
+Enable or disable the persistent policy only when that change is intended:
+
+```bash
+mac-infra-core sleep-prevention enable
+mac-infra-core sleep-prevention disable
+```
+
+These mutations route through the root LaunchDaemon and can execute only `/usr/bin/pmset -a disablesleep 1` or `/usr/bin/pmset -a disablesleep 0`. The setting remains in effect after the command exits until it is explicitly changed; it is not a temporary `caffeinate` assertion. Neither action changes ordinary `sleep` timers, standby, `hibernatemode`, or `displaysleep`. The display can still turn off while system sleep prevention is enabled.
+
+`scripts/setup.sh` installs the user-level binary and skill but does not restart an already running privileged daemon. After the first setup and after every `mac-infra-core` binary update, install/reinstall the daemon before using `enable` or `disable`:
+
+```bash
+./scripts/setup.sh
+mac-infra-core request-permissions sudo
+mac-infra-core install
+mac-infra-core sleep-prevention status
+```
+
+## Audio Sweep Workflow
+
+Use this when you need a local hearing or output-chain frequency sweep and do not want YouTube or another streaming path to compress, resample, or filter the signal.
+
+```bash
+mac-audio-sweep device
+mac-audio-sweep tui
+mac-audio-sweep tui --rerender
+mac-audio-sweep generate --out .temp/mac-audio-sweep/manual-sweep.wav
+```
+
+Defaults generate a 96 kHz, 16-bit PCM WAV from 1 Hz to 44 kHz. The first low-frequency ramp goes from 1 Hz to 50 Hz over 90 seconds, starting near +1 Hz per 5 seconds and then accelerating smoothly before the high-frequency exponential sweep. The TUI shows the current frequency, slope, elapsed time, sample-rate/Nyquist limit, and supports `r` to restart and `q`, `esc`, or `ctrl+c` to exit.
+
+`mac-audio-sweep tui` caches rendered WAVs by normalized sweep parameters under `.temp/mac-audio-sweep/cache/`. If the matching WAV exists, playback starts from the cached file; if it is missing, the tool renders it. Use `--rerender` to force overwriting the cached WAV for the same parameters, or `--no-cache` for a one-shot temporary WAV.
+
+`44 kHz` output requires a sample rate above `88 kHz`; the default is `96 kHz`, with Nyquist at `48 kHz`. The TUI default `--output-rate set` checks the current default output device, switches it to the WAV sample rate when supported, and restores the previous rate when playback stops. Use `--output-rate strict` to refuse playback unless the device is already at the WAV rate, or `--output-rate off` to bypass this guard. Hardware, Bluetooth codecs, DACs, headphones, and macOS output paths may still filter ultrasonic content. Keep volume low: high-frequency tones can be hard to perceive while still being unsafe.
 
 ## Audio Reset Workflow
 
@@ -152,6 +198,13 @@ Open a page without activating Safari and minimize the new Safari window:
 mac-safari-session open-bg "https://example.com/private/page"
 ```
 
+The command prints a `window-id`. Close that exact agent-created window after
+use:
+
+```bash
+mac-safari-session close-window --id 12345
+```
+
 Capture page text and links:
 
 ```bash
@@ -159,6 +212,9 @@ mac-safari-session snapshot \
   --url "https://example.com/private/page" \
   --json .temp/mac-safari-session/page-snapshot.json
 ```
+
+When `--url` is present, `snapshot` pins DOM extraction to that exact background
+window and closes the window automatically even when capture fails.
 
 Run guarded DOM JavaScript against the current Safari front document:
 
@@ -179,6 +235,6 @@ mac-safari-session fetch-file \
   --meta documents/raw/file.pdf.json
 ```
 
-`fetch-file` stores the base64 body in Safari memory as chunks, pulls the chunks back through Apple Events, decodes locally, writes the output file with `0600` permissions, and clears the Safari fetch job after the final chunk.
+`fetch-file` stores the base64 body in Safari memory as chunks, pulls the chunks back through Apple Events, decodes locally, writes the output file with `0600` permissions, and clears the Safari fetch job after the final chunk. When `--page` is present, it also pins all fetch steps to the exact background window and closes that window automatically on success or failure.
 
 Safari has no true headless mode with the live user profile. Background mode avoids focus churn by using Apple Events without `activate` and then minimizing the created Safari window. Screenshots are intentionally outside this CLI because they require Screen Recording permission for the terminal app.

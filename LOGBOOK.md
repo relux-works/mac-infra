@@ -3,6 +3,20 @@
 > Institutional memory. Concise, factual, high-signal.
 > Newest entries first. One block per insight.
 
+## 2026-07-19
+
+### 1742 — System-Wide Sleep Prevention Contract Resolved
+- DECISION: `TASK-260719-cigkb7` uses one global `SleepDisabled` state with `applies_to: AC,battery`; no per-profile `disablesleep` values are invented.
+- FIX: Added fixed root-daemon actions for `/usr/bin/pmset -a disablesleep 1|0`, strict `/usr/bin/pmset -g` parsing, and `mac-infra-core sleep-prevention enable|disable|status`.
+- SCOPE: `internal/maccore`, `cmd/mac-infra-core`, `README.md`, `agents/skills/mac-infra/SKILL.md`, and `scripts/setup.sh`.
+- STATUS: The provisional 1725 blocker is superseded by the revised system-wide contract. Tests, vet, build, setup, installed read-only status, and installed-skill match passed; reinstall the privileged daemon before live mutations.
+
+### 1725 — SleepDisabled Is System-Wide
+- FINDING: `/usr/bin/pmset -g` exposes one system-wide `SleepDisabled`; `/usr/bin/pmset -g custom` exposes AC/battery profiles without that key.
+- FINDING: Apple `PowerManagement` source writes `disablesleep` through `IOPMSetSystemPowerSetting`, outside per-source preferences (`pmset/pmset.m:5813`, `pmset/pmset.m:802`).
+- BLOCKED: `TASK-260719-cigkb7` requires per-source and inconsistent `disablesleep` states that the platform cannot represent.
+- DECISION: Recommend one system-wide `enabled`/`disabled`/`unavailable` status; do not infer it from unrelated `sleep` timers.
+
 ## 2026-06-15
 
 ### 1632 - Safari Browser Session Harvest

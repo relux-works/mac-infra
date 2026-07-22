@@ -69,6 +69,25 @@ triggers:
   - аудио на маке
   - кор аудио
   - кореаудио
+  - audio sweep
+  - frequency sweep
+  - hearing test
+  - local audio test
+  - sine sweep
+  - 44 kHz audio
+  - sleep prevention
+  - prevent Mac sleep
+  - disable system sleep
+  - pmset disablesleep
+  - частотный тест
+  - аудиотест
+  - тест слуха
+  - свип частоты
+  - синус свип
+  - 44 кГц
+  - запретить сон мака
+  - не давать маку спать
+  - отключить сон macOS
   - что жрет проц
   - жрет процессор
   - жрет память
@@ -108,6 +127,81 @@ triggers:
 Use this skill for macOS local maintenance workflows backed by the `mac-infra`
 Go tools.
 
+## Sleep Prevention Workflow
+
+Start with the read-only system-wide status:
+
+```bash
+mac-infra-core sleep-prevention status
+```
+
+The command reads `SleepDisabled` from `/usr/bin/pmset -g` and reports one
+`enabled`, `disabled`, or `unavailable` state with `applies_to: AC,battery`.
+`disablesleep` is global; do not infer separate values from AC/battery `sleep`
+timers in `pmset -g custom`.
+
+Enable or disable only when the user explicitly requests the mutation:
+
+```bash
+mac-infra-core sleep-prevention enable
+mac-infra-core sleep-prevention disable
+```
+
+- Mutations go through the root daemon and expose only the fixed actions backed
+  by `/usr/bin/pmset -a disablesleep 1` and
+  `/usr/bin/pmset -a disablesleep 0`.
+- The setting persists after the command exits until explicitly changed. It is
+  not a process-scoped `caffeinate` assertion.
+- The policy covers AC and battery but does not change `sleep` timers, standby,
+  `hibernatemode`, or `displaysleep`. The display may still turn off.
+- `scripts/setup.sh` updates the user binary and installed skill but does not
+  restart an existing privileged daemon. Run `mac-infra-core install` after the
+  first setup and after core binary updates before using `enable` or `disable`.
+
+## Audio Frequency Sweep Workflow
+
+Use this when the user wants a local frequency/hearing/output-chain test without
+YouTube or streaming-platform compression.
+
+```bash
+mac-audio-sweep device
+mac-audio-sweep tui
+mac-audio-sweep tui --rerender
+mac-audio-sweep generate --out .temp/mac-audio-sweep/manual-sweep.wav
+```
+
+`mac-audio-sweep device` prints the current default output device sample rate,
+whether the rate is settable, and whether the target rate is supported.
+
+`mac-audio-sweep tui` reuses a cached PCM WAV when the current normalized sweep
+parameters already have one under `.temp/mac-audio-sweep/cache/`; otherwise it
+renders the WAV. Pass `--rerender` to force overwriting the cached WAV for the
+same parameters, or `--no-cache` for a one-shot temporary WAV. Playback uses
+`afplay` while a Bubble Tea TUI shows the current frequency, slope, elapsed time,
+and sample-rate/Nyquist limits. Press `r` to restart from the beginning. Press
+`q`, `esc`, or `ctrl+c` to stop playback and exit.
+
+Defaults:
+
+- `96 kHz`, stereo, 16-bit PCM WAV.
+- `1 Hz -> 44 kHz` total sweep.
+- `1 Hz -> 50 Hz` slow low ramp over `90s`, starting near `+1 Hz / 5s` and then
+  accelerating smoothly.
+- Low amplitude default (`0.20`) for safer startup.
+- TUI output-rate policy `set`: switch the default output device to the WAV
+  sample rate when supported, then restore the previous rate on stop/exit.
+
+Important caveats:
+
+- A true `44 kHz` signal requires sample rate above `88 kHz`; default `96 kHz`
+  gives a `48 kHz` Nyquist limit.
+- Use `--output-rate strict` to refuse playback unless the default output device
+  is already at the WAV sample rate. Use `--output-rate off` only when explicit
+  CoreAudio sample-rate management is not wanted.
+- `0 Hz` is DC, not an audible tone; use `1 Hz` as the practical "0-ish" start.
+- DACs, Bluetooth codecs, headphones, macOS output paths, or hearing protection
+  can still resample/filter ultrasonic content. Keep volume low.
+
 ## Safari Browser Session Workflow
 
 Use this when the user asks to inspect, click, extract, or download from a page
@@ -124,6 +218,36 @@ Apple Events to avoid focus churn:
 ```bash
 mac-safari-session open-bg "https://example.com/private/page"
 ```
+
+`open-bg` prints the exact `window-id`. Close that agent-owned window when the
+workflow finishes:
+
+```bash
+mac-safari-session close-window --id 12345
+```
+
+### Agent-created browser cleanup
+
+Treat every Safari tab or window opened by the agent as a task-scoped resource.
+Track it when it is created and close it as soon as the browser work that needs
+it is finished. This is mandatory for separate background windows created by
+`open-bg`, `snapshot --url`, or `fetch-file --page`, including minimized
+windows. Reuse one agent-owned page during a multi-step workflow instead of
+leaving a new window behind after each read or download.
+
+- Cleanup runs on success, failure, cancellation, and handoff; do not postpone
+  it until a later conversation turn.
+- Close only the exact tab or window created by the agent. Never close a
+  pre-existing user tab or window merely because its URL or title matches.
+- If the available tooling cannot distinguish agent-owned browser state from
+  user-owned state, do not guess. Avoid creating another window, preserve the
+  user's browser state, and explicitly report the ambiguous leftover.
+- Before ending browser work, account for every page the agent opened and
+  confirm that no agent-created Safari windows remain.
+
+`snapshot --url` and `fetch-file --page` pin their JavaScript to the exact
+background window they create and close that window automatically on success
+or failure. Do not add a second manual close for those commands.
 
 Before DOM extraction or page-context fetch, verify JavaScript-from-Apple-Events
 permission:

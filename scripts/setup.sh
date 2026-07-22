@@ -17,7 +17,8 @@ usage() {
 Usage: ./scripts/setup.sh [--bin-dir PATH]
 
 Builds mac-infra Go tools and installs the global agent skill.
-The privileged LaunchDaemon is not installed automatically; run:
+The privileged LaunchDaemon is not installed or restarted automatically.
+After first setup and after mac-infra-core updates, run:
   mac-infra-core install
 EOF
 }
@@ -58,6 +59,8 @@ go -C "$PROJECT_ROOT" test ./...
 mkdir -p "$BUILD_DIR" "$BIN_DIR"
 echo "Building mac-audio-reset..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-audio-reset" ./cmd/mac-audio-reset
+echo "Building mac-audio-sweep..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-audio-sweep" ./cmd/mac-audio-sweep
 echo "Building mac-load-profile..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-load-profile" ./cmd/mac-load-profile
 echo "Building mac-video-profile..."
@@ -72,6 +75,7 @@ echo "Building mac-infra-core..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-infra-core" ./cmd/mac-infra-core
 
 ln -sf "$BUILD_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-reset"
+ln -sf "$BUILD_DIR/mac-audio-sweep" "$BIN_DIR/mac-audio-sweep"
 ln -sf "$BUILD_DIR/mac-load-profile" "$BIN_DIR/mac-load-profile"
 ln -sf "$BUILD_DIR/mac-video-profile" "$BIN_DIR/mac-video-profile"
 ln -sf "$BUILD_DIR/mac-disk-profile" "$BIN_DIR/mac-disk-profile"
@@ -80,6 +84,7 @@ ln -sf "$BUILD_DIR/mac-safari-session" "$BIN_DIR/mac-safari-session"
 ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
 echo "Installed binary symlinks:"
 echo "  $BIN_DIR/mac-audio-reset -> $BUILD_DIR/mac-audio-reset"
+echo "  $BIN_DIR/mac-audio-sweep -> $BUILD_DIR/mac-audio-sweep"
 echo "  $BIN_DIR/mac-load-profile -> $BUILD_DIR/mac-load-profile"
 echo "  $BIN_DIR/mac-video-profile -> $BUILD_DIR/mac-video-profile"
 echo "  $BIN_DIR/mac-disk-profile -> $BUILD_DIR/mac-disk-profile"
@@ -109,8 +114,11 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
 fi
 
 echo
-echo "Next privileged one-time setup:"
+echo "Next privileged setup/reinstall (required after mac-infra-core updates):"
 echo "  mac-infra-core install"
+echo
+echo "Inspect system-wide sleep prevention without mutation:"
+echo "  mac-infra-core sleep-prevention status"
 echo
 echo "Then reset audio without sudo:"
 echo "  mac-audio-reset reset"
