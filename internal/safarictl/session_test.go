@@ -6,6 +6,44 @@ import (
 	"testing"
 )
 
+func TestDecodePageStatusLinesIncludesTargetWindowID(t *testing.T) {
+	status := decodePageStatusLines("Page title\nhttps://example.com/private\ncomplete\n12345")
+	if status.WindowID != 12345 {
+		t.Fatalf("WindowID = %d, want 12345", status.WindowID)
+	}
+	if status.URL != "https://example.com/private" {
+		t.Fatalf("URL = %q", status.URL)
+	}
+}
+
+func TestOpenBackgroundAppleScriptPinsCreatedDocumentAndWindow(t *testing.T) {
+	source := openBackgroundAppleScript(true, 3)
+	for _, want := range []string{
+		"set targetDocument to make new document",
+		"set targetWindow to front window",
+		"set miniaturized of targetWindow to true",
+		`do JavaScript "document.readyState" in targetDocument`,
+		"id of targetWindow as text",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("openBackgroundAppleScript missing %q:\n%s", want, source)
+		}
+	}
+}
+
+func TestRunJavaScriptAppleScriptUsesExactTargetWindow(t *testing.T) {
+	source := runJavaScriptAppleScript()
+	for _, want := range []string{
+		"set targetWindowID to item 2 of argv as integer",
+		"every window whose id is targetWindowID",
+		"do JavaScript jsSource in current tab of targetWindow",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runJavaScriptAppleScript missing %q:\n%s", want, source)
+		}
+	}
+}
+
 func TestGuardJavaScriptRejectsBrowserSecretReads(t *testing.T) {
 	for _, source := range []string{
 		"document.cookie",

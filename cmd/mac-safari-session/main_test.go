@@ -12,10 +12,21 @@ func TestRunHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run code = %d, stderr = %s", code, stderr.String())
 	}
-	for _, want := range []string{"mac-safari-session", "open-bg", "fetch-file"} {
+	for _, want := range []string{"mac-safari-session", "open-bg", "close-window", "fetch-file"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
 		}
+	}
+}
+
+func TestCloseWindowRequiresPositiveID(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"close-window"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run code = %d, want 2; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires --id") {
+		t.Fatalf("stderr missing required id message:\n%s", stderr.String())
 	}
 }
 

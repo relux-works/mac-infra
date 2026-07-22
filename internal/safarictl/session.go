@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,14 +19,16 @@ const DefaultArtifactDir = ".temp/mac-safari-session"
 var ErrSensitiveJavaScript = errors.New("javascript appears to read browser secrets")
 
 type Session struct {
-	OsaScriptPath string
-	ArtifactDir   string
+	OsaScriptPath  string
+	ArtifactDir    string
+	TargetWindowID int64
 }
 
 type PageStatus struct {
 	Title      string `json:"title"`
 	URL        string `json:"url"`
 	ReadyState string `json:"readyState,omitempty"`
+	WindowID   int64  `json:"windowId,omitempty"`
 }
 
 type Snapshot struct {
@@ -61,11 +64,11 @@ type FetchMeta struct {
 	ActualBytesWritten int64             `json:"actualBytesWritten,omitempty"`
 }
 
-func New(artifactDir string) Session {
+func New(artifactDir string) *Session {
 	if strings.TrimSpace(artifactDir) == "" {
 		artifactDir = DefaultArtifactDir
 	}
-	return Session{
+	return &Session{
 		OsaScriptPath: "/usr/bin/osascript",
 		ArtifactDir:   artifactDir,
 	}
@@ -75,7 +78,7 @@ func (s Session) CheckJavaScript(ctx context.Context) (string, error) {
 	return s.RunJavaScript(ctx, "document.readyState;")
 }
 
-func (s Session) OpenBackground(ctx context.Context, targetURL string, wait time.Duration, minimize bool) (PageStatus, error) {
+func (s *Session) OpenBackground(ctx context.Context, targetURL string, wait time.Duration, minimize bool) (PageStatus, error) {
 	targetURL = strings.TrimSpace(targetURL)
 	if targetURL == "" {
 		return PageStatus{}, errors.New("url is required")
@@ -88,7 +91,9 @@ func (s Session) OpenBackground(ctx context.Context, targetURL string, wait time
 	if err != nil {
 		return PageStatus{}, err
 	}
-	return decodePageStatusLines(out), nil
+	status := decodePageStatusLines(out)
+	s.TargetWindowID = status.WindowID
+	return status, nil
 }
 
 func (s Session) Status(ctx context.Context) (PageStatus, error) {
@@ -108,7 +113,24 @@ func (s Session) RunJavaScript(ctx context.Context, source string) (string, erro
 		return "", err
 	}
 	defer cleanup()
-	return s.runAppleScript(ctx, runJavaScriptAppleScript(), jsPath)
+	return s.runAppleScript(ctx, runJavaScriptAppleScript(), jsPath, strconv.FormatInt(s.TargetWindowID, 10))
+}
+
+func (s *Session) CloseTarget(ctx context.Context) error {
+	if s.TargetWindowID <= 0 {
+		return nil
+	}
+	windowID := s.TargetWindowID
+	s.TargetWindowID = 0
+	return s.CloseWindow(ctx, windowID)
+}
+
+func (s Session) CloseWindow(ctx context.Context, windowID int64) error {
+	if windowID <= 0 {
+		return errors.New("window id must be positive")
+	}
+	_, err := s.runAppleScript(ctx, closeWindowAppleScript(), strconv.FormatInt(windowID, 10))
+	return err
 }
 
 func (s Session) Snapshot(ctx context.Context, textLimit, linkLimit int) (Snapshot, error) {
@@ -409,7 +431,7 @@ func isSensitiveHeader(name string) bool {
 func openBackgroundAppleScript(minimize bool, wait time.Duration) string {
 	minimizeScript := ""
 	if minimize {
-		minimizeScript = "if (count of windows) > 0 then set miniaturized of front window to true\n"
+		minimizeScript = "set miniaturized of targetWindow to true\n"
 	}
 	delayScript := ""
 	if wait > 0 {
@@ -419,16 +441,17 @@ func openBackgroundAppleScript(minimize bool, wait time.Duration) string {
   set targetURL to item 1 of argv
   tell application "Safari"
     launch
-    make new document with properties {URL:targetURL}
+    set targetDocument to make new document with properties {URL:targetURL}
+    set targetWindow to front window
 ` + delayScript + minimizeScript + `    set pageTitle to ""
     set pageURL to ""
     set pageReadyState to ""
     try
-      set pageTitle to name of front document
-      set pageURL to URL of front document
-      set pageReadyState to do JavaScript "document.readyState" in front document
+      set pageTitle to name of targetDocument
+      set pageURL to URL of targetDocument
+      set pageReadyState to do JavaScript "document.readyState" in targetDocument
     end try
-    return pageTitle & linefeed & pageURL & linefeed & pageReadyState
+    return pageTitle & linefeed & pageURL & linefeed & pageReadyState & linefeed & (id of targetWindow as text)
   end tell
 end run
 `
@@ -451,16 +474,36 @@ end tell
 func runJavaScriptAppleScript() string {
 	return `on run argv
   set jsPath to item 1 of argv
+  set targetWindowID to item 2 of argv as integer
   set jsSource to do shell script "/bin/cat " & quoted form of jsPath
   tell application "Safari"
+    if targetWindowID > 0 then
+      set targetWindows to every window whose id is targetWindowID
+      if (count of targetWindows) = 0 then error "Safari target window " & targetWindowID & " is no longer open"
+      set targetWindow to item 1 of targetWindows
+      if (count of tabs of targetWindow) = 0 then error "Safari target window " & targetWindowID & " has no tabs"
+      return do JavaScript jsSource in current tab of targetWindow
+    end if
     if (count of documents) = 0 then error "Safari has no open documents"
     return do JavaScript jsSource in front document
   end tell
 end run`
 }
 
+func closeWindowAppleScript() string {
+	return `on run argv
+  set targetWindowID to item 1 of argv as integer
+  tell application "Safari"
+    set targetWindows to every window whose id is targetWindowID
+    if (count of targetWindows) = 0 then return "already-closed"
+    close (item 1 of targetWindows)
+    return "closed"
+  end tell
+end run`
+}
+
 func decodePageStatusLines(raw string) PageStatus {
-	lines := strings.SplitN(raw, "\n", 3)
+	lines := strings.SplitN(raw, "\n", 4)
 	status := PageStatus{}
 	if len(lines) > 0 {
 		status.Title = lines[0]
@@ -470,6 +513,9 @@ func decodePageStatusLines(raw string) PageStatus {
 	}
 	if len(lines) > 2 {
 		status.ReadyState = strings.TrimSpace(lines[2])
+	}
+	if len(lines) > 3 {
+		status.WindowID, _ = strconv.ParseInt(strings.TrimSpace(lines[3]), 10, 64)
 	}
 	return status
 }

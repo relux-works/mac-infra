@@ -34,6 +34,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "open-bg":
 		return runOpenBackground(args[1:], stdout, stderr)
+	case "close-window":
+		return runCloseWindow(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "check-js":
@@ -79,6 +81,29 @@ func runOpenBackground(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	printStatus(stdout, status)
+	return 0
+}
+
+func runCloseWindow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("close-window", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	windowID := fs.Int64("id", 0, "exact Safari window id returned by open-bg")
+	artifactDir := fs.String("artifact-dir", safarictl.DefaultArtifactDir, "directory for temporary JavaScript files")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if len(fs.Args()) != 0 || *windowID <= 0 {
+		fmt.Fprintln(stderr, "close-window requires --id with a positive Safari window id")
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := safarictl.New(*artifactDir).CloseWindow(ctx, *windowID); err != nil {
+		fmt.Fprintln(stderr, safarictl.FormatAutomationError(err))
+		return 1
+	}
+	fmt.Fprintf(stdout, "closed-window-id: %d\n", *windowID)
 	return 0
 }
 
@@ -166,7 +191,7 @@ func runJavaScript(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runSnapshot(args []string, stdout, stderr io.Writer) int {
+func runSnapshot(args []string, stdout, stderr io.Writer) (code int) {
 	fs := flag.NewFlagSet("snapshot", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	pageURL := fs.String("url", "", "optional URL to open in background before snapshot")
@@ -186,11 +211,26 @@ func runSnapshot(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *wait+60*time.Second)
 	defer cancel()
 	session := safarictl.New(*artifactDir)
+	openedTarget := false
+	defer func() {
+		if !openedTarget {
+			return
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		if err := session.CloseTarget(cleanupCtx); err != nil {
+			fmt.Fprintf(stderr, "snapshot cleanup failed: %s\n", safarictl.FormatAutomationError(err))
+			if code == 0 {
+				code = 1
+			}
+		}
+	}()
 	if strings.TrimSpace(*pageURL) != "" {
 		if _, err := session.OpenBackground(ctx, *pageURL, *wait, true); err != nil {
 			fmt.Fprintln(stderr, safarictl.FormatAutomationError(err))
 			return 1
 		}
+		openedTarget = true
 	}
 	snapshot, err := session.Snapshot(ctx, *textLimit, *linkLimit)
 	if err != nil {
@@ -215,7 +255,7 @@ func runSnapshot(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runFetchFile(args []string, stdout, stderr io.Writer) int {
+func runFetchFile(args []string, stdout, stderr io.Writer) (code int) {
 	fs := flag.NewFlagSet("fetch-file", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	pageURL := fs.String("page", "", "optional page URL to open in background before fetch")
@@ -241,11 +281,26 @@ func runFetchFile(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *wait+*timeout+60*time.Second)
 	defer cancel()
 	session := safarictl.New(*artifactDir)
+	openedTarget := false
+	defer func() {
+		if !openedTarget {
+			return
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		if err := session.CloseTarget(cleanupCtx); err != nil {
+			fmt.Fprintf(stderr, "fetch-file cleanup failed: %s\n", safarictl.FormatAutomationError(err))
+			if code == 0 {
+				code = 1
+			}
+		}
+	}()
 	if strings.TrimSpace(*pageURL) != "" {
 		if _, err := session.OpenBackground(ctx, *pageURL, *wait, true); err != nil {
 			fmt.Fprintln(stderr, safarictl.FormatAutomationError(err))
 			return 1
 		}
+		openedTarget = true
 	}
 	if err := session.StartFetch(ctx, *resourceURL, *chunkSize); err != nil {
 		fmt.Fprintln(stderr, safarictl.FormatAutomationError(err))
@@ -324,6 +379,9 @@ func printStatus(w io.Writer, status safarictl.PageStatus) {
 	if status.ReadyState != "" {
 		fmt.Fprintf(w, "readyState: %s\n", status.ReadyState)
 	}
+	if status.WindowID > 0 {
+		fmt.Fprintf(w, "window-id: %d\n", status.WindowID)
+	}
 }
 
 func writeTextArtifact(path string, content string) error {
@@ -348,6 +406,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  open-bg      open URL in Safari without activating it, then minimize")
+	fmt.Fprintln(w, "  close-window close the exact Safari window returned by open-bg")
 	fmt.Fprintln(w, "  status       print front Safari document title/url/readyState")
 	fmt.Fprintln(w, "  check-js     verify Safari JavaScript-from-Apple-Events permission")
 	fmt.Fprintln(w, "  run-js       run guarded JavaScript in the front Safari document")
