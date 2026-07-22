@@ -8,3 +8,7 @@ build/
 coverage.out
 .coverage/
 .DS_Store
+
+# Transient raw traces from task-board agent runs. Keep concise task outcomes
+# and progress records under .task-board/ tracked instead.
+.task-board/.resources/**/*_spawn-log_*.log
