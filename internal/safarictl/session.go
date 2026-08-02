@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,6 +149,7 @@ func (s Session) Snapshot(ctx context.Context, textLimit, linkLimit int) (Snapsh
 	if err := json.Unmarshal([]byte(out), &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("decode snapshot json: %w", err)
 	}
+	snapshot.URL = RedactSensitiveURL(snapshot.URL)
 	return snapshot, nil
 }
 
@@ -177,6 +179,8 @@ func (s Session) PollFetch(ctx context.Context) (FetchMeta, error) {
 	if err := json.Unmarshal([]byte(out), &meta); err != nil {
 		return FetchMeta{}, fmt.Errorf("decode fetch metadata: %w", err)
 	}
+	meta.Endpoint = RedactSensitiveURL(meta.Endpoint)
+	meta.URL = RedactSensitiveURL(meta.URL)
 	meta.Headers = SanitizeHeaders(meta.Headers)
 	return meta, nil
 }
@@ -254,6 +258,38 @@ func SanitizeHeaders(headers map[string]string) map[string]string {
 		out[normalized] = value
 	}
 	return out
+}
+
+// RedactSensitiveURL prevents OAuth assertions and similar query values from
+// escaping through page status, snapshot, or fetch metadata output.
+func RedactSensitiveURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.RawQuery == "" {
+		return rawURL
+	}
+
+	query := parsed.Query()
+	changed := false
+	for key := range query {
+		if isSensitiveQueryParameter(key) {
+			query[key] = []string{"[redacted]"}
+			changed = true
+		}
+	}
+	if !changed {
+		return rawURL
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func isSensitiveQueryParameter(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "access_token", "assertion", "authorization", "client_secret", "code", "id_token", "refresh_token", "samlresponse", "session_state", "state", "token":
+		return true
+	default:
+		return false
+	}
 }
 
 func SnapshotJavaScript(textLimit, linkLimit int) string {
@@ -509,7 +545,7 @@ func decodePageStatusLines(raw string) PageStatus {
 		status.Title = lines[0]
 	}
 	if len(lines) > 1 {
-		status.URL = lines[1]
+		status.URL = RedactSensitiveURL(lines[1])
 	}
 	if len(lines) > 2 {
 		status.ReadyState = strings.TrimSpace(lines[2])

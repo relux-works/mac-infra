@@ -16,6 +16,18 @@ func TestDecodePageStatusLinesIncludesTargetWindowID(t *testing.T) {
 	}
 }
 
+func TestDecodePageStatusLinesRedactsOAuthQueryValues(t *testing.T) {
+	status := decodePageStatusLines("Sign in\nhttps://example.com/callback?code=secret&state=another-secret&next=profile\ncomplete")
+	if strings.Contains(status.URL, "secret") || strings.Contains(status.URL, "another-secret") {
+		t.Fatalf("status URL leaked sensitive values: %q", status.URL)
+	}
+	for _, want := range []string{"code=%5Bredacted%5D", "state=%5Bredacted%5D", "next=profile"} {
+		if !strings.Contains(status.URL, want) {
+			t.Fatalf("status URL missing %q: %q", want, status.URL)
+		}
+	}
+}
+
 func TestOpenBackgroundAppleScriptPinsCreatedDocumentAndWindow(t *testing.T) {
 	source := openBackgroundAppleScript(true, 3)
 	for _, want := range []string{
