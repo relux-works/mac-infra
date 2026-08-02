@@ -1,0 +1,46 @@
+{
+  "contract_version": "board-goal-v2",
+  "goal_id": "PRIMARY-GOAL-260729-1ipi30",
+  "revision": 3,
+  "expected_previous_revision": 2,
+  "previous_ref": {
+    "id": "PRIMARY-GOAL-260729-1ipi30",
+    "revision": 2
+  },
+  "owner": {
+    "kind": "parent",
+    "id": "primary"
+  },
+  "kind": "alignment",
+  "objective": "Add a privacy-preserving document sanitization workflow to mac-infra so agents can convert text, Markdown, HTML, PDF, Word, and spreadsheet inputs into read-only sanitized text plus a non-sensitive redaction report, document the agent-facing contract, install it through the existing setup flow, and verify it against representative fixtures without exposing raw personal data.",
+  "scope": {
+    "requested_ids": null,
+    "resolved_leaf_items": null
+  },
+  "mutation_authority": "agent_discretion",
+  "success_predicate": "alignment_handled",
+  "provider_condition": "The bound parent session has handled this exact alignment revision.",
+  "native_reflection": "required",
+  "state": "active",
+  "legacy_refs": [
+    {
+      "contract": "primary-goal-v1",
+      "id": "PRIMARY-GOAL-260729-1ipi30",
+      "revision": 3
+    }
+  ],
+  "role_policy": {},
+  "mutation": {
+    "kind": "alignment_realigned",
+    "reason": "The user redirected mac-infra work to a reusable personal-data sanitizer for agent document intake.",
+    "actor_context": {
+      "kind": "agent",
+      "actor_id": "alexis"
+    },
+    "authority": "agent_discretion"
+  },
+  "created_at": "2026-07-29T11:03:25.925837Z",
+  "updated_at": "2026-08-03T07:45:52.002346Z",
+  "created_by": "alexis",
+  "reason": "The user redirected mac-infra work to a reusable personal-data sanitizer for agent document intake."
+}

@@ -1,0 +1,21 @@
+{
+  "contract": "primary-goal-v1",
+  "id": "PRIMARY-GOAL-260729-1ipi30",
+  "revision": 3,
+  "previous_revision": 2,
+  "state": "active",
+  "scope": {
+    "kind": "board"
+  },
+  "objective": "Add a privacy-preserving document sanitization workflow to mac-infra so agents can convert text, Markdown, HTML, PDF, Word, and spreadsheet inputs into read-only sanitized text plus a non-sensitive redaction report, document the agent-facing contract, install it through the existing setup flow, and verify it against representative fixtures without exposing raw personal data.",
+  "mutation": {
+    "kind": "objective_realigned",
+    "reason": "The user redirected mac-infra work to a reusable personal-data sanitizer for agent document intake.",
+    "actor": {
+      "kind": "primary_parent",
+      "actor_id": "alexis"
+    }
+  },
+  "created_at": "2026-07-29T11:03:25.925837Z",
+  "updated_at": "2026-08-03T07:45:52.002346Z"
+}

@@ -13,10 +13,65 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-disk-profile` | Profile disk usage and explain heavy paths without deleting files | `mac-disk-profile scan PATH`, `mac-disk-profile top PATH`, `mac-disk-profile explain PATH` | optional JSON artifact via `--json PATH` |
 | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
 | `mac-safari-session` | Read and harvest authenticated Safari pages through Apple Events without exporting cookies | `mac-safari-session open-bg URL`, `mac-safari-session run-js --window-id ID --script JS`, `mac-safari-session close-window --id ID`, `mac-safari-session check-js`, `mac-safari-session snapshot --url URL --json PATH`, `mac-safari-session fetch-file --page URL --resource URL --out PATH` | temporary JS under `.temp/mac-safari-session/`, optional snapshots/download metadata wherever specified |
+| `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
 | `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display LaunchAgent under `~/Library/LaunchAgents/`; idle-lock restore snapshot under `~/Library/Application Support/mac-infra/` |
+| `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
+| `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
-| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
+| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
 | `scripts/deinit.sh` | Remove user-level installation | `./scripts/deinit.sh` | disables the managed display assertion when possible, then removes symlinks and runtime skill copy |
+
+## Privacy-Safe Document Intake
+
+Sanitize a local document before an agent reads or persists its extracted text:
+
+```bash
+mac-document-sanitize --json documents/raw/input.docx
+```
+
+The command treats the source as read-only, keeps extracted raw text in memory,
+and writes two private (`0600`) artifacts by default:
+
+- `.temp/mac-document-sanitize/document-<sha256>.sanitized.txt`
+- `.temp/mac-document-sanitize/document-<sha256>.redaction.json`
+
+The output name is content-hash based so a sensitive source filename is not
+copied into the artifact name. The report contains only extraction metadata,
+category counts, and warnings; it never stores matched values.
+
+Supported inputs are TXT, Markdown, JSON, XML, YAML, CSV, TSV, HTML, RTF, DOC,
+DOCX, PDF, and XLSX. HTML/RTF/Word extraction uses macOS `textutil`; PDF uses
+`pdftotext` from Homebrew `poppler`; XLSX extraction is built in. Legacy XLS and
+ODS files must first be exported as XLSX, CSV, or TSV.
+
+Automatic redaction covers labeled and tabular names, email addresses, phone
+numbers, residential/postal addresses, dates of birth, passports, SNILS,
+12-digit personal tax IDs, valid payment-card numbers, IP addresses, JWT-like
+secrets, and sensitive JSON keys. Repeated values receive stable placeholders.
+For known project-specific values that heuristics miss, pass a private
+one-value-per-line dictionary:
+
+```bash
+chmod 600 .temp/mac-document-sanitize/extra-redactions.txt
+mac-document-sanitize \
+  --redact-from .temp/mac-document-sanitize/extra-redactions.txt \
+  documents/raw/input.pdf
+```
+
+For authenticated browser downloads, keep the raw file task-scoped, sanitize it
+immediately, and inspect only the returned `sanitized_path`:
+
+```bash
+mac-safari-session fetch-file \
+  --page "https://example.com/private/page" \
+  --resource "/api/private/file.pdf" \
+  --out .temp/mac-document-sanitize/raw.pdf
+mac-document-sanitize --json .temp/mac-document-sanitize/raw.pdf
+```
+
+Redaction is deterministic but heuristic, not a legal guarantee of anonymity.
+Review the sanitized output before external disclosure and use `--redact-from`
+for known values when necessary.
 
 ## Sleep Prevention Workflow
 

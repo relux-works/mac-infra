@@ -71,6 +71,8 @@ echo "Building mac-cleanup..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-cleanup" ./cmd/mac-cleanup
 echo "Building mac-safari-session..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-safari-session" ./cmd/mac-safari-session
+echo "Building mac-document-sanitize..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-document-sanitize" ./cmd/mac-document-sanitize
 echo "Building mac-infra-core..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-infra-core" ./cmd/mac-infra-core
 
@@ -81,6 +83,7 @@ ln -sf "$BUILD_DIR/mac-video-profile" "$BIN_DIR/mac-video-profile"
 ln -sf "$BUILD_DIR/mac-disk-profile" "$BIN_DIR/mac-disk-profile"
 ln -sf "$BUILD_DIR/mac-cleanup" "$BIN_DIR/mac-cleanup"
 ln -sf "$BUILD_DIR/mac-safari-session" "$BIN_DIR/mac-safari-session"
+ln -sf "$BUILD_DIR/mac-document-sanitize" "$BIN_DIR/mac-document-sanitize"
 ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
 echo "Installed binary symlinks:"
 echo "  $BIN_DIR/mac-audio-reset -> $BUILD_DIR/mac-audio-reset"
@@ -90,6 +93,7 @@ echo "  $BIN_DIR/mac-video-profile -> $BUILD_DIR/mac-video-profile"
 echo "  $BIN_DIR/mac-disk-profile -> $BUILD_DIR/mac-disk-profile"
 echo "  $BIN_DIR/mac-cleanup     -> $BUILD_DIR/mac-cleanup"
 echo "  $BIN_DIR/mac-safari-session -> $BUILD_DIR/mac-safari-session"
+echo "  $BIN_DIR/mac-document-sanitize -> $BUILD_DIR/mac-document-sanitize"
 echo "  $BIN_DIR/mac-infra-core  -> $BUILD_DIR/mac-infra-core"
 
 if [[ ! -d "$SKILL_SOURCE" ]]; then
@@ -111,6 +115,10 @@ echo "  $HOME/.claude/skills/$SKILL_NAME -> $SKILL_RUNTIME"
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
   echo "WARNING: $BIN_DIR is not in PATH"
+fi
+
+if ! command -v pdftotext >/dev/null 2>&1; then
+  echo "WARNING: PDF sanitization requires pdftotext (install with: brew install poppler)"
 fi
 
 echo

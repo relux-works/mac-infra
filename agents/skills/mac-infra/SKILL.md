@@ -6,7 +6,8 @@ description: >
   Music distortion, USB DAC output problems, Bluetooth output problems, macOS
   video/display smoothness loss, WindowServer/GPU stutter, Docker/VM slideshow
   symptoms, and broad CPU, memory, thermal, process load, authenticated Safari
-  browser-session inspection/harvesting, and related maintenance tasks.
+  browser-session inspection/harvesting, privacy-safe document intake, PII and
+  personal-data redaction for local or downloaded files, and related maintenance tasks.
 triggers:
   - mac load
   - load profile
@@ -125,6 +126,17 @@ triggers:
   - reuse browser cookies
   - read browser page
   - harvest browser page
+  - document sanitizer
+  - sanitize document
+  - redact PII
+  - PII redaction
+  - privacy-safe document
+  - clean personal data
+  - обезличить документ
+  - почистить персональные данные
+  - убрать персданные
+  - персуха в документе
+  - анонимизировать документ
   - сафари
   - браузер
   - автоматизация сафари
@@ -225,159 +237,54 @@ exists.
 
 ## Audio Frequency Sweep Workflow
 
-Use this when the user wants a local frequency/hearing/output-chain test without
-YouTube or streaming-platform compression.
+For local frequency/hearing/output-chain tests, read
+[audio-frequency-sweep.md](references/audio-frequency-sweep.md) before running
+the sweep tools. Start with:
 
 ```bash
 mac-audio-sweep device
 mac-audio-sweep tui
-mac-audio-sweep tui --rerender
-mac-audio-sweep generate --out .temp/mac-audio-sweep/manual-sweep.wav
 ```
-
-`mac-audio-sweep device` prints the current default output device sample rate,
-whether the rate is settable, and whether the target rate is supported.
-
-`mac-audio-sweep tui` reuses a cached PCM WAV when the current normalized sweep
-parameters already have one under `.temp/mac-audio-sweep/cache/`; otherwise it
-renders the WAV. Pass `--rerender` to force overwriting the cached WAV for the
-same parameters, or `--no-cache` for a one-shot temporary WAV. Playback uses
-`afplay` while a Bubble Tea TUI shows the current frequency, slope, elapsed time,
-and sample-rate/Nyquist limits. Press `r` to restart from the beginning. Press
-`q`, `esc`, or `ctrl+c` to stop playback and exit.
-
-Defaults:
-
-- `96 kHz`, stereo, 16-bit PCM WAV.
-- `1 Hz -> 44 kHz` total sweep.
-- `1 Hz -> 50 Hz` slow low ramp over `90s`, starting near `+1 Hz / 5s` and then
-  accelerating smoothly.
-- Low amplitude default (`0.20`) for safer startup.
-- TUI output-rate policy `set`: switch the default output device to the WAV
-  sample rate when supported, then restore the previous rate on stop/exit.
-
-Important caveats:
-
-- A true `44 kHz` signal requires sample rate above `88 kHz`; default `96 kHz`
-  gives a `48 kHz` Nyquist limit.
-- Use `--output-rate strict` to refuse playback unless the default output device
-  is already at the WAV sample rate. Use `--output-rate off` only when explicit
-  CoreAudio sample-rate management is not wanted.
-- `0 Hz` is DC, not an audible tone; use `1 Hz` as the practical "0-ish" start.
-- DACs, Bluetooth codecs, headphones, macOS output paths, or hearing protection
-  can still resample/filter ultrasonic content. Keep volume low.
 
 ## Safari Browser Session Workflow
 
-Use this when the user asks to inspect, click, extract, or download from a page
-that is already authenticated in their local Safari profile.
-
-Core rule: use Safari as the authenticated browser and do not export, dump, copy,
-log, or persist cookies, browser storage, authorization headers, or tokens. Let
-Safari make same-origin/authenticated requests. Persist only page content,
-downloaded files, sanitized response metadata, endpoint shapes, and notes.
-
-Safari has no real headless mode with the user's live profile. Prefer background
-Apple Events to avoid focus churn:
-
-```bash
-mac-safari-session open-bg "https://example.com/private/page"
-```
-
-`open-bg` prints the exact `window-id`. Close that agent-owned window when the
-workflow finishes:
-
-```bash
-mac-safari-session close-window --id 12345
-```
-
-### Agent-created browser cleanup
-
-Treat every Safari tab or window opened by the agent as a task-scoped resource.
-Track it when it is created and close it as soon as the browser work that needs
-it is finished. This is mandatory for separate background windows created by
-`open-bg`, `snapshot --url`, or `fetch-file --page`, including minimized
-windows. Reuse one agent-owned page during a multi-step workflow instead of
-leaving a new window behind after each read or download.
-
-- Cleanup runs on success, failure, cancellation, and handoff; do not postpone
-  it until a later conversation turn.
-- Close only the exact tab or window created by the agent. Never close a
-  pre-existing user tab or window merely because its URL or title matches.
-- If the available tooling cannot distinguish agent-owned browser state from
-  user-owned state, do not guess. Avoid creating another window, preserve the
-  user's browser state, and explicitly report the ambiguous leftover.
-- Before ending browser work, account for every page the agent opened and
-  confirm that no agent-created Safari windows remain.
-
-`snapshot --url` and `fetch-file --page` pin their JavaScript to the exact
-background window they create and close that window automatically on success
-or failure. Do not add a second manual close for those commands.
-
-Before DOM extraction or page-context fetch, verify JavaScript-from-Apple-Events
-permission:
+Before inspecting, extracting, or downloading from an authenticated Safari
+session, read [safari-session.md](references/safari-session.md). Keep Safari in
+the background and never export cookies, browser storage, authorization headers,
+or tokens. Start with:
 
 ```bash
 mac-safari-session check-js
 ```
 
-If Safari blocks the command, the user must enable it manually:
+## Privacy-Safe Document Intake Workflow
 
-```text
-Safari -> Settings -> Advanced -> Show features for web developers
-Develop -> Allow JavaScript from Apple Events
-```
-
-For a page read, capture DOM text and links:
+Use this before reading or persisting extracted content when a local or
+browser-downloaded document may contain personal data or secrets:
 
 ```bash
-mac-safari-session snapshot \
-  --url "https://example.com/private/page" \
-  --json .temp/mac-safari-session/page-snapshot.json
+mac-document-sanitize --json PATH
 ```
 
-For custom DOM extraction, use guarded JavaScript:
+Read only the returned `sanitized_path`. The command keeps raw extracted text in
+memory, never changes the source, writes `0600` artifacts, names default outputs
+from the source SHA-256 rather than its filename, and reports categories/counts
+without storing matched values.
+
+Supported inputs: TXT, Markdown, JSON, XML, YAML, CSV, TSV, HTML, RTF, DOC,
+DOCX, PDF, and XLSX. PDF extraction needs `pdftotext` from Homebrew `poppler`.
+Export legacy XLS or ODS files as XLSX, CSV, or TSV first.
+
+If automatic heuristics miss a known value, put exact values one-per-line in a
+task-scoped `0600` file and rerun:
 
 ```bash
-mac-safari-session run-js --script 'document.body.innerText.slice(0, 5000)'
-mac-safari-session run-js --file .temp/mac-safari-session/extract.js --out .temp/mac-safari-session/result.txt
+mac-document-sanitize --redact-from .temp/mac-document-sanitize/extra.txt PATH
 ```
 
-For multi-step work in an agent-created background window, address the exact
-`window-id` printed by `open-bg`. Never target a pre-existing user window with
-this option; close the agent-created window when finished:
-
-```bash
-mac-safari-session run-js --window-id 12345 --script 'document.title'
-mac-safari-session close-window --id 12345
-```
-
-`run-js` refuses obvious browser-secret reads such as `document.cookie`,
-`cookieStore`, `localStorage`, and `sessionStorage`. Do not bypass this by
-writing ad hoc AppleScript for secret extraction. Page status and metadata
-redact OAuth-style query values before printing or persistence.
-
-For authenticated downloads where direct `curl` returns `401` or otherwise lacks
-the Safari session, fetch inside the page context and pull the response body back
-as base64 chunks:
-
-```bash
-mac-safari-session fetch-file \
-  --page "https://example.com/private/page" \
-  --resource "/api/private/file.pdf" \
-  --out documents/raw/file.pdf \
-  --meta documents/raw/file.pdf.json
-```
-
-Operational notes:
-
-- `fetch-file` uses `fetch(..., { credentials: "include" })` inside Safari.
-- The CLI writes output files with `0600` permissions.
-- Response headers are sanitized before metadata is written.
-- Screenshots are not part of this CLI because they require Screen Recording
-  permission for the terminal app.
-- Store durable endpoint/selector/limitation notes in the active project's
-  research or task flow. Do not leave browser-harvest discoveries only in chat.
+Do not claim guaranteed anonymization. Review sanitized output before external
+disclosure. Delete only raw files the agent itself created under `.temp/`; never
+delete or modify the user's source document.
 
 ## Load Profiling Workflow
 

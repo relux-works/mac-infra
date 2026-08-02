@@ -3,6 +3,18 @@
 > Institutional memory. Concise, factual, high-signal.
 > Newest entries first. One block per insight.
 
+## 2026-08-03
+
+### 1114 — Privacy-Safe Document Intake Installed
+- MILESTONE: `TASK-260803-22l53w` added and installed `mac-document-sanitize` plus reusable `internal/docsanitize` for TXT/Markdown/JSON/CSV/TSV/HTML/RTF/DOC/DOCX/PDF/XLSX intake.
+- DECISION: Originals stay read-only; raw extracted text stays in memory; default `0600` artifacts use content hashes instead of source filenames; reports store categories/counts but never matched values.
+- FIX: Main `agents/skills/mac-infra/SKILL.md` shrank from 620 to 486 lines by moving Safari and audio-sweep details to lazy references.
+- STATUS: Full tests, targeted race tests, vet, setup/install, skill validation, synthetic multi-format smokes, and three local Word-document smokes passed.
+
+### 1114 — Phone Redaction Must Precede SNILS
+- ROOT CAUSE: An unlabelled Russian `+7` phone also matched the generic 11-digit SNILS shape when SNILS ran first, hiding the value but misreporting its category.
+- FIX: Phone detection now precedes SNILS detection in `internal/docsanitize/sanitize.go`; regression coverage verifies `[PHONE_n]` classification.
+
 ## 2026-08-02
 
 ### 1815 — Idle Lock Prevention Split Into Independent Policies
