@@ -81,6 +81,8 @@ triggers:
   - pmset disablesleep
   - prevent display sleep
   - disable display sleep
+  - caffeinate background activity
+  - caffeinate can run in the background
   - prevent screen lock
   - prevent idle lock
   - prevent screen saver
@@ -95,6 +97,7 @@ triggers:
   - отключить сон macOS
   - не гасить экран
   - не выключать монитор
+  - caffeinate работает в фоне
   - не блокировать экран
   - запретить локскрин
   - что жрет проц
@@ -192,6 +195,15 @@ daemon. Disable boots out the assertion and removes the LaunchAgent plist:
 ```bash
 mac-infra-core display-sleep-prevention disable
 ```
+
+macOS may show an App Background Activity notification saying that
+`“caffeinate” can run in the background`. Recognize it as this managed
+`works.relux.mac-infra-display-sleep-prevention` LaunchAgent, not an unknown
+third-party process. Keep the `caffeinate` name; do not rename or disable it
+solely because of the notification. Turning it off in Login Items & Extensions
+defeats persistent display-sleep prevention. If ownership is uncertain, verify
+the LaunchAgent label, `/usr/bin/caffeinate -d` arguments, and
+`PreventUserIdleDisplaySleep` assertion before changing anything.
 
 When the user explicitly requests prevention of automatic idle Lock Screen,
 use the current-user command:
