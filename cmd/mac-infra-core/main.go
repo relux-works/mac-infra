@@ -17,12 +17,18 @@ var (
 )
 
 var (
-	inspectService         = maccore.InspectService
-	inspectSleepPrevention = maccore.InspectSleepPrevention
-	requestSudoCredentials = maccore.RequestSudoCredentials
-	cleanupAnyConnect      = maccore.CleanupAnyConnect
-	enableSleepPrevention  = maccore.EnableSleepPrevention
-	disableSleepPrevention = maccore.DisableSleepPrevention
+	inspectService                = maccore.InspectService
+	inspectSleepPrevention        = maccore.InspectSleepPrevention
+	inspectDisplaySleepPrevention = maccore.InspectDisplaySleepPrevention
+	inspectIdleLockPrevention     = maccore.InspectIdleLockPrevention
+	requestSudoCredentials        = maccore.RequestSudoCredentials
+	cleanupAnyConnect             = maccore.CleanupAnyConnect
+	enableSleepPrevention         = maccore.EnableSleepPrevention
+	disableSleepPrevention        = maccore.DisableSleepPrevention
+	enableDisplaySleepPrevention  = maccore.EnableDisplaySleepPrevention
+	disableDisplaySleepPrevention = maccore.DisableDisplaySleepPrevention
+	enableIdleLockPrevention      = maccore.EnableIdleLockPrevention
+	disableIdleLockPrevention     = maccore.DisableIdleLockPrevention
 )
 
 func main() {
@@ -48,6 +54,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runAnyConnectCleanup(args[1:], stdout, stderr)
 	case "sleep-prevention":
 		return runSleepPrevention(args[1:], stdout, stderr)
+	case "display-sleep-prevention":
+		return runDisplaySleepPrevention(args[1:], stdout, stderr)
+	case "idle-lock-prevention":
+		return runIdleLockPrevention(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "mac-infra-core %s %s %s\n", Version, Commit, BuildDate)
 		return 0
@@ -290,6 +300,108 @@ func runSleepPreventionMutation(
 	return 0
 }
 
+func runDisplaySleepPrevention(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		printDisplaySleepPreventionUsage(stderr)
+		return 2
+	}
+
+	switch args[0] {
+	case "enable":
+		return runDisplaySleepPreventionMutation("enable", enableDisplaySleepPrevention, stdout, stderr)
+	case "disable":
+		return runDisplaySleepPreventionMutation("disable", disableDisplaySleepPrevention, stdout, stderr)
+	case "status":
+		status, err := inspectDisplaySleepPrevention()
+		printDisplaySleepPreventionStatus(stdout, status)
+		if err != nil {
+			fmt.Fprintf(stderr, "display-sleep-prevention status failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "help", "--help", "-h":
+		printDisplaySleepPreventionUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown display-sleep-prevention command %q\n", args[0])
+		printDisplaySleepPreventionUsage(stderr)
+		return 2
+	}
+}
+
+func runDisplaySleepPreventionMutation(
+	operation string,
+	call func() ([]maccore.CommandResult, error),
+	stdout, stderr io.Writer,
+) int {
+	results, err := call()
+	if err != nil {
+		fmt.Fprintf(stderr, "display-sleep-prevention %s failed: %v\n", operation, err)
+		printCommandResults(stderr, results)
+		return 1
+	}
+
+	status, statusErr := inspectDisplaySleepPrevention()
+	printDisplaySleepPreventionStatus(stdout, status)
+	printCommandResults(stdout, results)
+	if statusErr != nil {
+		fmt.Fprintf(stderr, "display-sleep-prevention %s applied but status failed: %v\n", operation, statusErr)
+		return 1
+	}
+	return 0
+}
+
+func runIdleLockPrevention(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		printIdleLockPreventionUsage(stderr)
+		return 2
+	}
+
+	switch args[0] {
+	case "enable":
+		return runIdleLockPreventionMutation("enable", enableIdleLockPrevention, stdout, stderr)
+	case "disable":
+		return runIdleLockPreventionMutation("disable", disableIdleLockPrevention, stdout, stderr)
+	case "status":
+		status, err := inspectIdleLockPrevention()
+		printIdleLockPreventionStatus(stdout, status)
+		if err != nil {
+			fmt.Fprintf(stderr, "idle-lock-prevention status failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "help", "--help", "-h":
+		printIdleLockPreventionUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown idle-lock-prevention command %q\n", args[0])
+		printIdleLockPreventionUsage(stderr)
+		return 2
+	}
+}
+
+func runIdleLockPreventionMutation(
+	operation string,
+	call func() ([]maccore.CommandResult, error),
+	stdout, stderr io.Writer,
+) int {
+	results, err := call()
+	if err != nil {
+		fmt.Fprintf(stderr, "idle-lock-prevention %s failed: %v\n", operation, err)
+		printCommandResults(stderr, results)
+		return 1
+	}
+
+	status, statusErr := inspectIdleLockPrevention()
+	printIdleLockPreventionStatus(stdout, status)
+	printCommandResults(stdout, results)
+	if statusErr != nil {
+		fmt.Fprintf(stderr, "idle-lock-prevention %s applied but status failed: %v\n", operation, statusErr)
+		return 1
+	}
+	return 0
+}
+
 func runDaemon(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("_daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -318,6 +430,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  mac-infra-core request-permissions sudo")
 	fmt.Fprintln(w, "  mac-infra-core anyconnect-cleanup [--apply] [--force]")
 	fmt.Fprintln(w, "  mac-infra-core sleep-prevention enable|disable|status")
+	fmt.Fprintln(w, "  mac-infra-core display-sleep-prevention enable|disable|status")
+	fmt.Fprintln(w, "  mac-infra-core idle-lock-prevention enable|disable|status")
 	fmt.Fprintln(w, "  mac-infra-core version")
 }
 
@@ -336,9 +450,42 @@ func printSleepPreventionUsage(w io.Writer) {
 	fmt.Fprintln(w, "  mac-infra-core sleep-prevention status")
 }
 
+func printDisplaySleepPreventionUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  mac-infra-core display-sleep-prevention enable")
+	fmt.Fprintln(w, "  mac-infra-core display-sleep-prevention disable")
+	fmt.Fprintln(w, "  mac-infra-core display-sleep-prevention status")
+}
+
+func printIdleLockPreventionUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  mac-infra-core idle-lock-prevention enable")
+	fmt.Fprintln(w, "  mac-infra-core idle-lock-prevention disable")
+	fmt.Fprintln(w, "  mac-infra-core idle-lock-prevention status")
+}
+
 func printSleepPreventionStatus(w io.Writer, status maccore.SleepPreventionStatus) {
 	fmt.Fprintf(w, "sleep_prevention: %s\n", status.State)
 	fmt.Fprintf(w, "applies_to: %s\n", status.AppliesTo)
+}
+
+func printDisplaySleepPreventionStatus(w io.Writer, status maccore.DisplaySleepPreventionStatus) {
+	fmt.Fprintf(w, "display_sleep_prevention: %s\n", status.State)
+	fmt.Fprintf(w, "applies_to: %s\n", status.AppliesTo)
+	fmt.Fprintln(w, "assertion: PreventUserIdleDisplaySleep")
+	fmt.Fprintln(w, "session_scope: current-user")
+}
+
+func printIdleLockPreventionStatus(w io.Writer, status maccore.IdleLockPreventionStatus) {
+	fmt.Fprintf(w, "idle_lock_prevention: %s\n", status.State)
+	if status.IdleTimePresent {
+		fmt.Fprintf(w, "idle_time_seconds: %d\n", status.IdleTimeSeconds)
+	} else if status.State != maccore.IdleLockPreventionStateUnavailable {
+		fmt.Fprintln(w, "idle_time_seconds: default")
+	}
+	fmt.Fprintln(w, "prevents: automatic-screen-saver-lock")
+	fmt.Fprintln(w, "display_sleep_policy: separate")
+	fmt.Fprintln(w, "manual_lock_password: unchanged")
 }
 
 func printCommandResults(w io.Writer, results []maccore.CommandResult) {

@@ -268,7 +268,24 @@ func TestCoreCommandHelperProcess(t *testing.T) {
 	switch args[separator+1] {
 	case "/opt/cisco/anyconnect/bin/vpn":
 		fmt.Fprintln(os.Stdout, os.Getenv("MAC_INFRA_TEST_VPN_STATUS"))
-	case "/usr/bin/pkill", "/bin/launchctl":
+	case "/usr/bin/pkill":
+	case "/bin/launchctl":
+		if strings.Contains(command, "/bin/launchctl print ") {
+			switch os.Getenv("MAC_INFRA_TEST_LAUNCHCTL_PRINT") {
+			case "enabled":
+				fmt.Fprintln(os.Stdout, "service = enabled")
+			case "failure":
+				fmt.Fprintln(os.Stderr, "launchctl unavailable")
+				os.Exit(9)
+			default:
+				fmt.Fprintln(os.Stderr, "service not found")
+				os.Exit(113)
+			}
+		}
+		if strings.Contains(command, "/bin/launchctl bootout ") && os.Getenv("MAC_INFRA_TEST_LAUNCHCTL_BOOTOUT") == "missing" {
+			fmt.Fprintln(os.Stderr, "service not found")
+			os.Exit(3)
+		}
 	case "/usr/bin/pmset":
 		if os.Getenv("MAC_INFRA_TEST_PMSET_FAIL_COMMAND") == command {
 			fmt.Fprintln(os.Stderr, os.Getenv("MAC_INFRA_TEST_PMSET_FAILURE"))
@@ -276,6 +293,14 @@ func TestCoreCommandHelperProcess(t *testing.T) {
 		}
 		if command == "/usr/bin/pmset -g" {
 			fmt.Fprintln(os.Stdout, os.Getenv("MAC_INFRA_TEST_PMSET_OUTPUT"))
+		}
+	case "/usr/bin/defaults":
+		if os.Getenv("MAC_INFRA_TEST_DEFAULTS_FAIL_COMMAND") == command {
+			fmt.Fprintln(os.Stderr, os.Getenv("MAC_INFRA_TEST_DEFAULTS_FAILURE"))
+			os.Exit(9)
+		}
+		if command == "/usr/bin/defaults -currentHost export com.apple.screensaver -" {
+			fmt.Fprintln(os.Stdout, os.Getenv("MAC_INFRA_TEST_SCREENSAVER_OUTPUT"))
 		}
 	default:
 		os.Exit(127)
