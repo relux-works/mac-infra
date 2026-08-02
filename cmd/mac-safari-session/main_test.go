@@ -41,6 +41,28 @@ func TestRunJSRejectsCookieReadBeforeSafari(t *testing.T) {
 	}
 }
 
+func TestRunJSRejectsNegativeWindowIDBeforeSafari(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"run-js", "--window-id", "-1", "--script", "document.title"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run code = %d, want 2; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--window-id must be a positive") {
+		t.Fatalf("stderr missing window id explanation:\n%s", stderr.String())
+	}
+}
+
+func TestRunJSHelpDocumentsWindowID(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"run-js", "--help"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run code = %d, want 2; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--window-id") {
+		t.Fatalf("stderr missing --window-id help:\n%s", stderr.String())
+	}
+}
+
 func TestFetchFileRequiresResourceAndOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"fetch-file", "--resource", "/api/file"}, &stdout, &stderr)

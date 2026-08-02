@@ -156,15 +156,20 @@ func runCheckJavaScript(args []string, stdout, stderr io.Writer) int {
 func runJavaScript(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("run-js", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	script := fs.String("script", "", "JavaScript source to run in the front Safari document")
+	script := fs.String("script", "", "JavaScript source to run in Safari; target --window-id or the front document")
 	file := fs.String("file", "", "path to JavaScript source file")
 	outPath := fs.String("out", "", "write JavaScript result to PATH instead of stdout")
+	windowID := fs.Int64("window-id", 0, "exact agent-created Safari window id returned by open-bg")
 	artifactDir := fs.String("artifact-dir", safarictl.DefaultArtifactDir, "directory for temporary JavaScript files")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if len(fs.Args()) != 0 {
 		fmt.Fprintln(stderr, "run-js does not accept positional arguments")
+		return 2
+	}
+	if *windowID < 0 {
+		fmt.Fprintln(stderr, "run-js --window-id must be a positive Safari window id")
 		return 2
 	}
 	source, ok := readJavaScriptInput(*script, *file, stderr)
@@ -174,7 +179,9 @@ func runJavaScript(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	result, err := safarictl.New(*artifactDir).RunJavaScript(ctx, source)
+	session := safarictl.New(*artifactDir)
+	session.TargetWindowID = *windowID
+	result, err := session.RunJavaScript(ctx, source)
 	if err != nil {
 		fmt.Fprintln(stderr, safarictl.FormatAutomationError(err))
 		return 1
@@ -409,7 +416,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  close-window close the exact Safari window returned by open-bg")
 	fmt.Fprintln(w, "  status       print front Safari document title/url/readyState")
 	fmt.Fprintln(w, "  check-js     verify Safari JavaScript-from-Apple-Events permission")
-	fmt.Fprintln(w, "  run-js       run guarded JavaScript in the front Safari document")
+	fmt.Fprintln(w, "  run-js       run guarded JavaScript in the front document or exact --window-id")
 	fmt.Fprintln(w, "  snapshot     capture DOM text and links from Safari page context")
 	fmt.Fprintln(w, "  fetch-file   fetch authenticated resource in Safari page context and save it")
 	fmt.Fprintln(w, "  version      print version")
