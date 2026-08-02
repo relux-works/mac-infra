@@ -1,0 +1,42 @@
+{
+  "contract_version": "board-goal-v2",
+  "goal_id": "PRIMARY-GOAL-260729-1ipi30",
+  "revision": 1,
+  "expected_previous_revision": 0,
+  "owner": {
+    "kind": "parent",
+    "id": "primary"
+  },
+  "kind": "alignment",
+  "objective": "Diagnose why Apple Music playback is not starting on this Mac, using read-only evidence first and avoiding disruptive resets without approval.",
+  "scope": {
+    "requested_ids": null,
+    "resolved_leaf_items": null
+  },
+  "mutation_authority": "agent_discretion",
+  "success_predicate": "alignment_handled",
+  "provider_condition": "The bound parent session has handled this exact alignment revision.",
+  "native_reflection": "required",
+  "state": "active",
+  "legacy_refs": [
+    {
+      "contract": "primary-goal-v1",
+      "id": "PRIMARY-GOAL-260729-1ipi30",
+      "revision": 1
+    }
+  ],
+  "role_policy": {},
+  "mutation": {
+    "kind": "created",
+    "reason": "User reported Apple Music album playback does not start and asked for diagnosis.",
+    "actor_context": {
+      "kind": "agent",
+      "actor_id": "alexis"
+    },
+    "authority": "agent_discretion"
+  },
+  "created_at": "2026-07-29T11:03:25.925837Z",
+  "updated_at": "2026-07-29T11:03:25.925837Z",
+  "created_by": "alexis",
+  "reason": "User reported Apple Music album playback does not start and asked for diagnosis."
+}

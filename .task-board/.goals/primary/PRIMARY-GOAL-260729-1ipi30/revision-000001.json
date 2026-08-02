@@ -1,0 +1,20 @@
+{
+  "contract": "primary-goal-v1",
+  "id": "PRIMARY-GOAL-260729-1ipi30",
+  "revision": 1,
+  "state": "active",
+  "scope": {
+    "kind": "board"
+  },
+  "objective": "Diagnose why Apple Music playback is not starting on this Mac, using read-only evidence first and avoiding disruptive resets without approval.",
+  "mutation": {
+    "kind": "created",
+    "reason": "User reported Apple Music album playback does not start and asked for diagnosis.",
+    "actor": {
+      "kind": "primary_parent",
+      "actor_id": "alexis"
+    }
+  },
+  "created_at": "2026-07-29T11:03:25.925837Z",
+  "updated_at": "2026-07-29T11:03:25.925837Z"
+}

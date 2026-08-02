@@ -1,0 +1,46 @@
+{
+  "contract_version": "board-goal-v2",
+  "goal_id": "PRIMARY-GOAL-260729-1ipi30",
+  "revision": 2,
+  "expected_previous_revision": 1,
+  "previous_ref": {
+    "id": "PRIMARY-GOAL-260729-1ipi30",
+    "revision": 1
+  },
+  "owner": {
+    "kind": "parent",
+    "id": "primary"
+  },
+  "kind": "alignment",
+  "objective": "Diagnose why Apple Music playback is not starting on this Mac using read-only evidence first, and extend mac-infra power management with separate reversible controls for system sleep, display sleep, and idle screen locking without weakening manual-lock password security.",
+  "scope": {
+    "requested_ids": null,
+    "resolved_leaf_items": null
+  },
+  "mutation_authority": "agent_discretion",
+  "success_predicate": "alignment_handled",
+  "provider_condition": "The bound parent session has handled this exact alignment revision.",
+  "native_reflection": "required",
+  "state": "active",
+  "legacy_refs": [
+    {
+      "contract": "primary-goal-v1",
+      "id": "PRIMARY-GOAL-260729-1ipi30",
+      "revision": 2
+    }
+  ],
+  "role_policy": {},
+  "mutation": {
+    "kind": "alignment_realigned",
+    "reason": "The user added a new power-management requirement and explicitly requested independent controls instead of one combined command.",
+    "actor_context": {
+      "kind": "agent",
+      "actor_id": "alexis"
+    },
+    "authority": "agent_discretion"
+  },
+  "created_at": "2026-07-29T11:03:25.925837Z",
+  "updated_at": "2026-08-02T15:09:48.921132Z",
+  "created_by": "alexis",
+  "reason": "The user added a new power-management requirement and explicitly requested independent controls instead of one combined command."
+}

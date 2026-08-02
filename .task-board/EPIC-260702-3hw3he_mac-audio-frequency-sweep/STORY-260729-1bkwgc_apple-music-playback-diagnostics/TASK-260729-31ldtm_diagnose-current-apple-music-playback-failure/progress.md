@@ -1,5 +1,5 @@
 ## Status
-to-review
+done
 
 ## Review
 none
@@ -20,7 +20,7 @@ notEstimated
 (empty)
 
 ## Notes
-Read-only diagnosis completed. Immediate failure: unresolved placeholder produces an empty playback queue after ~10 seconds. Strong upstream cause: expired FairPlay lease/no online keys during TLS and network-path instability. No reset or network mutation performed. Evidence and remediation order are in apple-music-playback-diagnosis.md.
+Read-only diagnosis completed and committed as b1d03ed. Evidence is sanitized; no disruptive reset or network mutation was performed.
 
 ## Precondition Resources
 (none)
@@ -32,7 +32,7 @@ Read-only diagnosis completed. Immediate failure: unresolved placeholder produce
 2026-07-29T11:03:57Z
 
 ## Last Update
-2026-07-29T11:22:05Z
+2026-08-02T19:50:44Z
 
 ## Assigned To
 codex
