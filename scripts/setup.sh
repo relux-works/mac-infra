@@ -120,5 +120,9 @@ echo
 echo "Inspect system-wide sleep prevention without mutation:"
 echo "  mac-infra-core sleep-prevention status"
 echo
+echo "Inspect separate display and idle-lock prevention policies:"
+echo "  mac-infra-core display-sleep-prevention status"
+echo "  mac-infra-core idle-lock-prevention status"
+echo
 echo "Then reset audio without sudo:"
 echo "  mac-audio-reset reset"

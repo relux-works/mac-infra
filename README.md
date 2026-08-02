@@ -12,11 +12,11 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-video-profile` | Diagnose macOS video/display smoothness loss, WindowServer/GPU pressure, and Docker/VM rendering load | `mac-video-profile snapshot`, `mac-video-profile capture --logs` | `.temp/mac-video-profile/capture-*` |
 | `mac-disk-profile` | Profile disk usage and explain heavy paths without deleting files | `mac-disk-profile scan PATH`, `mac-disk-profile top PATH`, `mac-disk-profile explain PATH` | optional JSON artifact via `--json PATH` |
 | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
-| `mac-safari-session` | Read and harvest authenticated Safari pages through Apple Events without exporting cookies | `mac-safari-session open-bg URL`, `mac-safari-session close-window --id ID`, `mac-safari-session check-js`, `mac-safari-session snapshot --url URL --json PATH`, `mac-safari-session fetch-file --page URL --resource URL --out PATH` | temporary JS under `.temp/mac-safari-session/`, optional snapshots/download metadata wherever specified |
-| `mac-infra-core` | Privileged LaunchDaemon helper for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention status`, `mac-infra-core sleep-prevention enable`, `mac-infra-core sleep-prevention disable`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | `/Library/LaunchDaemons/works.relux.mac-infra-core.plist`, `/var/run/works.relux.mac-infra-core.sock` |
+| `mac-safari-session` | Read and harvest authenticated Safari pages through Apple Events without exporting cookies | `mac-safari-session open-bg URL`, `mac-safari-session run-js --window-id ID --script JS`, `mac-safari-session close-window --id ID`, `mac-safari-session check-js`, `mac-safari-session snapshot --url URL --json PATH`, `mac-safari-session fetch-file --page URL --resource URL --out PATH` | temporary JS under `.temp/mac-safari-session/`, optional snapshots/download metadata wherever specified |
+| `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display LaunchAgent under `~/Library/LaunchAgents/`; idle-lock restore snapshot under `~/Library/Application Support/mac-infra/` |
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
 | `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
-| `scripts/deinit.sh` | Remove user-level installation | `./scripts/deinit.sh` | removes symlinks and runtime skill copy |
+| `scripts/deinit.sh` | Remove user-level installation | `./scripts/deinit.sh` | disables the managed display assertion when possible, then removes symlinks and runtime skill copy |
 
 ## Sleep Prevention Workflow
 
@@ -45,6 +45,38 @@ mac-infra-core request-permissions sudo
 mac-infra-core install
 mac-infra-core sleep-prevention status
 ```
+
+## Separate Display And Idle-Lock Prevention
+
+System sleep, display sleep, and automatic screen saver start are independent
+policies. Inspect or change each one separately:
+
+```bash
+mac-infra-core sleep-prevention status
+mac-infra-core display-sleep-prevention status
+mac-infra-core idle-lock-prevention status
+
+mac-infra-core display-sleep-prevention enable
+mac-infra-core idle-lock-prevention enable
+```
+
+`display-sleep-prevention enable` installs a current-user LaunchAgent that keeps
+one `/usr/bin/caffeinate -d` assertion alive. The assertion prevents idle display
+sleep on AC and battery while that user session is logged in. It does not change
+`pmset` timers, system sleep, UPS policy, or other assertions. `disable` boots
+out the LaunchAgent and removes its plist, so there are no timer values to
+restore and no sudo requirement.
+
+`idle-lock-prevention enable` prevents the automatic screen-saver trigger that
+leads to idle Lock Screen. Internally it captures the current user's ByHost
+`com.apple.screensaver idleTime`, then sets it to `0`. `disable` restores the
+captured value or removes the key when it was originally absent. This command
+runs as the current user and does not need the privileged daemon.
+
+Enable both display sleep and idle-lock prevention to eliminate the two idle
+triggers that lead to automatic Lock Screen. The commands deliberately do not call
+`sysadminctl -screenLock off`: manual Lock Screen remains available and the
+existing password-after-lock policy remains unchanged.
 
 ## Audio Sweep Workflow
 
@@ -223,7 +255,16 @@ mac-safari-session run-js --script 'document.body.innerText.slice(0, 5000)'
 mac-safari-session run-js --file .temp/mac-safari-session/extract.js --out .temp/mac-safari-session/result.txt
 ```
 
-The guarded JS path refuses obvious browser-secret reads such as `document.cookie`, `cookieStore`, `localStorage`, and `sessionStorage`. Use it for DOM extraction and page-state inspection, not credential dumping.
+To keep a multi-step interaction in the exact agent-created background window,
+pass the `window-id` printed by `open-bg`. Do not use this option for a
+pre-existing user window; close the agent-created target after use:
+
+```bash
+mac-safari-session run-js --window-id 12345 --script 'document.title'
+mac-safari-session close-window --id 12345
+```
+
+The guarded JS path refuses obvious browser-secret reads such as `document.cookie`, `cookieStore`, `localStorage`, and `sessionStorage`. Page status and metadata redact OAuth-style query values. Use it for DOM extraction and page-state inspection, not credential dumping.
 
 Fetch a resource that direct `curl` cannot access because authentication lives in Safari:
 

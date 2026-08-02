@@ -3,6 +3,14 @@
 > Institutional memory. Concise, factual, high-signal.
 > Newest entries first. One block per insight.
 
+## 2026-08-02
+
+### 1815 — Idle Lock Prevention Split Into Independent Policies
+- DECISION: `TASK-260802-19m3qg` keeps system sleep, display sleep, and idle-lock prevention as separate commands; there is no combined all-policy mutation.
+- SAFETY: Idle-lock prevention does not call `sysadminctl -screenLock off`; manual Lock Screen and the immediate password policy remain unchanged.
+- FIX: Display prevention uses a persistent current-user `/usr/bin/caffeinate -d` LaunchAgent without rewriting `pmset`; `idle-lock-prevention` captures and restores the current user's ByHost `idleTime` preference to control the automatic screen-saver lock trigger.
+- SCOPE: `internal/maccore`, `cmd/mac-infra-core`, `README.md`, `agents/skills/mac-infra/SKILL.md`, `scripts/setup.sh`, and installed-command verification.
+
 ## 2026-07-19
 
 ### 1742 — System-Wide Sleep Prevention Contract Resolved

@@ -79,6 +79,11 @@ triggers:
   - prevent Mac sleep
   - disable system sleep
   - pmset disablesleep
+  - prevent display sleep
+  - disable display sleep
+  - prevent screen lock
+  - prevent idle lock
+  - prevent screen saver
   - частотный тест
   - аудиотест
   - тест слуха
@@ -88,6 +93,10 @@ triggers:
   - запретить сон мака
   - не давать маку спать
   - отключить сон macOS
+  - не гасить экран
+  - не выключать монитор
+  - не блокировать экран
+  - запретить локскрин
   - что жрет проц
   - жрет процессор
   - жрет память
@@ -157,6 +166,50 @@ mac-infra-core sleep-prevention disable
 - `scripts/setup.sh` updates the user binary and installed skill but does not
   restart an existing privileged daemon. Run `mac-infra-core install` after the
   first setup and after core binary updates before using `enable` or `disable`.
+
+## Separate Display And Idle-Lock Prevention Workflow
+
+Do not collapse system sleep, display sleep, and idle Lock Screen behavior into
+one mutation. Inspect and control the independent policies separately:
+
+```bash
+mac-infra-core sleep-prevention status
+mac-infra-core display-sleep-prevention status
+mac-infra-core idle-lock-prevention status
+```
+
+When the user explicitly requests that the monitor stay on, use:
+
+```bash
+mac-infra-core display-sleep-prevention enable
+```
+
+This installs a current-user LaunchAgent that keeps one fixed
+`/usr/bin/caffeinate -d` assertion alive. It applies on AC and battery while the
+user is logged in, does not rewrite `pmset` timers, and does not need the root
+daemon. Disable boots out the assertion and removes the LaunchAgent plist:
+
+```bash
+mac-infra-core display-sleep-prevention disable
+```
+
+When the user explicitly requests prevention of automatic idle Lock Screen,
+use the current-user command:
+
+```bash
+mac-infra-core idle-lock-prevention enable
+mac-infra-core idle-lock-prevention disable
+```
+
+The command prevents the automatic screen-saver lock trigger by capturing and
+restoring the current host's `com.apple.screensaver idleTime` value. Enable both
+display sleep and idle-lock prevention to prevent the two idle triggers that
+lead to Lock Screen. Status reports that display sleep remains a separate policy.
+
+Never use `sysadminctl -screenLock off` for this workflow. Manual Lock Screen
+and the existing password-after-lock policy must remain intact. Idle-lock
+disable refuses to invent an `idleTime` restore value when no saved snapshot
+exists.
 
 ## Audio Frequency Sweep Workflow
 
@@ -278,9 +331,19 @@ mac-safari-session run-js --script 'document.body.innerText.slice(0, 5000)'
 mac-safari-session run-js --file .temp/mac-safari-session/extract.js --out .temp/mac-safari-session/result.txt
 ```
 
+For multi-step work in an agent-created background window, address the exact
+`window-id` printed by `open-bg`. Never target a pre-existing user window with
+this option; close the agent-created window when finished:
+
+```bash
+mac-safari-session run-js --window-id 12345 --script 'document.title'
+mac-safari-session close-window --id 12345
+```
+
 `run-js` refuses obvious browser-secret reads such as `document.cookie`,
 `cookieStore`, `localStorage`, and `sessionStorage`. Do not bypass this by
-writing ad hoc AppleScript for secret extraction.
+writing ad hoc AppleScript for secret extraction. Page status and metadata
+redact OAuth-style query values before printing or persistence.
 
 For authenticated downloads where direct `curl` returns `401` or otherwise lacks
 the Safari session, fetch inside the page context and pull the response body back
