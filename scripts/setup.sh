@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 BUILD_DIR="$PROJECT_ROOT/bin"
+HEARTBEAT_LAUNCHER_DIR="$HOME/Library/Application Support/mac-infra/browser-session/bin"
+HEARTBEAT_LAUNCHER="$HEARTBEAT_LAUNCHER_DIR/mac-browser-heartbeat-launcher"
 SKILL_NAME="mac-infra"
 SKILL_SOURCE="$PROJECT_ROOT/agents/skills/$SKILL_NAME"
 SKILL_RUNTIME="$HOME/.agents/skills/$SKILL_NAME"
@@ -45,6 +47,10 @@ if ! command -v go >/dev/null 2>&1; then
   echo "go is required" >&2
   exit 1
 fi
+if [[ ! -x /usr/bin/codesign ]]; then
+  echo "/usr/bin/codesign is required for the managed browser heartbeat" >&2
+  exit 1
+fi
 
 if git -C "$PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   BUILD_VERSION="$(git -C "$PROJECT_ROOT" describe --tags --always 2>/dev/null || echo dev)"
@@ -71,6 +77,41 @@ echo "Building mac-cleanup..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-cleanup" ./cmd/mac-cleanup
 echo "Building mac-safari-session..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-safari-session" ./cmd/mac-safari-session
+echo "Signing mac-safari-session for an actionable Automation identity..."
+SAFARI_DESIGNATED_REQUIREMENT='designated => identifier "works.relux.mac-infra.safari-session"'
+/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.safari-session --requirements "=$SAFARI_DESIGNATED_REQUIREMENT" "$BUILD_DIR/mac-safari-session"
+/usr/bin/codesign --verify --strict "$BUILD_DIR/mac-safari-session"
+SAFARI_OBSERVED_REQUIREMENT=$(/usr/bin/codesign -d -r- "$BUILD_DIR/mac-safari-session" 2>&1)
+if [[ "$SAFARI_OBSERVED_REQUIREMENT" != *"$SAFARI_DESIGNATED_REQUIREMENT"* ]]; then
+  echo "mac-safari-session signing did not produce the stable designated requirement" >&2
+  exit 1
+fi
+echo "Building mac-chrome-session..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-chrome-session" ./cmd/mac-chrome-session
+echo "Signing mac-chrome-session for an actionable Automation identity..."
+CHROME_DESIGNATED_REQUIREMENT='designated => identifier "works.relux.mac-infra.browser-session"'
+/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.browser-session --requirements "=$CHROME_DESIGNATED_REQUIREMENT" "$BUILD_DIR/mac-chrome-session"
+/usr/bin/codesign --verify --strict "$BUILD_DIR/mac-chrome-session"
+CHROME_OBSERVED_REQUIREMENT=$(/usr/bin/codesign -d -r- "$BUILD_DIR/mac-chrome-session" 2>&1)
+if [[ "$CHROME_OBSERVED_REQUIREMENT" != *"$CHROME_DESIGNATED_REQUIREMENT"* ]]; then
+  echo "mac-chrome-session signing did not produce the stable designated requirement" >&2
+  exit 1
+fi
+echo "Installing stable Chrome/Safari heartbeat launcher identity..."
+mkdir -p "$HEARTBEAT_LAUNCHER_DIR"
+chmod 700 "$HEARTBEAT_LAUNCHER_DIR"
+HEARTBEAT_LAUNCHER_TMP="$(mktemp "$HEARTBEAT_LAUNCHER_DIR/.mac-browser-heartbeat-launcher.XXXXXX")"
+cp "$BUILD_DIR/mac-chrome-session" "$HEARTBEAT_LAUNCHER_TMP"
+chmod 700 "$HEARTBEAT_LAUNCHER_TMP"
+mv -f "$HEARTBEAT_LAUNCHER_TMP" "$HEARTBEAT_LAUNCHER"
+/usr/bin/codesign --verify --strict "$HEARTBEAT_LAUNCHER"
+HEARTBEAT_OBSERVED_REQUIREMENT=$(/usr/bin/codesign -d -r- "$HEARTBEAT_LAUNCHER" 2>&1)
+if [[ "$HEARTBEAT_OBSERVED_REQUIREMENT" != *"$CHROME_DESIGNATED_REQUIREMENT"* ]]; then
+  echo "stable heartbeat launcher lost its designated requirement" >&2
+  exit 1
+fi
+echo "Building mac-browser-site..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-browser-site" ./cmd/mac-browser-site
 echo "Building mac-document-sanitize..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-document-sanitize" ./cmd/mac-document-sanitize
 echo "Building mac-infra-core..."
@@ -83,6 +124,8 @@ ln -sf "$BUILD_DIR/mac-video-profile" "$BIN_DIR/mac-video-profile"
 ln -sf "$BUILD_DIR/mac-disk-profile" "$BIN_DIR/mac-disk-profile"
 ln -sf "$BUILD_DIR/mac-cleanup" "$BIN_DIR/mac-cleanup"
 ln -sf "$BUILD_DIR/mac-safari-session" "$BIN_DIR/mac-safari-session"
+ln -sf "$BUILD_DIR/mac-chrome-session" "$BIN_DIR/mac-chrome-session"
+ln -sf "$BUILD_DIR/mac-browser-site" "$BIN_DIR/mac-browser-site"
 ln -sf "$BUILD_DIR/mac-document-sanitize" "$BIN_DIR/mac-document-sanitize"
 ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
 echo "Installed binary symlinks:"
@@ -93,6 +136,9 @@ echo "  $BIN_DIR/mac-video-profile -> $BUILD_DIR/mac-video-profile"
 echo "  $BIN_DIR/mac-disk-profile -> $BUILD_DIR/mac-disk-profile"
 echo "  $BIN_DIR/mac-cleanup     -> $BUILD_DIR/mac-cleanup"
 echo "  $BIN_DIR/mac-safari-session -> $BUILD_DIR/mac-safari-session"
+echo "  $BIN_DIR/mac-chrome-session -> $BUILD_DIR/mac-chrome-session"
+echo "  heartbeat launcher: $HEARTBEAT_LAUNCHER"
+echo "  $BIN_DIR/mac-browser-site -> $BUILD_DIR/mac-browser-site"
 echo "  $BIN_DIR/mac-document-sanitize -> $BUILD_DIR/mac-document-sanitize"
 echo "  $BIN_DIR/mac-infra-core  -> $BUILD_DIR/mac-infra-core"
 

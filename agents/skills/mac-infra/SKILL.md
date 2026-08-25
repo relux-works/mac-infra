@@ -5,9 +5,9 @@ description: >
   audio crackling, CoreAudio daemon glitches, Simulator audio issues, Apple
   Music distortion, USB DAC output problems, Bluetooth output problems, macOS
   video/display smoothness loss, WindowServer/GPU stutter, Docker/VM slideshow
-  symptoms, and broad CPU, memory, thermal, process load, authenticated Safari
-  browser-session inspection/harvesting, privacy-safe document intake, PII and
-  personal-data redaction for local or downloaded files, and related maintenance tasks.
+  symptoms, broad CPU, memory, thermal, and process load, authenticated Safari
+  and Google Chrome browser-session inspection/harvesting, privacy-safe document
+  intake, PII redaction, and related maintenance tasks.
 triggers:
   - mac load
   - load profile
@@ -118,6 +118,12 @@ triggers:
   - клинап мака
   - safari automation
   - Safari Apple Events
+  - Chrome automation
+  - Slack browser read
+  - Slack sealed read
+  - browser heartbeat
+  - Chrome heartbeat
+  - Safari heartbeat
   - browser automation
   - browser harvest
   - authenticated browser
@@ -140,6 +146,7 @@ triggers:
   - сафари
   - браузер
   - автоматизация сафари
+  - автоматизация хрома
   - кукисы
   - вычитать браузер
   - потрошить браузер
@@ -246,16 +253,33 @@ mac-audio-sweep device
 mac-audio-sweep tui
 ```
 
-## Safari Browser Session Workflow
+## Authenticated Browser Session Workflows
 
-Before inspecting, extracting, or downloading from an authenticated Safari
-session, read [safari-session.md](references/safari-session.md). Keep Safari in
-the background and never export cookies, browser storage, authorization headers,
-or tokens. Start with:
+Read [Safari](references/safari-session.md) or [Chrome](references/chrome-session.md) before page-context work; those references own the exact `run-js`, output, focus, trusted-input, native upload, download, Slack, permission, and secret-boundary contracts.
+Safari is exact-window/current-tab and always requires `--origin`; Chrome is exact-window/exact-tab. Keep either browser in the background unless the user explicitly requests visible handoff. Never export cookies, storage, authorization headers, credentials, or tokens. Start with `mac-safari-session check-js` or `mac-chrome-session list`; the user must manually enable JavaScript from Apple Events.
 
-```bash
-mac-safari-session check-js
-```
+For a user-authorized Chrome attachment, use `mac-chrome-session upload` with
+exact window/tab IDs, mandatory origin, `--human-authorized`, and one bounded
+versioned request on private stdin. It admits one visible file input and one to
+eight explicit regular files under declared extension/size bounds, requires a
+native chooser zero-to-one transition, retains that exact Accessibility sheet
+identity through selection and closure, refuses any unreadable or malformed
+sheet snapshot instead of retrying it as absence, and checks a bounded declared DOM `accept`
+contract plus effective ancestor visibility/hit targeting during preparation,
+immediately before native work, and again before success attestation, rejects
+non-default ancestor filter or mask effects, and verifies a trusted change plus
+exact filename/size/count metadata. Do not
+put source paths in argv, use an active-tab fallback, or claim success from the
+chooser action alone.
+
+Use `mac-chrome-session heartbeat` or `mac-safari-session heartbeat` for named keepalives in the shared private namespace and stable installed launcher. Every start requires exactly one finite `--ttl` or RFC3339 `--deadline`; `status`/`list` expose deadline and expiry. Migrate legacy deadline-free/content-addressed state with `heartbeat restart --name NAME --ttl DURATION` without focusing either browser.
+
+## Agent-Facing Browser Site Facade
+
+For structured repeated-item reads, cache-scoped search, or guarded site
+mutations, read [browser-site-facade.md](references/browser-site-facade.md).
+Use `mac-browser-site q|grep|m` with a private task-scoped adapter and retain the
+underlying exact-target/origin guard.
 
 ## Privacy-Safe Document Intake Workflow
 

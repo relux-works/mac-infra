@@ -6,31 +6,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/relux-works/mac-infra/internal/browsersession"
 )
 
 const DefaultArtifactDir = ".temp/mac-safari-session"
-
-var ErrSensitiveJavaScript = errors.New("javascript appears to read browser secrets")
 
 type Session struct {
 	OsaScriptPath  string
 	ArtifactDir    string
 	TargetWindowID int64
+	ExpectedOrigin string
 }
 
-type PageStatus struct {
-	Title      string `json:"title"`
-	URL        string `json:"url"`
-	ReadyState string `json:"readyState,omitempty"`
-	WindowID   int64  `json:"windowId,omitempty"`
-}
+type PageStatus = browsersession.PageStatus
 
 type Snapshot struct {
 	Title      string         `json:"title"`
@@ -76,7 +71,21 @@ func New(artifactDir string) *Session {
 }
 
 func (s Session) CheckJavaScript(ctx context.Context) (string, error) {
-	return s.RunJavaScript(ctx, "document.readyState;")
+	wrapped, err := browsersession.WrapJavaScript("document.readyState", "")
+	if err != nil {
+		return "", err
+	}
+	jsPath, cleanup, err := s.writeTempJavaScript(wrapped)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	raw, err := s.runAppleScript(ctx, checkJavaScriptAppleScript(), jsPath)
+	if err != nil {
+		return "", err
+	}
+	result, err := browsersession.ParseJavaScriptResult(raw, "")
+	return result.Value, err
 }
 
 func (s *Session) OpenBackground(ctx context.Context, targetURL string, wait time.Duration, minimize bool) (PageStatus, error) {
@@ -94,6 +103,7 @@ func (s *Session) OpenBackground(ctx context.Context, targetURL string, wait tim
 	}
 	status := decodePageStatusLines(out)
 	s.TargetWindowID = status.WindowID
+	s.ExpectedOrigin = browsersession.OriginOf(status.URL)
 	return status, nil
 }
 
@@ -106,15 +116,31 @@ func (s Session) Status(ctx context.Context) (PageStatus, error) {
 }
 
 func (s Session) RunJavaScript(ctx context.Context, source string) (string, error) {
-	if err := GuardJavaScript(source); err != nil {
-		return "", err
+	result, err := s.RunJavaScriptResult(ctx, source)
+	return result.Value, err
+}
+
+func (s Session) RunJavaScriptResult(ctx context.Context, source string) (browsersession.ExecutionResult, error) {
+	if s.TargetWindowID <= 0 {
+		return browsersession.ExecutionResult{}, errors.New("exact Safari window id is required")
 	}
-	jsPath, cleanup, err := s.writeTempJavaScript(source)
+	if strings.TrimSpace(s.ExpectedOrigin) == "" {
+		return browsersession.ExecutionResult{}, errors.New("expected origin is required for Safari page-context automation")
+	}
+	wrapped, err := browsersession.WrapJavaScript(source, s.ExpectedOrigin)
 	if err != nil {
-		return "", err
+		return browsersession.ExecutionResult{}, err
+	}
+	jsPath, cleanup, err := s.writeTempJavaScript(wrapped)
+	if err != nil {
+		return browsersession.ExecutionResult{}, err
 	}
 	defer cleanup()
-	return s.runAppleScript(ctx, runJavaScriptAppleScript(), jsPath, strconv.FormatInt(s.TargetWindowID, 10))
+	raw, err := s.runAppleScript(ctx, runJavaScriptAppleScript(), jsPath, strconv.FormatInt(s.TargetWindowID, 10))
+	if err != nil {
+		return browsersession.ExecutionResult{}, err
+	}
+	return browsersession.ParseJavaScriptResult(raw, s.ExpectedOrigin)
 }
 
 func (s *Session) CloseTarget(ctx context.Context) error {
@@ -123,6 +149,7 @@ func (s *Session) CloseTarget(ctx context.Context) error {
 	}
 	windowID := s.TargetWindowID
 	s.TargetWindowID = 0
+	s.ExpectedOrigin = ""
 	return s.CloseWindow(ctx, windowID)
 }
 
@@ -131,6 +158,14 @@ func (s Session) CloseWindow(ctx context.Context, windowID int64) error {
 		return errors.New("window id must be positive")
 	}
 	_, err := s.runAppleScript(ctx, closeWindowAppleScript(), strconv.FormatInt(windowID, 10))
+	return err
+}
+
+func (s Session) FocusWindow(ctx context.Context, windowID int64) error {
+	if windowID <= 0 {
+		return errors.New("window id must be positive")
+	}
+	_, err := s.runAppleScript(ctx, focusWindowAppleScript(), strconv.FormatInt(windowID, 10))
 	return err
 }
 
@@ -149,7 +184,10 @@ func (s Session) Snapshot(ctx context.Context, textLimit, linkLimit int) (Snapsh
 	if err := json.Unmarshal([]byte(out), &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("decode snapshot json: %w", err)
 	}
-	snapshot.URL = RedactSensitiveURL(snapshot.URL)
+	snapshot.URL = browsersession.RedactSensitiveURL(snapshot.URL)
+	for i := range snapshot.Links {
+		snapshot.Links[i].Href = browsersession.RedactSensitiveURL(snapshot.Links[i].Href)
+	}
 	return snapshot, nil
 }
 
@@ -179,9 +217,10 @@ func (s Session) PollFetch(ctx context.Context) (FetchMeta, error) {
 	if err := json.Unmarshal([]byte(out), &meta); err != nil {
 		return FetchMeta{}, fmt.Errorf("decode fetch metadata: %w", err)
 	}
-	meta.Endpoint = RedactSensitiveURL(meta.Endpoint)
-	meta.URL = RedactSensitiveURL(meta.URL)
-	meta.Headers = SanitizeHeaders(meta.Headers)
+	meta.Endpoint = browsersession.RedactSensitiveURL(meta.Endpoint)
+	meta.URL = browsersession.RedactSensitiveURL(meta.URL)
+	meta.Headers = browsersession.SanitizeHeaders(meta.Headers)
+	meta.Stack = ""
 	return meta, nil
 }
 
@@ -223,72 +262,6 @@ func (s Session) WaitForFetch(ctx context.Context, timeout time.Duration, interv
 			return last, fmt.Errorf("timed out waiting for Safari fetch; last state=%q", last.State)
 		case <-timer.C:
 		}
-	}
-}
-
-func GuardJavaScript(source string) error {
-	lower := strings.ToLower(source)
-	blocked := []string{
-		"document.cookie",
-		"cookiestore",
-		"localstorage",
-		"sessionstorage",
-	}
-	for _, needle := range blocked {
-		if strings.Contains(lower, needle) {
-			return fmt.Errorf("%w: blocked token %q; do not export cookies or browser storage", ErrSensitiveJavaScript, needle)
-		}
-	}
-	return nil
-}
-
-func SanitizeHeaders(headers map[string]string) map[string]string {
-	if len(headers) == 0 {
-		return headers
-	}
-	out := make(map[string]string, len(headers))
-	for key, value := range headers {
-		normalized := strings.ToLower(strings.TrimSpace(key))
-		if normalized == "" {
-			continue
-		}
-		if isSensitiveHeader(normalized) {
-			continue
-		}
-		out[normalized] = value
-	}
-	return out
-}
-
-// RedactSensitiveURL prevents OAuth assertions and similar query values from
-// escaping through page status, snapshot, or fetch metadata output.
-func RedactSensitiveURL(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.RawQuery == "" {
-		return rawURL
-	}
-
-	query := parsed.Query()
-	changed := false
-	for key := range query {
-		if isSensitiveQueryParameter(key) {
-			query[key] = []string{"[redacted]"}
-			changed = true
-		}
-	}
-	if !changed {
-		return rawURL
-	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
-}
-
-func isSensitiveQueryParameter(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "access_token", "assertion", "authorization", "client_secret", "code", "id_token", "refresh_token", "samlresponse", "session_state", "state", "token":
-		return true
-	default:
-		return false
 	}
 }
 
@@ -355,8 +328,7 @@ func StartFetchJavaScript(resourceURL string, chunkSize int) string {
       window.__macSafariSessionFetchJob = {
         state: "error",
         endpoint,
-        message: String(error && error.message || error),
-        stack: String(error && error.stack || ""),
+        message: "authenticated page-context fetch failed",
         startedAt: window.__macSafariSessionFetchJob && window.__macSafariSessionFetchJob.startedAt || "",
         finishedAt: new Date().toISOString()
       };
@@ -401,7 +373,7 @@ func FormatAutomationError(err error) string {
 		strings.Contains(lower, "errormessage") && strings.Contains(lower, "javascript") {
 		return msg + "\n\nSafari blocked JavaScript automation. Enable Safari -> Develop -> Allow JavaScript from Apple Events, then rerun the command."
 	}
-	if errors.Is(err, ErrSensitiveJavaScript) {
+	if errors.Is(err, browsersession.ErrSensitiveJavaScript) {
 		return msg
 	}
 	return msg
@@ -450,18 +422,13 @@ func (s Session) runAppleScript(ctx context.Context, script string, args ...stri
 		if detail == "" {
 			detail = err.Error()
 		}
+		lower := strings.ToLower(detail)
+		if strings.Contains(lower, "safari target window") && (strings.Contains(lower, "no longer open") || strings.Contains(lower, "has no tabs")) {
+			return "", &browsersession.TargetMissingError{Browser: browsersession.BrowserSafari, Target: strings.Join(args, "/"), Detail: detail}
+		}
 		return "", fmt.Errorf("osascript failed: %s", detail)
 	}
 	return strings.TrimRight(stdout.String(), "\n"), nil
-}
-
-func isSensitiveHeader(name string) bool {
-	switch name {
-	case "set-cookie", "cookie", "authorization", "proxy-authorization", "x-auth-token", "x-csrf-token":
-		return true
-	default:
-		return false
-	}
 }
 
 func openBackgroundAppleScript(minimize bool, wait time.Duration) string {
@@ -507,22 +474,30 @@ end tell
 `
 }
 
+func checkJavaScriptAppleScript() string {
+	return `on run argv
+  set jsPath to item 1 of argv
+  set jsSource to do shell script "/bin/cat " & quoted form of jsPath
+  tell application "Safari"
+    if (count of documents) = 0 then error "Safari has no open documents"
+    return do JavaScript jsSource in front document
+  end tell
+end run`
+}
+
 func runJavaScriptAppleScript() string {
 	return `on run argv
   set jsPath to item 1 of argv
   set targetWindowID to item 2 of argv as integer
-  set jsSource to do shell script "/bin/cat " & quoted form of jsPath
-  tell application "Safari"
-    if targetWindowID > 0 then
-      set targetWindows to every window whose id is targetWindowID
-      if (count of targetWindows) = 0 then error "Safari target window " & targetWindowID & " is no longer open"
-      set targetWindow to item 1 of targetWindows
-      if (count of tabs of targetWindow) = 0 then error "Safari target window " & targetWindowID & " has no tabs"
-      return do JavaScript jsSource in current tab of targetWindow
-    end if
-    if (count of documents) = 0 then error "Safari has no open documents"
-    return do JavaScript jsSource in front document
-  end tell
+	  set jsSource to do shell script "/bin/cat " & quoted form of jsPath
+	  tell application "Safari"
+	    if targetWindowID <= 0 then error "exact Safari window id is required"
+	    set targetWindows to every window whose id is targetWindowID
+	    if (count of targetWindows) = 0 then error "Safari target window " & targetWindowID & " is no longer open"
+	    set targetWindow to item 1 of targetWindows
+	    if (count of tabs of targetWindow) = 0 then error "Safari target window " & targetWindowID & " has no tabs"
+	    return do JavaScript jsSource in current tab of targetWindow
+	  end tell
 end run`
 }
 
@@ -538,6 +513,21 @@ func closeWindowAppleScript() string {
 end run`
 }
 
+// focusWindowAppleScript is the only Safari path allowed to activate Safari or
+// raise a window. It intentionally leaves the window's current tab unchanged.
+func focusWindowAppleScript() string {
+	return `on run argv
+  set targetWindowID to item 1 of argv as integer
+  tell application "Safari"
+    set targetWindows to every window whose id is targetWindowID
+    if (count of targetWindows) = 0 then error "Safari target window " & targetWindowID & " is no longer open"
+    set index of (item 1 of targetWindows) to 1
+    activate
+    return "focused"
+  end tell
+end run`
+}
+
 func decodePageStatusLines(raw string) PageStatus {
 	lines := strings.SplitN(raw, "\n", 4)
 	status := PageStatus{}
@@ -545,7 +535,7 @@ func decodePageStatusLines(raw string) PageStatus {
 		status.Title = lines[0]
 	}
 	if len(lines) > 1 {
-		status.URL = RedactSensitiveURL(lines[1])
+		status.URL = browsersession.RedactSensitiveURL(lines[1])
 	}
 	if len(lines) > 2 {
 		status.ReadyState = strings.TrimSpace(lines[2])
