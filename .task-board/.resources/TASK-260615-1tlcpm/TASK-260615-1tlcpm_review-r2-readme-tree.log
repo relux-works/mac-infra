@@ -1,0 +1,21 @@
+base object: commit
+base tree: cee101490acbc029db1ad7e007d0adf3f7b5b1ee
+prior accepted tree: 3a62d7285525fe7f2a5e7b31f2817b80ab36d777
+candidate tree: a779c15decb43ae5c0ba605d2408a92ab0888b50
+delta numstat: 1	0	README.md
+
+README candidate snippet:
+
+For authenticated browser downloads, keep the raw file task-scoped, sanitize it
+immediately, and inspect only the returned `sanitized_path`:
+
+```bash
+mac-safari-session fetch-file \
+  --page "https://example.com/private/page" \
+  --origin "https://example.com" \
+  --resource "/api/private/file.pdf" \
+  --out .temp/mac-document-sanitize/raw.pdf
+mac-document-sanitize --json .temp/mac-document-sanitize/raw.pdf
+```
+
+README fetch-file example carries the complete mandatory flag set: PASS

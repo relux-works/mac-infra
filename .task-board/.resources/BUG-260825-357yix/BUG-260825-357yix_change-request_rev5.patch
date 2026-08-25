@@ -1,0 +1,495 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index fca0919..1292ef2 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -5,6 +5,25 @@
+ 
+ ## 2026-08-25
+ 
++### 1823 — Partial Overlaps Must Prove Union Extension
++- FINDING: A contained Bearer/xox overlap proved duplicate-span suppression but never exercised the branch that extends a merged span past its current end.
++- FIX: `internal/chromectl/slack_test.go:352` drives a partially overlapping JWT/Bearer value through `Session.SlackRead`; deleting only `internal/chromectl/slack.go:792` now fails by exposing the synthetic Bearer tail.
++
++### 1751 — Slack Token Scanner Cost Is Response-Bounded
++- REGRESSION: Rescanning after each rejected token boundary made a hostile in-bounds Slack response quadratic and allowed sanitization to outlive the caller deadline.
++- FIX: Token regexps now encode their left boundary and expose only the token capture span, allowing one linear `FindAllStringSubmatchIndex` pass per secret class while retaining overlap union and nested-start detection.
++- EVIDENCE: Production `Session.SlackRead` exercises an exact 256 KiB adversarial response under a 3-second cost bound; the CR revision 2 scanner fails this named test while the linear scanner preserves the hostile synthetic prefix and redacts the terminal token.
++
++### 1727 — Slack Span Scanner Rescans Nested Starts
++- REGRESSION: Post-filtering non-overlapping regexp matches dropped valid xox/xapp starts nested inside a boundary-rejected match; exactly-three-segment JWT matching left 4+/5-part compact-token tails raw.
++- FIX: The revision-2 scanner resumed rejected searches at the next byte, consumed additional compact-token segments, and unioned overlapping secret classes before replacement; entry 1751 records the subsequent linear-scan correction.
++- EVIDENCE: Six production `Session.SlackRead` narrowing mutants fail named tests; uncached full tests, vet, build, signed install, and count-only `REF-SYN-4242` live smoke pass with zero raw token shapes.
++
++### 1658 — Slack Secret Redaction Preserves Safe Message Text
++- ROOT CAUSE: `internal/chromectl/slack.go` replaced any string containing an xox/xapp, Bearer, or JWT shape with one marker, discarding non-secret Slack message bytes.
++- FIX: The sanitizer collects every bounded secret span, unions overlaps, and replaces spans in place; structured secret keys, sensitive URLs, depth/node/size limits, exact guards, and generic storage refusal remain separate fail-closed layers.
++- EVIDENCE: Production `Session.SlackRead` and CLI-envelope tests cover repeated/adjacent classes, punctuation, Unicode, malformed JSON, composite secret keys, URLs, and bounds; three narrowing mutants fail named production-path tests with `-count=1`.
++
+ ### 1627 — Slack Sealed Reads Use Closed Typed Decoders
+ - DECISION: `internal/chromectl/slack.go` admits only five added reads; search query/page bounds are 512 bytes/1000, conversation ids are `C|D|G` plus 8..31 alphanumerics, and timestamps are bounded `seconds.fraction` values.
+ - SAFETY: Every method rejects unknown/trailing fields and secret-shaped strings; supplied `team_id` must equal the exact guarded workspace before `osascript`; page-origin/workspace guards, browser-only authorization, response bounds, and generic `run-js` storage refusal are unchanged.
+diff --git a/README.md b/README.md
+index 944276a..31f7ce8 100644
+--- a/README.md
++++ b/README.md
+@@ -366,8 +366,12 @@ validated before Chrome execution. Secret-shaped values, trailing JSON, and
+ unknown fields are refused. `auth.test` still accepts no arguments, and the
+ existing bounded `conversations.list` contract is unchanged.
+ 
+-The response is a versioned JSON envelope. It can contain ordinary Slack data,
+-so keep live evidence to booleans/counts with a bounded projection and never
++The response is a versioned JSON envelope. It can contain ordinary Slack data.
++Xox/xapp, Bearer, and JWT-shaped spans inside response strings are replaced in
++place with `[redacted]` while surrounding non-secret text is preserved. Compact
++JWT/JWE-like spans extend through every contiguous dot-delimited token segment,
++favoring fail-closed redaction over returning a possible token tail. Keep live
++evidence to booleans/counts with a bounded projection and never
+ persist channel, user, or message content unless the task explicitly requires a
+ private artifact.
+ 
+diff --git a/cmd/mac-chrome-session/main_test.go b/cmd/mac-chrome-session/main_test.go
+index 3386792..0f59d39 100644
+--- a/cmd/mac-chrome-session/main_test.go
++++ b/cmd/mac-chrome-session/main_test.go
+@@ -80,7 +80,7 @@ func TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	pollData, err := json.Marshal(map[string]any{"__macSlackSealedRead": "works.relux.mac-infra/slack-sealed-read/v1", "outcome": "ok", "response": `{"ok":true,"token":"xoxc-12345678-secret"}`})
++	pollData, err := json.Marshal(map[string]any{"__macSlackSealedRead": "works.relux.mac-infra/slack-sealed-read/v1", "outcome": "ok", "response": `{"ok":true,"token":"composite xoxc-12345678-secret value","message":"REF-SYN-4242 before xoxc-12345678-secret middle Bearer abcdefghijklmnop after"}`})
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -110,12 +110,12 @@ func TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope(t *testing.T) {
+ 	if code := run(args, &stdout, &stderr); code != 0 {
+ 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+ 	}
+-	for _, want := range []string{`"version": 1`, `"ok": true`, `"method": "auth.test"`, `"token": "[redacted]"`} {
++	for _, want := range []string{`"version": 1`, `"ok": true`, `"method": "auth.test"`, `"token": "[redacted]"`, `"message": "REF-SYN-4242 before [redacted] middle [redacted] after"`} {
+ 		if !strings.Contains(stdout.String(), want) {
+ 			t.Fatalf("output missing %q: %s", want, stdout.String())
+ 		}
+ 	}
+-	if strings.Contains(stdout.String(), "xoxc-") {
++	if strings.Contains(stdout.String(), "xoxc-") || strings.Contains(stdout.String(), "Bearer ") {
+ 		t.Fatalf("token leaked from production output: %s", stdout.String())
+ 	}
+ }
+diff --git a/internal/chromectl/slack.go b/internal/chromectl/slack.go
+index 937a801..553807d 100644
+--- a/internal/chromectl/slack.go
++++ b/internal/chromectl/slack.go
+@@ -11,6 +11,7 @@ import (
+ 	"io"
+ 	"os/exec"
+ 	"regexp"
++	"sort"
+ 	"strings"
+ 	"time"
+ 
+@@ -30,15 +31,16 @@ const (
+ 	slackReadGuardSentinel = "works.relux.mac-infra/slack-sealed-read/v1"
+ 	slackReadPollInterval  = 100 * time.Millisecond
+ 	slackBrowserDeadlineMS = 20_000
++	slackRedactedMarker    = "[redacted]"
+ )
+ 
+ var (
+-	workspaceIDPattern    = regexp.MustCompile(`^T[A-Z0-9]{8,}$`)
+-	conversationIDPattern = regexp.MustCompile(`^[CDG][A-Z0-9]{8,31}$`)
+-	slackTimestampPattern = regexp.MustCompile(`^[0-9]{1,16}\.[0-9]{1,6}$`)
+-	slackTokenPattern     = regexp.MustCompile(`(?i)(^|[^a-z0-9])(xox[a-z]-[a-z0-9-]{8,}|xapp-[a-z0-9-]{8,})($|[^a-z0-9])`)
+-	bearerTokenPattern    = regexp.MustCompile(`(?i)(^|[^a-z0-9])bearer[[:space:]]+[a-z0-9._~+/=-]{8,}`)
+-	jwtTokenPattern       = regexp.MustCompile(`(^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}($|[^A-Za-z0-9_-])`)
++	workspaceIDPattern     = regexp.MustCompile(`^T[A-Z0-9]{8,}$`)
++	conversationIDPattern  = regexp.MustCompile(`^[CDG][A-Z0-9]{8,31}$`)
++	slackTimestampPattern  = regexp.MustCompile(`^[0-9]{1,16}\.[0-9]{1,6}$`)
++	slackTokenSpanPattern  = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(xox[a-z]-[a-z0-9-]{8,}|xapp-[a-z0-9-]{8,})`)
++	bearerTokenSpanPattern = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(bearer[[:space:]]+[a-z0-9._~+/=-]{8,})`)
++	jwtTokenSpanPattern    = regexp.MustCompile(`(?:^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}(?:\.[A-Za-z0-9_-]+)*)`)
+ )
+ 
+ type SlackReadRequest struct {
+@@ -719,14 +721,12 @@ func sanitizeSlackValue(value any, depth int, nodes *int) (any, error) {
+ 		}
+ 		return out, nil
+ 	case string:
+-		if containsTokenShape(typed) {
+-			return "[redacted]", nil
+-		}
+ 		trimmed := strings.TrimSpace(typed)
+ 		if strings.HasPrefix(strings.ToLower(trimmed), "https://") || strings.HasPrefix(strings.ToLower(trimmed), "http://") {
+-			return browsersession.RedactSensitiveURL(trimmed), nil
++			start := strings.Index(typed, trimmed)
++			typed = typed[:start] + browsersession.RedactSensitiveURL(trimmed) + typed[start+len(trimmed):]
+ 		}
+-		return typed, nil
++		return redactSlackTokenSpans(typed), nil
+ 	default:
+ 		return typed, nil
+ 	}
+@@ -743,7 +743,64 @@ func isSlackSecretKey(key string) bool {
+ }
+ 
+ func containsTokenShape(value string) bool {
+-	return slackTokenPattern.MatchString(value) || bearerTokenPattern.MatchString(value) || jwtTokenPattern.MatchString(value)
++	return len(findSlackTokenSpans(value)) != 0
++}
++
++type slackTokenSpan struct {
++	start int
++	end   int
++}
++
++func redactSlackTokenSpans(value string) string {
++	spans := findSlackTokenSpans(value)
++	if len(spans) == 0 {
++		return value
++	}
++	var sanitized strings.Builder
++	sanitized.Grow(len(value))
++	cursor := 0
++	for _, span := range spans {
++		sanitized.WriteString(value[cursor:span.start])
++		sanitized.WriteString(slackRedactedMarker)
++		cursor = span.end
++	}
++	sanitized.WriteString(value[cursor:])
++	return sanitized.String()
++}
++
++func findSlackTokenSpans(value string) []slackTokenSpan {
++	var spans []slackTokenSpan
++	spans = appendSlackTokenSpans(spans, value, slackTokenSpanPattern)
++	spans = appendSlackTokenSpans(spans, value, bearerTokenSpanPattern)
++	spans = appendSlackTokenSpans(spans, value, jwtTokenSpanPattern)
++	if len(spans) < 2 {
++		return spans
++	}
++	sort.Slice(spans, func(left, right int) bool {
++		if spans[left].start == spans[right].start {
++			return spans[left].end > spans[right].end
++		}
++		return spans[left].start < spans[right].start
++	})
++	// Reuse the collection buffer while replacing it with ordered, disjoint spans.
++	merged := spans[:0]
++	for _, span := range spans {
++		if len(merged) == 0 || span.start >= merged[len(merged)-1].end {
++			merged = append(merged, span)
++			continue
++		}
++		if span.end > merged[len(merged)-1].end {
++			merged[len(merged)-1].end = span.end
++		}
++	}
++	return merged
++}
++
++func appendSlackTokenSpans(spans []slackTokenSpan, value string, pattern *regexp.Regexp) []slackTokenSpan {
++	for _, match := range pattern.FindAllStringSubmatchIndex(value, -1) {
++		spans = append(spans, slackTokenSpan{start: match[2], end: match[3]})
++	}
++	return spans
+ }
+ 
+ func (s Session) runJXAFromStdin(ctx context.Context, source, target string) (string, error) {
+diff --git a/internal/chromectl/slack_test.go b/internal/chromectl/slack_test.go
+index a8d97ac..1e305a7 100644
+--- a/internal/chromectl/slack_test.go
++++ b/internal/chromectl/slack_test.go
+@@ -4,8 +4,10 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
++	"math/rand"
+ 	"os"
+ 	"path/filepath"
++	"regexp"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -221,6 +223,13 @@ func TestSlackReadRefusesMalformedPendingTimeoutAndMissingTarget(t *testing.T) {
+ 			t.Fatalf("error kind = %q (%v)", kind, err)
+ 		}
+ 	})
++	t.Run("malformed-response-json", func(t *testing.T) {
++		osa := writeSlackFakeOsa(t, slackEnvelope(t, "started", ""), slackEnvelope(t, "ok", `{"unterminated":`), t.TempDir())
++		_, err := (Session{OsaScriptPath: osa}).SlackRead(context.Background(), "11", "22", SlackOrigin, "T073GL82HJB", request)
++		if kind := SlackReadErrorKind(err); kind != "response-invalid" {
++			t.Fatalf("error kind = %q (%v)", kind, err)
++		}
++	})
+ 	t.Run("timeout", func(t *testing.T) {
+ 		osa := writeSlackFakeOsa(t, slackEnvelope(t, "started", ""), slackEnvelope(t, "pending", ""), t.TempDir())
+ 		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+@@ -243,28 +252,228 @@ func TestSlackReadRefusesMalformedPendingTimeoutAndMissingTarget(t *testing.T) {
+ }
+ 
+ func TestSlackReadProductionPathRecursivelyRedactsSecrets(t *testing.T) {
+-	response := `{"ok":true,"token":"xoxc-12345678-secret","nested":{"authorization":"Bearer abcdefghijklmnop","safe":"xapp-1-abcdefgh-12345678","jwt":"abcdefghijkl.mnopqrstuvwx.yzABCDEFGHIJ"},"items":[{"api_key":"secret","url":"https://example.com/path?code=secret#private"}]}`
+-	osa := writeSlackFakeOsa(t, slackEnvelope(t, "started", ""), slackEnvelope(t, "ok", response), t.TempDir())
+-	request := SlackReadRequest{Version: SlackReadVersion, Method: "auth.test", Args: json.RawMessage(`{}`)}
+-	result, err := (Session{OsaScriptPath: osa}).SlackRead(context.Background(), "11", "22", SlackOrigin, "T073GL82HJB", request)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	encoded, err := json.Marshal(result.Data)
++	response := `{"ok":true,"auth_token":{"prefix":"safe","nested":["still","sensitive"]},"nested":{"authorization":"Bearer abcdefghijklmnop","safe":"ordinary"},"items":[{"api_key":["composite","secret"],"url":"https://example.com/path?code=secret&keep=ok#private"}]}`
++	data := slackReadProductionData(t, response)
++	encoded, err := json.Marshal(data)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	text := string(encoded)
+-	for _, leaked := range []string{"xoxc-12345678-secret", "Bearer abcdefghijklmnop", "xapp-1-abcdefgh-12345678", "abcdefghijkl.mnopqrstuvwx.yzABCDEFGHIJ", `"api_key":"secret"`, "code=secret", "#private"} {
++	for _, leaked := range []string{"Bearer abcdefghijklmnop", `"prefix":"safe"`, `"api_key":[`, "code=secret", "#private"} {
+ 		if strings.Contains(text, leaked) {
+ 			t.Fatalf("sanitized response leaked %q: %s", leaked, text)
+ 		}
+ 	}
+-	if strings.Count(text, "redacted") < 6 {
++	if strings.Count(text, "redacted") < 4 || !strings.Contains(text, "keep=ok") {
+ 		t.Fatalf("expected recursive redactions: %s", text)
+ 	}
+ }
+ 
++func TestSlackReadProductionPathPreservesNonSecretBytesAroundEveryTokenSpan(t *testing.T) {
++	const (
++		slackToken = "xoxc-12345678-secret"
++		appToken   = "xapp-1-abcdefgh-12345678"
++		bearer     = "Bearer abcdefghijklmnop"
++		jwt        = "abcdefghijkl.mnopqrstuvwx.yzABCDEFGHIJ"
++	)
++	input := map[string]any{
++		"standalone":  slackToken,
++		"surrounded":  "before " + slackToken + " after",
++		"repeated":    slackToken + " middle " + slackToken,
++		"adjacent":    slackToken + "|" + bearer + "|" + jwt,
++		"punctuation": "(" + appToken + ");",
++		"unicode":     "Привет " + slackToken + " мир",
++	}
++	raw, err := json.Marshal(input)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got := slackReadProductionData(t, string(raw))
++	want := map[string]string{
++		"standalone":  "[redacted]",
++		"surrounded":  "before [redacted] after",
++		"repeated":    "[redacted] middle [redacted]",
++		"adjacent":    "[redacted]|[redacted]|[redacted]",
++		"punctuation": "([redacted]);",
++		"unicode":     "Привет [redacted] мир",
++	}
++	for key, expected := range want {
++		if actual, ok := got[key].(string); !ok || actual != expected {
++			t.Errorf("%s = %#v, want %q", key, got[key], expected)
++		}
++	}
++}
++
++func TestSlackReadProductionPathBearerClassCannotBeNarrowed(t *testing.T) {
++	got := slackReadProductionData(t, `{"text":"before Bearer abcdefghijklmnop after"}`)
++	if got["text"] != "before [redacted] after" {
++		t.Fatalf("text = %#v", got["text"])
++	}
++}
++
++func TestSlackReadProductionPathEveryOccurrenceCannotBeNarrowed(t *testing.T) {
++	got := slackReadProductionData(t, `{"text":"xoxc-12345678-first/xoxc-87654321-second"}`)
++	if got["text"] != "[redacted]/[redacted]" {
++		t.Fatalf("text = %#v", got["text"])
++	}
++}
++
++func TestSlackReadProductionPathWholeStringRedactionCannotReturn(t *testing.T) {
++	got := slackReadProductionData(t, `{"text":"REF-SYN-4242 before xapp-1-abcdefgh-12345678 after"}`)
++	if got["text"] != "REF-SYN-4242 before [redacted] after" {
++		t.Fatalf("text = %#v", got["text"])
++	}
++}
++
++func TestSlackReadProductionPathRescansAfterRejectedTokenStart(t *testing.T) {
++	got := slackReadProductionData(t, `{"xapp":"9xapp-xapp-12345678secret","xox":"tag9xoxb-xoxb-12345678secret end"}`)
++	if got["xapp"] != "9xapp-[redacted]" {
++		t.Fatalf("xapp = %#v", got["xapp"])
++	}
++	if got["xox"] != "tag9xoxb-[redacted] end" {
++		t.Fatalf("xox = %#v", got["xox"])
++	}
++}
++
++func TestSlackReadProductionPathRedactsEveryCompactTokenSegment(t *testing.T) {
++	got := slackReadProductionData(t, `{"text":"before aaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc.dddddddddddd.eeeeeeeeeeee after"}`)
++	if got["text"] != "before [redacted] after" {
++		t.Fatalf("text = %#v", got["text"])
++	}
++}
++
++func TestSlackReadProductionPathUnionsOverlappingSecretSpans(t *testing.T) {
++	got := slackReadProductionData(t, `{"text":"pre Bearer xoxc-12345678-secret post"}`)
++	if got["text"] != "pre [redacted] post" {
++		t.Fatalf("text = %#v", got["text"])
++	}
++}
++
++func TestSlackReadProductionPathUnionsPartiallyOverlappingSecretSpans(t *testing.T) {
++	got := slackReadProductionData(t, `{"text":"REF-SYN-4242 aaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc-Bearer abcdefghij tail"}`)
++	if got["text"] != "REF-SYN-4242 [redacted] tail" {
++		t.Fatalf("text = %#v", got["text"])
++	}
++}
++
++func TestSlackReadProductionPathRedactsTokenInURLPath(t *testing.T) {
++	got := slackReadProductionData(t, `{"url":"https://example.com/p/xoxb-12345678-secret"}`)
++	if got["url"] != "https://example.com/p/[redacted]" {
++		t.Fatalf("url = %#v", got["url"])
++	}
++}
++
++func TestSlackReadProductionPathAtResponseCeilingMeetsCostBound(t *testing.T) {
++	const (
++		responsePrefix = `{"text":"`
++		responseSuffix = `"}`
++		token          = "xapp-1-abcdefgh-12345678"
++		costBound      = 3 * time.Second
++	)
++	bodyBytes := MaxSlackResponseBytes - len(responsePrefix) - len(responseSuffix)
++	hostilePrefixBytes := bodyBytes - len(token) - 1
++	hostilePrefix := strings.Repeat("9xapp-", hostilePrefixBytes/len("9xapp-")) +
++		strings.Repeat("9", hostilePrefixBytes%len("9xapp-")) + "|"
++	response := responsePrefix + hostilePrefix + token + responseSuffix
++	if len(response) != MaxSlackResponseBytes {
++		t.Fatalf("response bytes = %d, want %d", len(response), MaxSlackResponseBytes)
++	}
++
++	osa := writeSlackFakeOsa(t, slackEnvelope(t, "started", ""), slackEnvelope(t, "ok", response), t.TempDir())
++	request := SlackReadRequest{Version: SlackReadVersion, Method: "auth.test", Args: json.RawMessage(`{}`)}
++	type outcome struct {
++		result SlackReadResult
++		err    error
++	}
++	result := make(chan outcome, 1)
++	ctx, cancel := context.WithTimeout(context.Background(), costBound)
++	defer cancel()
++	go func() {
++		got, err := (Session{OsaScriptPath: osa}).SlackRead(ctx, "11", "22", SlackOrigin, "T073GL82HJB", request)
++		result <- outcome{result: got, err: err}
++	}()
++
++	select {
++	case got := <-result:
++		if got.err != nil {
++			t.Fatal(got.err)
++		}
++		data, ok := got.result.Data.(map[string]any)
++		if !ok {
++			t.Fatalf("data type = %T", got.result.Data)
++		}
++		want := hostilePrefix + slackRedactedMarker
++		if text, ok := data["text"].(string); !ok || text != want {
++			t.Fatalf("sanitized text did not preserve the hostile prefix and redact the final token")
++		}
++	case <-ctx.Done():
++		t.Fatalf("production SlackRead exceeded %s at the %d-byte response ceiling", costBound, MaxSlackResponseBytes)
++	}
++}
++
++func TestSlackReadProductionPathRejectsNestedTokenStartBeforeBrowserExecution(t *testing.T) {
++	request := SlackReadRequest{
++		Version: SlackReadVersion,
++		Method:  "search.messages",
++		Args:    json.RawMessage(`{"query":"9xapp-xapp-12345678secret"}`),
++	}
++	_, err := (Session{OsaScriptPath: filepath.Join(t.TempDir(), "must-not-execute")}).SlackRead(
++		context.Background(), "11", "22", SlackOrigin, "T073GL82HJB", request,
++	)
++	if SlackReadErrorKind(err) != "invalid-arguments" {
++		t.Fatalf("secret-shaped request reached browser execution: %v", err)
++	}
++}
++
++func TestSlackTokenSpanDetectorDoesNotNarrowLegacyDifferentialCorpus(t *testing.T) {
++	legacySlack := regexp.MustCompile(`(?i)(^|[^a-z0-9])(xox[a-z]-[a-z0-9-]{8,}|xapp-[a-z0-9-]{8,})($|[^a-z0-9])`)
++	legacyBearer := regexp.MustCompile(`(?i)(^|[^a-z0-9])bearer[[:space:]]+[a-z0-9._~+/=-]{8,}`)
++	legacyJWT := regexp.MustCompile(`(^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}($|[^A-Za-z0-9_-])`)
++	legacyContainsTokenShape := func(value string) bool {
++		return legacySlack.MatchString(value) || legacyBearer.MatchString(value) || legacyJWT.MatchString(value)
++	}
++
++	parts := []string{
++		"xox", "xoxb-12345678-secret", "xapp-", "xapp-1-abcdefgh-12345678",
++		"Bearer ", "abcdefghijkl", ".", "-", "_", "9", "a", " ", "|", "Ж", "🔐",
++	}
++	random := rand.New(rand.NewSource(260825))
++	legacyHits := 0
++	for index := 0; index < 200_000; index++ {
++		var value strings.Builder
++		for count := 1 + random.Intn(12); count > 0; count-- {
++			value.WriteString(parts[random.Intn(len(parts))])
++		}
++		input := value.String()
++		if !legacyContainsTokenShape(input) {
++			continue
++		}
++		legacyHits++
++		if !containsTokenShape(input) {
++			t.Fatalf("current detector admitted legacy-detected corpus case %d", index)
++		}
++	}
++	if legacyHits == 0 {
++		t.Fatal("differential corpus did not exercise a legacy-detected token shape")
++	}
++	t.Logf("current detector preserved all %d legacy detections across 200000 cases", legacyHits)
++}
++
++func TestSanitizeSlackResponsePreservesURLPolicyAndStructuredSecretKeys(t *testing.T) {
++	const sensitiveURL = "https://example.com/path?code=secret&keep=ok#private"
++	got, err := sanitizeSlackResponse([]byte(`{"url":"` + sensitiveURL + `","access_token":{"safe":"must not survive"}}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	data := got.(map[string]any)
++	if data["url"] != browsersession.RedactSensitiveURL(sensitiveURL) {
++		t.Fatalf("url = %#v", data["url"])
++	}
++	if data["access_token"] != "[redacted]" {
++		t.Fatalf("access_token = %#v", data["access_token"])
++	}
++}
++
+ func TestSanitizeSlackResponseBoundsDepthAndSize(t *testing.T) {
+ 	deep := strings.Repeat(`{"x":`, maxSlackResponseDepth+1) + `true` + strings.Repeat(`}`, maxSlackResponseDepth+1)
+ 	if _, err := sanitizeSlackResponse([]byte(deep)); SlackReadErrorKind(err) != "response-too-deep" {
+@@ -274,6 +483,30 @@ func TestSanitizeSlackResponseBoundsDepthAndSize(t *testing.T) {
+ 	if _, err := sanitizeSlackResponse(large); SlackReadErrorKind(err) != "response-too-large" {
+ 		t.Fatalf("large response error = %v", err)
+ 	}
++	nodes := `[` + strings.TrimSuffix(strings.Repeat(`0,`, maxSlackResponseNodes+1), ",") + `]`
++	if _, err := sanitizeSlackResponse([]byte(nodes)); SlackReadErrorKind(err) != "response-too-complex" {
++		t.Fatalf("complex response error = %v", err)
++	}
++	for _, malformed := range []string{`{"unterminated":`, `{"one":1} {"two":2}`} {
++		if _, err := sanitizeSlackResponse([]byte(malformed)); SlackReadErrorKind(err) != "response-invalid" {
++			t.Fatalf("malformed response error = %v", err)
++		}
++	}
++}
++
++func slackReadProductionData(t *testing.T, response string) map[string]any {
++	t.Helper()
++	osa := writeSlackFakeOsa(t, slackEnvelope(t, "started", ""), slackEnvelope(t, "ok", response), t.TempDir())
++	request := SlackReadRequest{Version: SlackReadVersion, Method: "auth.test", Args: json.RawMessage(`{}`)}
++	result, err := (Session{OsaScriptPath: osa}).SlackRead(context.Background(), "11", "22", SlackOrigin, "T073GL82HJB", request)
++	if err != nil {
++		t.Fatal(err)
++	}
++	data, ok := result.Data.(map[string]any)
++	if !ok {
++		t.Fatalf("data type = %T", result.Data)
++	}
++	return data
+ }
+ 
+ func slackEnvelope(t *testing.T, outcome, response string) string {

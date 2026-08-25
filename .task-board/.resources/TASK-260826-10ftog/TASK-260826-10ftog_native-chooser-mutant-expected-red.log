@@ -1,0 +1,5 @@
+--- FAIL: TestChromeAXUploadProductionPathRefusesPreexistingAndReplacedChooser (0.00s)
+    ax_darwin_test.go:103: pre-existing chooser refusal is missing "return count == 0 ? MacChromeAXOK : MacChromeAXFileChooserAmbiguous"
+FAIL
+FAIL	github.com/relux-works/mac-infra/internal/chromectl	0.979s
+FAIL

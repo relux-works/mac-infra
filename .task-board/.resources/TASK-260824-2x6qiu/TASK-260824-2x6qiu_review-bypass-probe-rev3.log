@@ -1,0 +1,35 @@
+TASK-260824-2x6qiu rev3 reviewer bypass probe
+Timestamp: 2026-08-26 04:13:14 MSK
+Reviewer run: RUN-260826-deaa15
+Candidate tree: a779c15decb43ae5c0ba605d2408a92ab0888b50
+
+Production path:
+  HeartbeatManager.Inspect
+    -> HeartbeatManager.expire
+    -> HeartbeatManager.runLaunchctl
+    -> isMissingLaunchAgent
+
+Attack:
+  Use the valid heartbeat name hb113 and an expired stored config. Invoke
+  Inspect with an executable fake launchctl that returns exit 1 and stderr:
+  "Operation not permitted while System Integrity Protection is engaged".
+  runLaunchctl composes the actual command arguments into the error, including
+  works.relux.mac-infra-browser-heartbeat.hb113.
+
+Command:
+  go run ./.temp/TASK-260824-2x6qiu/probe113 .temp/TASK-260824-2x6qiu/fake-launchctl
+
+Exit: 0 (the probe exits 0 only when the bypass reproduces)
+Output:
+  status=expired expired=true inspectErr=<nil> stateRemoved=true plistRemoved=true logRemoved=true
+  BYPASS_REPRODUCED: genuine launchctl bootout failure was reported as successful expiry
+
+Cause:
+  internal/browsersession/heartbeat.go:isMissingLaunchAgent treats any bare
+  substring "113" as missing-service evidence. The valid name hb113 supplies
+  that substring before the actual permission failure. The error is swallowed,
+  so Inspect reports successful expiry after removing restart artifacts even
+  though the KeepAlive job may still be loaded.
+
+Negative-evidence shape:
+  failed read/action treated as absence; bypass path around the bootout gate.

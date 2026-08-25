@@ -1,0 +1,137 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index 38ee20e..170842c 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -3,6 +3,28 @@
+ > Institutional memory. Concise, factual, high-signal.
+ > Newest entries first. One block per insight.
+ 
++## 2026-08-23
++
++### 0028 — Repeated DOM Extraction Must Be Deterministic
++- DECISION: The future agent-facing browser facade accepts an agent-selected element template plus a predicate or `skip`/`take`; a pure function performs matching, field extraction, filtering, and pagination.
++- DECISION: Agent cognition chooses the template and query parameters only; it must not interpret or normalize every repeated marketplace/list item individually.
++- FINDING: This GraphQL-like projection boundary keeps large repeated DOM lists out of agent context and makes extraction reproducible across runs.
++- SCOPE: Follow-up `TASK-260823-17qhsl`; transport remains `mac-chrome-session` or `mac-safari-session`.
++
++### 0014 — Background Browser Session Heartbeats Proven
++- MILESTONE: Concurrent exact-tab heartbeats kept authenticated FNS and T-Bank Chrome sessions usable while unrelated work continued.
++- FINDING: Periodic page-context pointer and harmless Shift events through `execute targetTab javascript` preserve activity without activating Chrome or selecting the tab.
++- DECISION: Chrome automation has silent and visible/handoff modes; silent is default, visible focus requires an explicit user request.
++- STATUS: The low-level pattern is documented and installed; a guarded `mac-chrome-session` lifecycle CLI remains a useful follow-up.
++
++## 2026-08-22
++
++### 2243 — Authenticated Chrome Apple Events Verified
++- MILESTONE: `TASK-260822-1db1bg` documented no-focus DOM inspection and interaction for exact authenticated Google Chrome window/tab IDs.
++- FINDING: Chrome 151 executes bounded page JavaScript after the user enables `View -> Developer -> Allow JavaScript from Apple Events`; a live `business.tbank.ru` title/origin smoke passed without activation.
++- SAFETY: Chrome retains cookies, browser storage, authorization headers, and tokens; raw Apple Events output stays private and only sanitized bounded results are inspected.
++- SCOPE: `agents/skills/mac-infra/SKILL.md`, `agents/skills/mac-infra/references/chrome-session.md`, and `README.md`.
++
+ ## 2026-08-03
+ 
+ ### 1114 — Privacy-Safe Document Intake Installed
+diff --git a/README.md b/README.md
+index 35d70b9..b16b8ab 100644
+--- a/README.md
++++ b/README.md
+@@ -13,6 +13,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
+ | `mac-disk-profile` | Profile disk usage and explain heavy paths without deleting files | `mac-disk-profile scan PATH`, `mac-disk-profile top PATH`, `mac-disk-profile explain PATH` | optional JSON artifact via `--json PATH` |
+ | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
+ | `mac-safari-session` | Read and harvest authenticated Safari pages through Apple Events without exporting cookies | `mac-safari-session open-bg URL`, `mac-safari-session run-js --window-id ID --script JS`, `mac-safari-session close-window --id ID`, `mac-safari-session check-js`, `mac-safari-session snapshot --url URL --json PATH`, `mac-safari-session fetch-file --page URL --resource URL --out PATH` | temporary JS under `.temp/mac-safari-session/`, optional snapshots/download metadata wherever specified |
++| Google Chrome Apple Events | Inspect or interact with an exact authenticated Chrome tab without focusing the browser or exporting session secrets | enable `View -> Developer -> Allow JavaScript from Apple Events`, enumerate window/tab IDs with `/usr/bin/osascript`, then run bounded JavaScript against the exact IDs | task-scoped private raw output under `.temp/`; inspect only `mac-document-sanitize` output |
+ | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
+ | `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display LaunchAgent under `~/Library/LaunchAgents/`; idle-lock restore snapshot under `~/Library/Application Support/mac-infra/` |
+ | `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
+@@ -334,3 +335,37 @@ mac-safari-session fetch-file \
+ `fetch-file` stores the base64 body in Safari memory as chunks, pulls the chunks back through Apple Events, decodes locally, writes the output file with `0600` permissions, and clears the Safari fetch job after the final chunk. When `--page` is present, it also pins all fetch steps to the exact background window and closes that window automatically on success or failure.
+ 
+ Safari has no true headless mode with the live user profile. Background mode avoids focus churn by using Apple Events without `activate` and then minimizing the created Safari window. Screenshots are intentionally outside this CLI because they require Screen Recording permission for the terminal app.
++
++## Chrome Browser Session Workflow
++
++Use Chrome when an authenticated site requires Chrome-specific behavior,
++extensions, or signing software. Chrome can execute DOM JavaScript through
++Apple Events without bringing its window forward, but the user must first turn
++on:
++
++```text
++View -> Developer -> Allow JavaScript from Apple Events
++```
++
++Enumerate window and tab IDs, resolve the intended URL from sanitized output,
++and pin every later read or click to both exact IDs. Do not use `activate`, the
++frontmost window, tab positions, or screen-coordinate clicks. Start with a
++non-mutating `document.title`, `location.origin`, and `document.readyState`
++smoke test before page-specific work.
++
++Chrome automation has two modes. Silent mode is the default: resolve the exact
++`targetWindow` and `targetTab` and execute DOM JavaScript directly on that tab.
++DOM reads, form events, and element clicks do not require selecting the tab or
++raising Chrome. Visible/handoff mode is allowed only when the user explicitly
++asks to open or show the page, work in their current tab, bring it forward, or
++prepare it for manual interaction. Only that explicit mode may activate Chrome
++or select the resolved tab; silent mode must not use `activate`, `set active
++tab`, `set index of window`, or System Events UI scripting.
++
++Chrome keeps the authenticated session. Never extract cookies, browser storage,
++authorization headers, or tokens for use by local tools. Keep DOM results
++bounded, write raw Apple Events output only to private task-scoped `.temp/`
++files, sanitize it with `mac-document-sanitize`, and inspect only the sanitized
++copy. See
++[`chrome-session.md`](agents/skills/mac-infra/references/chrome-session.md) for
++exact AppleScript examples and the interaction safety contract.
+diff --git a/agents/skills/mac-infra/SKILL.md b/agents/skills/mac-infra/SKILL.md
+index 9539643..fe0192b 100644
+--- a/agents/skills/mac-infra/SKILL.md
++++ b/agents/skills/mac-infra/SKILL.md
+@@ -5,9 +5,9 @@ description: >
+   audio crackling, CoreAudio daemon glitches, Simulator audio issues, Apple
+   Music distortion, USB DAC output problems, Bluetooth output problems, macOS
+   video/display smoothness loss, WindowServer/GPU stutter, Docker/VM slideshow
+-  symptoms, and broad CPU, memory, thermal, process load, authenticated Safari
+-  browser-session inspection/harvesting, privacy-safe document intake, PII and
+-  personal-data redaction for local or downloaded files, and related maintenance tasks.
++  symptoms, broad CPU, memory, thermal, and process load, authenticated Safari
++  and Google Chrome browser-session inspection/harvesting, privacy-safe document
++  intake, PII redaction, and related maintenance tasks.
+ triggers:
+   - mac load
+   - load profile
+@@ -118,6 +118,7 @@ triggers:
+   - клинап мака
+   - safari automation
+   - Safari Apple Events
++  - Chrome automation
+   - browser automation
+   - browser harvest
+   - authenticated browser
+@@ -140,6 +141,7 @@ triggers:
+   - сафари
+   - браузер
+   - автоматизация сафари
++  - автоматизация хрома
+   - кукисы
+   - вычитать браузер
+   - потрошить браузер
+@@ -257,6 +259,20 @@ or tokens. Start with:
+ mac-safari-session check-js
+ ```
+ 
++## Chrome Browser Session Workflow
++
++Before inspecting or interacting with an authenticated Google Chrome tab, read
++[chrome-session.md](references/chrome-session.md). Use silent mode by default:
++keep Chrome in the background and target the exact window and tab IDs. Switch
++to visible/handoff mode only when the user explicitly asks to open, show, or
++foreground the exact tab for viewing or manual interaction. Never export
++cookies, browser storage, authorization headers, or tokens. The user must first
++enable:
++
++```text
++View -> Developer -> Allow JavaScript from Apple Events
++```
++
+ ## Privacy-Safe Document Intake Workflow
+ 
+ Use this before reading or persisting extracted content when a local or

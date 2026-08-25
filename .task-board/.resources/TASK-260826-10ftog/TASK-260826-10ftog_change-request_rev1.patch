@@ -1,0 +1,473 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index c212a75..c95bc87 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -5,6 +5,23 @@
+ 
+ ## 2026-08-26
+ 
++### 0640 — Private Upload Decoder Errors Must Not Echo Field Names
++- ROOT CAUSE: `DecodeUploadRequest` wrapped `json.Decoder` errors, so an unknown JSON field name supplied on private stdin could be printed by `runUpload`; a local path or token embedded in that name crossed the privacy boundary.
++- FIX: `internal/chromectl/upload.go:80` collapses malformed/unknown-field decoding to one fixed diagnostic; the production CLI negative proves the marker reaches neither execution nor stdout/stderr.
++
++### 0639 — Canonical Origin Validation Must Normalize Case Explicitly
++- ROOT CAUSE: `validateExactTarget` claimed lowercase origins but `browsersession.OriginOf` preserves host case, so `https://Example.com` passed and reached page-context automation.
++- FIX: `internal/chromectl/trusted_input.go:181` explicitly requires the complete origin string to be lowercase; `TestUploadFilesProductionPathRejectsNonExactTargetBeforePageOrNativeAccess` reproduced the pre-fix reach and now refuses before browser/native calls.
++
++### 0638 — Visible File Inputs Need Geometry And Opacity Gates
++- ROOT CAUSE: The upload DOM gate checked only `getClientRects().length`, `display`, and `visibility`; zero-sized, off-viewport, `hidden`/`aria-hidden`, and `opacity:0` inputs could reach the native chooser path.
++- FIX: `internal/chromectl/upload.go:325` requires a positive on-viewport rectangle and rejects explicit hidden/opacity states; production-path refusal tests bind DOM refusal, target drift, trusted change, exact metadata, and AX non-invocation to `Session.UploadFiles`.
++
++### 0630 — Guarded Upload Entered Through Another Task Checkpoint
++- ANOMALY: `git log --follow -- internal/chromectl/upload.go` shows guarded Chrome upload first entered the Story branch in `a46d126`, the checkpoint for `BUG-260825-2s6iw4`; `TASK-260826-10ftog` has no Change Request.
++- SCOPE: The same commit carried `cmd/mac-chrome-session/main.go`, `internal/chromectl/upload.go`, README/setup, and the mac-infra Chrome-session contract; the current working tree already matches that implementation at `HEAD`.
++- DECISION: Do not restore the worktree's reverse/stale index or manufacture a code delta. Revalidate the production path in `HEAD`, publish the task candidate with task-scoped evidence, and require independent review to inspect the named upload call sites despite the inherited baseline.
++
+ ### 1615 — Four Leaks, One Missing Owner: Seal the Boundary, Not the Site
+ - FINDING: `fetch-file` leaked the protected resource four times in a row, each time at a different surface: production argv (rev1), forwarded child stderr/stdout (rev2), a self-minted nested `origin-mismatch` observed value (rev3), and — found by independent review of rev4 — the output preflight path, where `prepare output: inspect path: lstat .../<private path>: not a directory` printed the explicit private output path and the syscall text. `runFetchFile` had seven distinct print sites (flag parser on stderr, decode, validation, preflight, `FormatAutomationError` for transfer, commit, success), and `Session.FetchFile` returned whatever its internal branches happened to produce.
+ - ROOT CAUSE: Not four bugs. One missing owner. Every site made its own formatting decision, so each fix was local and the next unaudited site inherited the same freedom. Negative-evidence shape: **many variants, one unowned decision** — and, at each individual site, **bypass path around the check**.
+diff --git a/cmd/mac-chrome-session/fetch_file_argv_test.go b/cmd/mac-chrome-session/fetch_file_argv_test.go
+index ecacef7..4cded4e 100644
+--- a/cmd/mac-chrome-session/fetch_file_argv_test.go
++++ b/cmd/mac-chrome-session/fetch_file_argv_test.go
+@@ -161,3 +161,71 @@ func TestFetchFileProductionCLIRejectsResourceFlag(t *testing.T) {
+ 		t.Fatalf("refused invocation published output: %v", statErr)
+ 	}
+ }
++
++// TestUploadKeepsSourcePathsOutOfProductionCLIArgv drives the real upload
++// entry while its bounded request is blocked on private stdin. The source path
++// must exist only in that pipe: argv is durable process/session evidence and
++// is outside the explicitly authorized native file boundary.
++func TestUploadKeepsSourcePathsOutOfProductionCLIArgv(t *testing.T) {
++	binary := productionCLIBinary(t)
++	cmd := exec.Command(binary,
++		"upload",
++		"--window-id", "11",
++		"--tab-id", "22",
++		"--origin", "https://example.com",
++		"--human-authorized",
++		"--request-stdin",
++	)
++	stdin, err := cmd.StdinPipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	var combined strings.Builder
++	cmd.Stdout, cmd.Stderr = &combined, &combined
++	if err := cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = cmd.Process.Kill() }()
++
++	const marker = "argv-probe-private-upload-source.pdf"
++	const sourcePath = "/private/task-scoped/" + marker
++	request := `{"version":1,"inputSelector":"input[type=file]","paths":["` + sourcePath + `"],"allowedExtensions":[".pdf"],"maxFileBytes":1024,"maxTotalBytes":1024}`
++	if _, err := stdin.Write([]byte(request)); err != nil {
++		t.Fatal(err)
++	}
++
++	var argv string
++	deadline := time.Now().Add(15 * time.Second)
++	for {
++		argv, err = readProcessArgv(cmd.Process.Pid)
++		if err == nil && strings.Contains(argv, "upload") {
++			break
++		}
++		if time.Now().After(deadline) {
++			t.Fatalf("could not read the production upload argv, so path absence proves nothing: err=%v argv=%q", err, argv)
++		}
++		time.Sleep(20 * time.Millisecond)
++	}
++	for _, required := range []string{"mac-chrome-session", "upload", "--window-id", "--tab-id", "--origin", "--human-authorized", "--request-stdin"} {
++		if !strings.Contains(argv, required) {
++			t.Fatalf("ps did not observe the production upload argv (%q missing); the leak check would be vacuous: %q", required, argv)
++		}
++	}
++	for _, forbidden := range []string{marker, sourcePath, "/private/task-scoped", "--path", "--file"} {
++		if strings.Contains(argv, forbidden) {
++			t.Fatalf("mac-chrome-session upload argv leaked %q: %q", forbidden, argv)
++		}
++	}
++
++	if err := stdin.Close(); err != nil {
++		t.Fatal(err)
++	}
++	err = cmd.Wait()
++	exitErr, ok := err.(*exec.ExitError)
++	if !ok || exitErr.ExitCode() != 1 {
++		t.Fatalf("unavailable private source was not refused: err=%v out=%s", err, combined.String())
++	}
++	if strings.Contains(combined.String(), marker) || strings.Contains(combined.String(), sourcePath) {
++		t.Fatalf("upload refusal echoed the private source path: %s", combined.String())
++	}
++}
+diff --git a/cmd/mac-chrome-session/main_test.go b/cmd/mac-chrome-session/main_test.go
+index 219ca04..d8d54f5 100644
+--- a/cmd/mac-chrome-session/main_test.go
++++ b/cmd/mac-chrome-session/main_test.go
+@@ -72,19 +72,32 @@ func TestUploadRequiresExplicitAuthorizationAndKeepsPathsOutOfOutput(t *testing.
+ 		}
+ 		return chromectl.UploadResult{Version: chromectl.UploadVersion, OK: true, Origin: origin, Count: 1, Files: []string{"evidence.pdf"}}, nil
+ 	}
+-	stdinReader = bytes.NewReader(requestJSON)
+ 	var stdout, stderr bytes.Buffer
+-	unauthorized := []string{"upload", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--request-stdin"}
+-	if code := run(unauthorized, &stdout, &stderr); code != 2 {
+-		t.Fatalf("unauthorized code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+-	}
+-	if called {
+-		t.Fatal("upload executed without --human-authorized")
++	for name, args := range map[string][]string{
++		"missing-human-authorization": {"upload", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--request-stdin"},
++		"missing-window":              {"upload", "--tab-id", "2", "--origin", "https://example.com", "--human-authorized", "--request-stdin"},
++		"missing-tab":                 {"upload", "--window-id", "1", "--origin", "https://example.com", "--human-authorized", "--request-stdin"},
++		"missing-origin":              {"upload", "--window-id", "1", "--tab-id", "2", "--human-authorized", "--request-stdin"},
++		"missing-private-request":     {"upload", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--human-authorized"},
++	} {
++		t.Run(name, func(t *testing.T) {
++			called = false
++			stdinReader = bytes.NewReader(requestJSON)
++			stdout.Reset()
++			stderr.Reset()
++			if code := run(args, &stdout, &stderr); code != 2 {
++				t.Fatalf("missing gate code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++			}
++			if called {
++				t.Fatalf("upload executed with missing gate %s", name)
++			}
++		})
+ 	}
+ 	stdinReader = bytes.NewReader(requestJSON)
+ 	stdout.Reset()
+ 	stderr.Reset()
+-	authorized := append(unauthorized, "--human-authorized")
++	called = false
++	authorized := []string{"upload", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--human-authorized", "--request-stdin"}
+ 	if code := run(authorized, &stdout, &stderr); code != 0 {
+ 		t.Fatalf("authorized code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+ 	}
+@@ -93,6 +106,29 @@ func TestUploadRequiresExplicitAuthorizationAndKeepsPathsOutOfOutput(t *testing.
+ 	}
+ }
+ 
++func TestUploadProductionEntryDoesNotReflectPrivateUnknownFieldNames(t *testing.T) {
++	const privateMarker = "/private/task/private-upload-source.pdf"
++	oldInput, oldUpload := stdinReader, uploadChromeFiles
++	defer func() { stdinReader, uploadChromeFiles = oldInput, oldUpload }()
++	called := false
++	uploadChromeFiles = func(context.Context, string, string, string, chromectl.UploadRequest) (chromectl.UploadResult, error) {
++		called = true
++		return chromectl.UploadResult{}, nil
++	}
++	stdinReader = strings.NewReader(`{"version":1,"inputSelector":"#file","paths":["/tmp/evidence.pdf"],"allowedExtensions":[".pdf"],"maxFileBytes":1024,"maxTotalBytes":1024,"` + privateMarker + `":true}`)
++	var stdout, stderr bytes.Buffer
++	args := []string{"upload", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--human-authorized", "--request-stdin"}
++	if code := run(args, &stdout, &stderr); code != 2 {
++		t.Fatalf("unknown private field code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++	}
++	if called {
++		t.Fatal("malformed private request reached upload execution")
++	}
++	if strings.Contains(stdout.String(), privateMarker) || strings.Contains(stderr.String(), privateMarker) {
++		t.Fatalf("private request field was reflected: stdout=%q stderr=%q", stdout.String(), stderr.String())
++	}
++}
++
+ func TestFocusProductionEntryRequiresHumanAuthorizationAndOriginBeforeExecution(t *testing.T) {
+ 	marker := filepath.Join(t.TempDir(), "executed")
+ 	t.Setenv("MARKER", marker)
+diff --git a/internal/chromectl/trusted_input.go b/internal/chromectl/trusted_input.go
+index 35f3a1a..4191f72 100644
+--- a/internal/chromectl/trusted_input.go
++++ b/internal/chromectl/trusted_input.go
+@@ -178,7 +178,7 @@ func validateExactTarget(windowID, tabID, expectedOrigin string) error {
+ 	}
+ 	origin := strings.TrimSpace(expectedOrigin)
+ 	parsed, err := url.Parse(origin)
+-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || browsersession.OriginOf(origin) != origin {
++	if err != nil || origin != strings.ToLower(origin) || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || browsersession.OriginOf(origin) != origin {
+ 		return errors.New("origin must be an exact lowercase http(s) origin with no path, query, fragment, or credentials")
+ 	}
+ 	return nil
+diff --git a/internal/chromectl/upload.go b/internal/chromectl/upload.go
+index f388855..c6879fc 100644
+--- a/internal/chromectl/upload.go
++++ b/internal/chromectl/upload.go
+@@ -77,7 +77,7 @@ func DecodeUploadRequest(r io.Reader) (UploadRequest, error) {
+ 	decoder.DisallowUnknownFields()
+ 	var request UploadRequest
+ 	if err := decoder.Decode(&request); err != nil {
+-		return UploadRequest{}, fmt.Errorf("decode upload request: %w", err)
++		return UploadRequest{}, errors.New("decode upload request: malformed or unknown field")
+ 	}
+ 	var trailing any
+ 	if err := decoder.Decode(&trailing); err != io.EOF {
+@@ -321,7 +321,9 @@ func uploadPrepareJavaScript(inputSelector string, files []uploadFile, marker, s
+   let inputs;try{inputs=document.querySelectorAll(selector);}catch(_){return "invalid-input-selector";}
+   if(inputs.length===0)return "input-missing";if(inputs.length!==1)return "input-ambiguous";
+   const input=inputs[0];if(!(input instanceof HTMLInputElement)||String(input.type||"").toLowerCase()!=="file"||input.disabled)return "input-not-file";
+-  if(!input.getClientRects().length||getComputedStyle(input).visibility==="hidden"||getComputedStyle(input).display==="none")return "input-hidden";
++  const style=getComputedStyle(input),rects=Array.from(input.getClientRects());
++  const visibleRect=rects.some(rect=>rect.width>0&&rect.height>0&&rect.bottom>0&&rect.right>0&&rect.top<innerHeight&&rect.left<innerWidth);
++  if(input.hidden||input.getAttribute("aria-hidden")==="true"||style.visibility==="hidden"||style.display==="none"||Number(style.opacity)===0||!visibleRect)return "input-hidden";
+   if(expected.length>1&&!input.multiple)return "input-not-multiple";if(input.files&&input.files.length)return "input-not-empty";if(input[stateKey])return "probe-collision";
+   const oldAria=input.getAttribute("aria-label"),state={expected,changed:false,trusted:false,oldAria};
+   state.onChange=event=>{state.changed=true;state.trusted=event.isTrusted===true;};input.addEventListener("change",state.onChange);
+diff --git a/internal/chromectl/upload_test.go b/internal/chromectl/upload_test.go
+index 304c172..8eb5626 100644
+--- a/internal/chromectl/upload_test.go
++++ b/internal/chromectl/upload_test.go
+@@ -1,10 +1,14 @@
+ package chromectl
+ 
+ import (
++	"context"
++	"errors"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+ 	"testing"
++
++	"github.com/relux-works/mac-infra/internal/browsersession"
+ )
+ 
+ func validUploadRequest(paths ...string) UploadRequest {
+@@ -20,13 +24,16 @@ func validUploadRequest(paths ...string) UploadRequest {
+ }
+ 
+ func TestDecodeUploadRequestRejectsUnknownAndTrailingJSON(t *testing.T) {
++	const privateMarker = "/private/task/private-upload-source.pdf"
+ 	for name, input := range map[string]string{
+-		"unknown":  `{"version":1,"inputSelector":"#f","paths":["/tmp/a.pdf"],"allowedExtensions":[".pdf"],"maxFileBytes":1,"maxTotalBytes":1,"unexpected":true}`,
++		"unknown":  `{"version":1,"inputSelector":"#f","paths":["/tmp/a.pdf"],"allowedExtensions":[".pdf"],"maxFileBytes":1,"maxTotalBytes":1,"` + privateMarker + `":true}`,
+ 		"trailing": `{"version":1,"inputSelector":"#f","paths":["/tmp/a.pdf"],"allowedExtensions":[".pdf"],"maxFileBytes":1,"maxTotalBytes":1} {}`,
+ 	} {
+ 		t.Run(name, func(t *testing.T) {
+ 			if _, err := DecodeUploadRequest(strings.NewReader(input)); err == nil {
+ 				t.Fatal("unsafe request accepted")
++			} else if strings.Contains(err.Error(), privateMarker) {
++				t.Fatalf("private upload request reflected in decoder error: %v", err)
+ 			}
+ 		})
+ 	}
+@@ -110,7 +117,11 @@ func TestPrepareUploadRejectsSymlinkExtensionSizeAndDuplicateBasename(t *testing
+ func TestUploadJavaScriptRequiresUniqueVisibleFileInputAndTrustedExactMetadata(t *testing.T) {
+ 	files := []uploadFile{{Name: "a.pdf", Size: 12}, {Name: "b.doc", Size: 34}}
+ 	prepare := uploadPrepareJavaScript("#files", files, "nonce", "state")
+-	for _, required := range []string{"querySelectorAll", `toLowerCase()!=="file"`, "input-hidden", "input-not-multiple", "input-not-empty", `event.isTrusted===true`} {
++	for _, required := range []string{
++		"querySelectorAll", `toLowerCase()!=="file"`, "input.hidden", `getAttribute("aria-hidden")`,
++		"rect.width>0", "rect.top<innerHeight", "Number(style.opacity)===0", "input-hidden",
++		"input-not-multiple", "input-not-empty", `event.isTrusted===true`,
++	} {
+ 		if !strings.Contains(prepare, required) {
+ 			t.Fatalf("upload prepare missing %q", required)
+ 		}
+@@ -122,3 +133,206 @@ func TestUploadJavaScriptRequiresUniqueVisibleFileInputAndTrustedExactMetadata(t
+ 		}
+ 	}
+ }
++
++func TestUploadFilesProductionPathRejectsNonExactTargetBeforePageOrNativeAccess(t *testing.T) {
++	source := filepath.Join(t.TempDir(), "evidence.pdf")
++	if err := os.WriteFile(source, []byte("evidence"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	marker := filepath.Join(t.TempDir(), "browser-contacted")
++	t.Setenv("UPLOAD_BROWSER_MARKER", marker)
++	fake := filepath.Join(t.TempDir(), "osascript")
++	if err := os.WriteFile(fake, []byte("#!/bin/sh\ntouch \"$UPLOAD_BROWSER_MARKER\"\nexit 99\n"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	axCalls := 0
++	session := Session{
++		OsaScriptPath: fake,
++		AXProcessID: func() (int, error) {
++			axCalls++
++			return 123, nil
++		},
++		AXUploadFiles: func(int, string, string) error {
++			axCalls++
++			return nil
++		},
++	}
++	for name, target := range map[string][3]string{
++		"zero-window":          {"0", "22", "https://example.com"},
++		"non-canonical-tab":    {"11", "022", "https://example.com"},
++		"origin-with-path":     {"11", "22", "https://example.com/form"},
++		"origin-with-query":    {"11", "22", "https://example.com?tab=1"},
++		"origin-with-fragment": {"11", "22", "https://example.com#upload"},
++		"mixed-case-origin":    {"11", "22", "https://Example.com"},
++	} {
++		t.Run(name, func(t *testing.T) {
++			if _, err := session.UploadFiles(context.Background(), target[0], target[1], target[2], validUploadRequest(source)); err == nil {
++				t.Fatal("non-exact target reached the upload path")
++			}
++		})
++	}
++	if axCalls != 0 {
++		t.Fatalf("non-exact target reached native upload: calls=%d", axCalls)
++	}
++	if _, err := os.Stat(marker); !os.IsNotExist(err) {
++		t.Fatalf("non-exact target reached page-context automation: %v", err)
++	}
++}
++
++func TestUploadFilesProductionPathRejectsInvalidFilesBeforePageOrNativeAccess(t *testing.T) {
++	dir := t.TempDir()
++	pdf := filepath.Join(dir, "evidence.pdf")
++	if err := os.WriteFile(pdf, []byte("evidence"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	symlink := filepath.Join(dir, "link.pdf")
++	if err := os.Symlink(pdf, symlink); err != nil {
++		t.Fatal(err)
++	}
++	text := filepath.Join(dir, "evidence.txt")
++	if err := os.WriteFile(text, []byte("text"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	marker := filepath.Join(t.TempDir(), "browser-contacted")
++	t.Setenv("UPLOAD_BROWSER_MARKER", marker)
++	fake := filepath.Join(t.TempDir(), "osascript")
++	if err := os.WriteFile(fake, []byte("#!/bin/sh\ntouch \"$UPLOAD_BROWSER_MARKER\"\nexit 99\n"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	axCalls := 0
++	session := Session{
++		OsaScriptPath: fake,
++		AXProcessID: func() (int, error) {
++			axCalls++
++			return 123, nil
++		},
++		AXUploadFiles: func(int, string, string) error {
++			axCalls++
++			return nil
++		},
++	}
++	tooMany := make([]string, maxUploadFiles+1)
++	for i := range tooMany {
++		tooMany[i] = pdf
++	}
++	for name, request := range map[string]UploadRequest{
++		"symlink":            validUploadRequest(symlink),
++		"extension":          validUploadRequest(text),
++		"file-size":          func() UploadRequest { r := validUploadRequest(pdf); r.MaxFileBytes = 1; return r }(),
++		"total-size":         func() UploadRequest { r := validUploadRequest(pdf); r.MaxTotalBytes = 1; return r }(),
++		"too-many-files":     validUploadRequest(tooMany...),
++		"empty-allowlist":    func() UploadRequest { r := validUploadRequest(pdf); r.AllowedExtensions = nil; return r }(),
++		"widened-file-bound": func() UploadRequest { r := validUploadRequest(pdf); r.MaxFileBytes = maxUploadFileBytes + 1; return r }(),
++	} {
++		t.Run(name, func(t *testing.T) {
++			if _, err := session.UploadFiles(context.Background(), "11", "22", "https://example.com", request); err == nil {
++				t.Fatal("invalid upload file set reached the upload path")
++			}
++		})
++	}
++	if axCalls != 0 {
++		t.Fatalf("invalid files reached native upload: calls=%d", axCalls)
++	}
++	if _, err := os.Stat(marker); !os.IsNotExist(err) {
++		t.Fatalf("invalid files reached page-context automation: %v", err)
++	}
++}
++
++func TestUploadFilesProductionPathRefusesDOMAndTargetDriftBeforeAttestingSelection(t *testing.T) {
++	for _, tc := range []struct {
++		name           string
++		prepareOutcome string
++		inspectOutcome string
++		driftAt        string
++		inactiveAt     string
++		wantError      error
++		wantAXCalls    int
++	}{
++		{name: "missing-input", prepareOutcome: "input-missing", inspectOutcome: "selected", wantError: ErrUploadRefused},
++		{name: "ambiguous-input", prepareOutcome: "input-ambiguous", inspectOutcome: "selected", wantError: ErrUploadRefused},
++		{name: "non-file-input", prepareOutcome: "input-not-file", inspectOutcome: "selected", wantError: ErrUploadRefused},
++		{name: "hidden-input", prepareOutcome: "input-hidden", inspectOutcome: "selected", wantError: ErrUploadRefused},
++		{name: "multiple-files-disallowed", prepareOutcome: "input-not-multiple", inspectOutcome: "selected", wantError: ErrUploadRefused},
++		{name: "non-empty-input", prepareOutcome: "input-not-empty", inspectOutcome: "selected", wantError: ErrUploadRefused},
++		{name: "origin-drift-before-focus", prepareOutcome: "ready", inspectOutcome: "selected", driftAt: "1", wantError: browsersession.ErrOriginMismatch},
++		{name: "inactive-after-focus", prepareOutcome: "ready", inspectOutcome: "selected", inactiveAt: "2", wantError: browsersession.ErrTargetMissing},
++		{name: "origin-drift-after-native-selection", prepareOutcome: "ready", inspectOutcome: "selected", driftAt: "4", wantError: browsersession.ErrOriginMismatch, wantAXCalls: 1},
++		{name: "untrusted-change", prepareOutcome: "ready", inspectOutcome: "untrusted-change", wantError: ErrUploadRefused, wantAXCalls: 1},
++		{name: "file-count-mismatch", prepareOutcome: "ready", inspectOutcome: "file-count-mismatch", wantError: ErrUploadRefused, wantAXCalls: 1},
++		{name: "file-metadata-mismatch", prepareOutcome: "ready", inspectOutcome: "file-metadata-mismatch", wantError: ErrUploadRefused, wantAXCalls: 1},
++		{name: "selected", prepareOutcome: "ready", inspectOutcome: "selected", wantAXCalls: 1},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			source := filepath.Join(t.TempDir(), "evidence.pdf")
++			if err := os.WriteFile(source, []byte("evidence"), 0o600); err != nil {
++				t.Fatal(err)
++			}
++			counter := filepath.Join(t.TempDir(), "exact-counter")
++			t.Setenv("UPLOAD_EXACT_COUNTER", counter)
++			t.Setenv("UPLOAD_PREPARE_OUTCOME", tc.prepareOutcome)
++			t.Setenv("UPLOAD_INSPECT_OUTCOME", tc.inspectOutcome)
++			t.Setenv("UPLOAD_DRIFT_AT", tc.driftAt)
++			t.Setenv("UPLOAD_INACTIVE_AT", tc.inactiveAt)
++			fake := filepath.Join(t.TempDir(), "osascript")
++			if err := os.WriteFile(fake, []byte(`#!/bin/sh
++case "$*" in
++  *chrome-exact-target*)
++    count=0
++    if [ -f "$UPLOAD_EXACT_COUNTER" ]; then count=$(/bin/cat "$UPLOAD_EXACT_COUNTER"); fi
++    count=$((count + 1))
++    printf '%s' "$count" > "$UPLOAD_EXACT_COUNTER"
++    outcome=ok
++    origin=https://example.com
++    active=true
++    if [ "$UPLOAD_DRIFT_AT" = "$count" ]; then outcome=origin-mismatch; origin=https://drift.example; active=false; fi
++    if [ "$UPLOAD_INACTIVE_AT" = "$count" ]; then active=false; fi
++    /usr/bin/jq -cn --arg outcome "$outcome" --arg origin "$origin" --argjson active "$active" '{__macChromeExactTarget:"works.relux.mac-infra/chrome-exact-target/v1",outcome:$outcome,origin:$origin,active:$active}'
++    ;;
++  *)
++    source=$(/bin/cat)
++    case "$source" in
++      *cleanup-target-missing*) value=cleaned ;;
++      *file-count-mismatch*) value="{\"outcome\":\"$UPLOAD_INSPECT_OUTCOME\"}" ;;
++      *input-not-file*) value="$UPLOAD_PREPARE_OUTCOME" ;;
++      *) value=unexpected-upload-program ;;
++    esac
++    guard=$(/usr/bin/jq -cn --arg value "$value" '{__macBrowserSessionGuard:"works.relux.mac-infra/browser-session-guard/v1",outcome:"ok",origin:"https://example.com",readyState:"complete",value:$value}')
++    /usr/bin/jq -cn --arg value "$guard" '{__macChromePrivateTransport:"works.relux.mac-infra/chrome-private-transport/v1",outcome:"ok",value:$value}'
++    ;;
++esac
++`), 0o700); err != nil {
++				t.Fatal(err)
++			}
++			axCalls := 0
++			session := Session{
++				OsaScriptPath: fake,
++				AXProcessID:   func() (int, error) { return 123, nil },
++				AXUploadFiles: func(_ int, _ string, stagingDirectory string) error {
++					axCalls++
++					entries, err := os.ReadDir(stagingDirectory)
++					if err != nil {
++						return err
++					}
++					if len(entries) != 1 || entries[0].Name() != "evidence.pdf" {
++						t.Fatalf("native boundary received unexpected staged entries: %v", entries)
++					}
++					return nil
++				},
++			}
++			result, err := session.UploadFiles(context.Background(), "11", "22", "https://example.com", validUploadRequest(source))
++			if tc.wantError == nil {
++				if err != nil {
++					t.Fatalf("selected upload failed: %v", err)
++				}
++				if !result.OK || result.Origin != "https://example.com" || result.Count != 1 || len(result.Files) != 1 || result.Files[0] != "evidence.pdf" {
++					t.Fatalf("unsafe or incomplete upload attestation: %#v", result)
++				}
++			} else if !errors.Is(err, tc.wantError) {
++				t.Fatalf("error=%v want classification %v", err, tc.wantError)
++			}
++			if axCalls != tc.wantAXCalls {
++				t.Fatalf("native upload calls=%d want=%d", axCalls, tc.wantAXCalls)
++			}
++		})
++	}
++}

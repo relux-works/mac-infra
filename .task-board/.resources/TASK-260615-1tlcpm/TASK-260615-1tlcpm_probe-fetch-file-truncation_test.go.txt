@@ -1,0 +1,95 @@
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/relux-works/mac-infra/internal/safarictl"
+)
+
+// Drives the real `fetch-file` production entry with a fake osascript that
+// answers each guarded page-context evaluation. Chunk 1 of 3 comes back empty,
+// exactly as ReadFetchChunkJavaScript does when the job object is gone.
+func TestReviewProbeFetchFileTruncatedChunkIsReportedAsSaved(t *testing.T) {
+	payload := bytes.Repeat([]byte("A"), 400000)
+	full := base64.StdEncoding.EncodeToString(payload)
+	chunkSize := 250000
+	var chunks []string
+	for i := 0; i < len(full); i += chunkSize {
+		end := i + chunkSize
+		if end > len(full) {
+			end = len(full)
+		}
+		chunks = append(chunks, full[i:end])
+	}
+	t.Logf("payload=%d base64=%d chunks=%d", len(payload), len(full), len(chunks))
+
+	meta := map[string]any{
+		"state": "done", "endpoint": "/api/private.pdf", "url": "https://example.com/api/private.pdf",
+		"status": 200, "ok": true, "contentType": "application/pdf",
+		"bytes": len(payload), "chunkSize": chunkSize, "chunkCount": len(chunks),
+	}
+	metaJSON, _ := json.Marshal(meta)
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "osascript")
+	// Responses in call order: StartFetch, PollFetch, chunk0, chunk1(empty), chunk2.
+	replies := []string{"started", string(metaJSON), chunks[0], "", chunks[2]}
+	var sb strings.Builder
+	sb.WriteString("#!/bin/sh\nSTATE=\"" + dir + "/n\"\nN=$(cat \"$STATE\" 2>/dev/null || echo 0)\necho $((N+1)) > \"$STATE\"\ncase \"$N\" in\n")
+	for i, r := range replies {
+		env := map[string]string{
+			"__macBrowserSessionGuard": "works.relux.mac-infra/browser-session-guard/v1",
+			"outcome":                  "ok",
+			"origin":                   "https://example.com",
+			"readyState":               "complete",
+			"value":                    r,
+		}
+		b, _ := json.Marshal(env)
+		f := filepath.Join(dir, fmt.Sprintf("r%d.json", i))
+		if err := os.WriteFile(f, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sb.WriteString(fmt.Sprintf("  %d) cat %q ;;\n", i, f))
+	}
+	sb.WriteString("  *) echo 'unexpected call' >&2; exit 1 ;;\nesac\n")
+	if err := os.WriteFile(script, []byte(sb.String()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	old := newSafariSession
+	newSafariSession = func(artifactDir string) *safarictl.Session {
+		s := safarictl.New(artifactDir)
+		s.OsaScriptPath = script
+		return s
+	}
+	t.Cleanup(func() { newSafariSession = old })
+
+	out := filepath.Join(dir, "out.pdf")
+	metaOut := filepath.Join(dir, "out.meta.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"fetch-file", "--resource", "/api/private.pdf", "--out", out,
+		"--meta", metaOut, "--window-id", "123", "--origin", "https://example.com",
+		"--artifact-dir", filepath.Join(dir, "art")}, &stdout, &stderr)
+
+	t.Logf("exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	written, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("no output file: %v", err)
+	}
+	mb, _ := os.ReadFile(metaOut)
+	t.Logf("browser-reported bytes=%d  file on disk=%d", len(payload), len(written))
+	t.Logf("meta artifact:\n%s", string(mb))
+
+	if code == 0 && len(written) != len(payload) {
+		t.Fatalf("CONFIRMED: exit 0 and %q reported saved, but file is %d bytes vs browser-reported %d",
+			out, len(written), len(payload))
+	}
+	t.Logf("gap not reproduced: exit=%d written=%d", code, len(written))
+}

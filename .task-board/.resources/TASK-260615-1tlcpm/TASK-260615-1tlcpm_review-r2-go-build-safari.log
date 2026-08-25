@@ -1,0 +1,3 @@
+Candidate tree: a779c15decb43ae5c0ba605d2408a92ab0888b50
+Command: go build ./cmd/mac-safari-session
+Result: PASS (exit 0)

@@ -1,0 +1,7 @@
+# Token Span Redaction Contract
+
+Change only Slack response string sanitization. Replace each detected xox*/xapp, Bearer, or JWT-shaped substring with a fixed safe marker such as [redacted] while preserving every byte outside the matched sensitive span. Never return a digest or prefix derived from the secret. Preserve current structured secret-key replacement, sensitive URL redaction, JSON depth/node/size/deadline bounds, exact target/origin/workspace guards, and generic run-js storage refusal.
+
+Tests must cover a standalone secret, prefix/suffix text, multiple repeated secrets, adjacent different secret classes, punctuation/boundaries, URLs with sensitive parameters or fragments, structured secret keys whose value is composite, Unicode surrounding text, malformed response JSON, and response bounds. Drive production sanitizeSlackResponse and slack-read envelope output. Narrowing mutants that remove one secret class, replace only the first occurrence, or restore whole-string replacement must fail named tests.
+
+Live smoke may inspect only the authorized synthetic REF-SYN-4242 root. Persist booleans/counts proving the reference survives and raw token-shaped bytes do not. No Slack writes, no real message content, no browser authorization material.

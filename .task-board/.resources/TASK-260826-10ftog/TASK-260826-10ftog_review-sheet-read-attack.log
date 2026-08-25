@@ -1,0 +1,78 @@
+production_call=macChromeAXUploadFiles
+read_helper=MacChromeCopySheets
+
+static int MacChromeCopySheets(AXUIElementRef window, CFArrayRef *out) {
+    CFTypeRef rawSheets = NULL;
+    AXError error = AXUIElementCopyAttributeValue(window, CFSTR("AXSheets"), &rawSheets);
+    if (error != kAXErrorSuccess || rawSheets == NULL || CFGetTypeID(rawSheets) != CFArrayGetTypeID()) {
+        if (rawSheets != NULL) CFRelease(rawSheets);
+        return MacChromeAXFileChooserMissing;
+    }
+    *out = (CFArrayRef)rawSheets;
+    return MacChromeAXOK;
+}
+
+// The pre-press state is evidence, not a best-effort absence check. Only a
+// successfully read, correctly typed, empty AXSheets array admits AXPress.
+// An unreadable or malformed attribute and every pre-existing sheet refuse.
+static int MacChromeRequireNoSheets(AXUIElementRef window) {
+    CFArrayRef sheets = NULL;
+    int status = MacChromeCopySheets(window, &sheets);
+    if (status != MacChromeAXOK) return status;
+    CFIndex count = CFArrayGetCount(sheets);
+    CFRelease(sheets);
+    return count == 0 ? MacChromeAXOK : MacChromeAXFileChooserAmbiguous;
+}
+
+static int MacChromeSingleSheet(AXUIElementRef window, AXUIElementRef *out) {
+    CFArrayRef sheets = NULL;
+    int status = MacChromeCopySheets(window, &sheets);
+    if (status != MacChromeAXOK) return status;
+    CFIndex count = CFArrayGetCount(sheets);
+    AXUIElementRef sheet = NULL;
+    if (count == 1) {
+        sheet = (AXUIElementRef)CFArrayGetValueAtIndex(sheets, 0);
+        CFRetain(sheet);
+    }
+    CFRelease(sheets);
+    if (count == 0) return MacChromeAXFileChooserMissing;
+    if (count != 1) return MacChromeAXFileChooserAmbiguous;
+    *out = sheet;
+    return MacChromeAXOK;
+}
+
+// A single sheet is insufficient after the nonce press: it must remain the
+// exact retained AX element first observed in the zero-to-one transition.
+static int MacChromeRequireSameSheet(AXUIElementRef window, AXUIElementRef expected) {
+    if (expected == NULL) return MacChromeAXFileChooserMissing;
+    AXUIElementRef current = NULL;
+    int status = MacChromeSingleSheet(window, &current);
+    if (status != MacChromeAXOK) return status;
+    Boolean same = CFEqual(current, expected);
+    CFRelease(current);
+    return same ? MacChromeAXOK : MacChromeAXFileChooserReplaced;
+}
+
+static int MacChromeGuardChooser(pid_t pid, AXUIElementRef window, AXUIElementRef chooser) {
+    if (!MacChromeApplicationIsFrontmost(pid) || !MacChromeBooleanAttribute(window, kAXMainAttribute)) {
+        return MacChromeAXFocusUnverified;
+    }
+    return MacChromeRequireSameSheet(window, chooser);
+}
+
+static int MacChromeWaitForSingleSheet(AXUIElementRef window, AXUIElementRef *out) {
+    int status = MacChromeAXFileChooserMissing;
+    for (int attempt = 0; attempt < 40; attempt++) {
+        AXUIElementRef sheet = NULL;
+        status = MacChromeSingleSheet(window, &sheet);
+        if (status == MacChromeAXOK) {
+            *out = sheet;
+            return MacChromeAXOK;
+        }
+        if (status == MacChromeAXFileChooserAmbiguous) return status;
+        usleep(50000);
+    }
+    return status;
+}
+result=FAIL: unreadable/malformed AXSheets is collapsed into missing and retried by MacChromeWaitForSingleSheet
+negative_shape=absence-vs-failure-to-read

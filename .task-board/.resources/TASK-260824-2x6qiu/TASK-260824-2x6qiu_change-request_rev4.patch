@@ -1,0 +1,231 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index e8ea31d..0205fb0 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -20,6 +20,12 @@
+ - EVIDENCE: `TestFetchFileProductionEntryNeverReflectsForgedNestedOriginMismatch` drives the real `run(fetch-file)` against two narrowed forges (nested `origin-mismatch`, and nested `ok` with a drifted origin), reads back what the child actually received as a positive control, and additionally asserts the drift classification survives so a delete-only mutant cannot pass. The narrowing mutant that restores `errors.As` passthrough of `Observed` fails both subtests.
+ - LESSON: Discarding a channel's *bytes* is not the same as distrusting its *values*. Enumerate every field of a parsed response that can be echoed by a party holding the secret, not just the raw streams.
+ 
++### 0438 — LaunchAgent Absence Must Come From Exit Evidence, Not The Service Label
++- ROOT CAUSE: `internal/browsersession/heartbeat.go:isMissingLaunchAgent` searched the composed `launchctl` error for the bare substring `113`. Valid heartbeat names and UIDs may contain those digits, so `hb113` plus a genuine `bootout` permission failure was misclassified as an absent service after expiry had removed its managed artifacts.
++- FIX: `runLaunchctl` now preserves the verb, exit code, and child output in a typed error. Missing `print` requires exit `113` plus the `Could not find service` response; missing `bootout` requires exit `3` plus the exact `Boot-out failed: 3: No such process` response. Unstructured test hooks accept only whole sentinel messages.
++- EVIDENCE: `internal/browsersession/heartbeat_test.go:TestInspectExpiredHeartbeatDoesNotLaunderBootoutFailureWhenIdentityContains113` drives `Inspect -> expire -> runLaunchctl` with name and UID `113`, a real child exit `1`, and `Operation not permitted`; the failure must propagate instead of attesting successful expiry.
++- LESSON: A failed lifecycle action is not evidence of absence. Classify child-process state from owned structured fields, never from arbitrary digits in a rendered diagnostic.
++
+ ### 0204 — A Sealed Input Path Is Only As Private As Its Failure Diagnostics
+ - FINDING: `fetch-file` moved the protected resource out of production argv and into a private stdin envelope, and every *refusal* string was fixed — but the layer below still forwarded untrusted child bytes. `runJXAStdin` copied raw `osascript` stderr (then stdout) into its error, `runJavaScriptPrivate` embeds the resource-bearing page-context program in that child's stdin, and `runFetchFile` prints the error through `FormatAutomationError`. A child that echoed its own stdin on failure put the full authenticated URL, both query parameter names, and their opaque values on the operator's terminal.
+ - ROOT CAUSE: The privacy boundary was drawn at the decoder, where the input arrives, and not at the transport, where the same secret leaves. Decoder refusals were audited and fixed-string; the transport's error path was treated as a diagnostic rather than as an output channel carrying the same secret. Negative-evidence shape: **bypass path around the check**.
+diff --git a/internal/browsersession/heartbeat.go b/internal/browsersession/heartbeat.go
+index 56ae7b4..3fddb56 100644
+--- a/internal/browsersession/heartbeat.go
++++ b/internal/browsersession/heartbeat.go
+@@ -805,11 +805,46 @@ func (m HeartbeatManager) runLaunchctl(ctx context.Context, args ...string) erro
+ 	var output bytes.Buffer
+ 	cmd.Stdout, cmd.Stderr = &output, &output
+ 	if err := cmd.Run(); err != nil {
+-		return fmt.Errorf("launchctl %s: %s", strings.Join(args, " "), strings.TrimSpace(output.String()))
++		exitCode := -1
++		var exitErr *exec.ExitError
++		if errors.As(err, &exitErr) {
++			exitCode = exitErr.ExitCode()
++		}
++		verb := ""
++		if len(args) > 0 {
++			verb = args[0]
++		}
++		return &launchctlCommandError{
++			args:     append([]string(nil), args...),
++			verb:     verb,
++			exitCode: exitCode,
++			output:   strings.TrimSpace(output.String()),
++			cause:    err,
++		}
+ 	}
+ 	return nil
+ }
+ 
++type launchctlCommandError struct {
++	args     []string
++	verb     string
++	exitCode int
++	output   string
++	cause    error
++}
++
++func (e *launchctlCommandError) Error() string {
++	detail := e.output
++	if detail == "" && e.cause != nil {
++		detail = e.cause.Error()
++	}
++	return fmt.Sprintf("launchctl %s: %s", strings.Join(e.args, " "), detail)
++}
++
++func (e *launchctlCommandError) Unwrap() error {
++	return e.cause
++}
++
+ type heartbeatPaths struct {
+ 	Label     string
+ 	PlistPath string
+@@ -914,8 +949,42 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
+ }
+ 
+ func isMissingLaunchAgent(err error) bool {
+-	text := strings.ToLower(err.Error())
+-	return strings.Contains(text, "could not find service") || strings.Contains(text, "service not found") || strings.Contains(text, "no such process") || strings.Contains(text, "113")
++	var commandErr *launchctlCommandError
++	if errors.As(err, &commandErr) {
++		output := strings.ToLower(strings.TrimSpace(commandErr.output))
++		switch commandErr.verb {
++		case "print":
++			return commandErr.exitCode == 113 && containsLineWithPrefix(output, "could not find service \"")
++		case "bootout":
++			return commandErr.exitCode == 3 && containsExactLine(output, "boot-out failed: 3: no such process")
++		default:
++			return false
++		}
++	}
++
++	// RunCommand is a test/integration hook without structured process status.
++	// Admit only complete known sentinel messages; never search composed command
++	// text where a valid service label or UID can supply misleading digits.
++	text := strings.ToLower(strings.TrimSpace(err.Error()))
++	return text == "could not find service" || text == "service not found" || text == "no such process"
++}
++
++func containsLineWithPrefix(text, prefix string) bool {
++	for _, line := range strings.Split(text, "\n") {
++		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
++			return true
++		}
++	}
++	return false
++}
++
++func containsExactLine(text, expected string) bool {
++	for _, line := range strings.Split(text, "\n") {
++		if strings.TrimSpace(line) == expected {
++			return true
++		}
++	}
++	return false
+ }
+ 
+ func xmlEscape(value string) string {
+diff --git a/internal/browsersession/heartbeat_test.go b/internal/browsersession/heartbeat_test.go
+index afb1927..5f24957 100644
+--- a/internal/browsersession/heartbeat_test.go
++++ b/internal/browsersession/heartbeat_test.go
+@@ -572,6 +572,112 @@ func TestInspectExpiresHeartbeatAndCleansManagedArtifactsWithoutBrowserProbe(t *
+ 	}
+ }
+ 
++func TestInspectExpiredHeartbeatDoesNotLaunderBootoutFailureWhenIdentityContains113(t *testing.T) {
++	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
++	m := testHeartbeatManager(t)
++	m.UID = 113
++	m.Now = func() time.Time { return now }
++	deadline := now.Add(time.Minute)
++	cfg, err := m.NewConfig("hb113", BrowserChrome, "1", "2", "https://example.com", 15*time.Second, deadline)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := m.Start(context.Background(), cfg, func(context.Context, HeartbeatConfig) (ExecutionResult, error) {
++		return ExecutionResult{Origin: cfg.Origin}, nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++
++	fakeLaunchctl := filepath.Join(t.TempDir(), "launchctl")
++	if err := os.WriteFile(fakeLaunchctl, []byte("#!/bin/sh\necho 'Operation not permitted' >&2\nexit 1\n"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	m.Launchctl = fakeLaunchctl
++	m.RunCommand = nil
++	now = deadline
++
++	status, err := m.Inspect(context.Background(), cfg.Name)
++	if err == nil {
++		t.Fatalf("Inspect laundered bootout failure as status %#v", status)
++	}
++	if !strings.Contains(err.Error(), "Operation not permitted") {
++		t.Fatalf("Inspect error = %v, want genuine launchctl failure", err)
++	}
++}
++
++func TestInspectExpiredHeartbeatAcceptsStructuredMissingBootout(t *testing.T) {
++	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
++	m := testHeartbeatManager(t)
++	m.Now = func() time.Time { return now }
++	deadline := now.Add(time.Minute)
++	cfg, err := m.NewConfig("missing-at-expiry", BrowserChrome, "1", "2", "https://example.com", 15*time.Second, deadline)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := m.Start(context.Background(), cfg, func(context.Context, HeartbeatConfig) (ExecutionResult, error) {
++		return ExecutionResult{Origin: cfg.Origin}, nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++
++	fakeLaunchctl := filepath.Join(t.TempDir(), "launchctl")
++	if err := os.WriteFile(fakeLaunchctl, []byte("#!/bin/sh\necho 'Boot-out failed: 3: No such process' >&2\nexit 3\n"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	m.Launchctl = fakeLaunchctl
++	m.RunCommand = nil
++	now = deadline
++
++	status, err := m.Inspect(context.Background(), cfg.Name)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if status.State != "expired" || !status.Expired {
++		t.Fatalf("expired missing-service status = %#v", status)
++	}
++}
++
++func TestInspectUsesStructuredLaunchctlPrintEvidence(t *testing.T) {
++	tests := []struct {
++		name       string
++		output     string
++		wantStatus string
++	}{
++		{name: "missing service", output: "Bad request.\nCould not find service \"test\" in domain for user gui: 501", wantStatus: "configured-not-loaded"},
++		{name: "same exit with genuine failure", output: "Operation not permitted", wantStatus: "unknown"},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			m := testHeartbeatManager(t)
++			cfg, err := m.NewConfig("print-evidence", BrowserChrome, "1", "2", "https://example.com", 15*time.Second, m.now().Add(time.Hour))
++			if err != nil {
++				t.Fatal(err)
++			}
++			if _, err := m.Start(context.Background(), cfg, func(context.Context, HeartbeatConfig) (ExecutionResult, error) {
++				return ExecutionResult{Origin: cfg.Origin}, nil
++			}); err != nil {
++				t.Fatal(err)
++			}
++
++			fakeLaunchctl := filepath.Join(t.TempDir(), "launchctl")
++			script := "#!/bin/sh\nprintf '%s\\n' '" + tt.output + "' >&2\nexit 113\n"
++			if err := os.WriteFile(fakeLaunchctl, []byte(script), 0o700); err != nil {
++				t.Fatal(err)
++			}
++			m.Launchctl = fakeLaunchctl
++			m.RunCommand = nil
++
++			status, err := m.Inspect(context.Background(), cfg.Name)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if status.State != tt.wantStatus {
++				t.Fatalf("status = %#v, want %q", status, tt.wantStatus)
++			}
++		})
++	}
++}
++
+ func TestRunRefusesExpiredHeartbeatBeforeBrowserProbeAndCleansState(t *testing.T) {
+ 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+ 	m := testHeartbeatManager(t)

@@ -1,0 +1,63 @@
+BUG-260825-357yix reviewer RUN-260825-308408 — independent mutation attack
+Base 192effdb96a02588a73bf02e2a440c7205d2327d -> candidate dcf2e54535de6fd9fc0a95709cfc0b4ecd05c461
+Worktree verified byte-identical to the candidate tree before and after every mutant.
+Command per mutant: go test ./internal/chromectl/... ./cmd/mac-chrome-session/... -count=1
+
+M1  delete ONLY the merge end-extension branch (slack.go findSlackTokenSpans)
+    KILLED  --- FAIL: TestSlackReadProductionPathUnionsPartiallyOverlappingSecretSpans
+            mutant output: "REF-SYN-4242 [redacted] abcdefghij tail"  (Bearer tail exposed)
+            == the rev4 contract target, reproduced independently
+
+M2  delete the whole overlap-union block (return unmerged sorted spans)
+    KILLED  --- FAIL: TestSlackReadProductionPathUnionsOverlappingSecretSpans
+            panic: slice bounds out of range [31:11] at slack.go:763 redactSlackTokenSpans
+            <- via sanitizeSlackValue <- sanitizeSlackResponse <- Session.SlackRead
+            shipped implementation does NOT panic (full suite green)
+
+M3  drop bearer class from findSlackTokenSpans
+    KILLED  10 named tests incl. TestSlackReadProductionPathBearerClassCannotBeNarrowed,
+            TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope,
+            TestSlackReadKnownStringArgumentsRejectSecretShapes/list-cursor
+
+M4  drop JWT class
+    KILLED  6 named tests incl. TestSlackReadProductionPathRedactsEveryCompactTokenSegment,
+            TestSlackTokenSpanDetectorDoesNotNarrowLegacyDifferentialCorpus
+
+M5  drop xox*/xapp class
+    KILLED  10 named tests incl. TestSlackReadProductionPathRescansAfterRejectedTokenStart,
+            TestSlackReadProductionPathRejectsNestedTokenStartBeforeBrowserExecution
+
+M6  narrow to first occurrence per class (FindAllStringSubmatchIndex n=-1 -> n=1)
+    KILLED  --- FAIL: TestSlackReadProductionPathEveryOccurrenceCannotBeNarrowed
+            --- FAIL: TestSlackReadProductionPathPreservesNonSecretBytesAroundEveryTokenSpan
+
+M7  narrow JWT to exactly three segments (drop `(?:\.[A-Za-z0-9_-]+)*`)
+    KILLED  --- FAIL: TestSlackReadProductionPathRedactsEveryCompactTokenSegment
+
+M8  restore pre-CR whole-string replacement in sanitizeSlackValue
+    KILLED  10 named tests
+
+M9  narrow xox pattern by restoring the legacy trailing boundary `(?:$|[^a-z0-9])`
+    KILLED  --- FAIL: TestSlackReadProductionPathEveryOccurrenceCannotBeNarrowed
+
+M10 revert the URL branch to the pre-CR `return browsersession.RedactSensitiveURL(trimmed), nil`
+    *** SURVIVED — no test failed ***
+    Leak reproduced through Session.SlackRead:
+      input   https://example.com/p/xoxb-12345678-secret
+      shipped https://example.com/p/[redacted]
+      mutant  https://example.com/p/xoxb-12345678-secret     <- raw token returned
+    browsersession.RedactSensitiveURL alone leaves the path segment untouched
+    (verified directly: RedactSensitiveURL(in) == in for this input).
+
+M11 reviewer-authored quadratic reconstruction — SURVIVED, but the reconstruction was wrong
+    (it advances past the terminal match, so it is not quadratic on the hostile prefix).
+    Discarded; replaced by M12 below, which uses the real revision-2 source.
+
+M12 the ACTUAL CR revision 2 scanner, lifted verbatim from board resource
+    BUG-260825-357yix_change-request_rev2.patch (unbounded patterns + accept-callback
+    rescan at start+1, plus hasASCIIBoundaries/isASCIIAlphaNumeric/isJWTCharacter)
+    KILLED by the cost bound:
+      --- FAIL: TestSlackReadProductionPathAtResponseCeilingMeetsCostBound (3.00s)
+          production SlackRead exceeded 3s at the 262144-byte response ceiling
+    => the revision-3 cost-bound claim is true against the real revision-2 code,
+       not against a reconstruction.

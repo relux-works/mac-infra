@@ -1,0 +1,12 @@
+diff --git a/README.md b/README.md
+index 29c5bab..009e8a0 100644
+--- a/README.md
++++ b/README.md
+@@ -67,6 +67,7 @@ immediately, and inspect only the returned `sanitized_path`:
+ ```bash
+ mac-safari-session fetch-file \
+   --page "https://example.com/private/page" \
++  --origin "https://example.com" \
+   --resource "/api/private/file.pdf" \
+   --out .temp/mac-document-sanitize/raw.pdf
+ mac-document-sanitize --json .temp/mac-document-sanitize/raw.pdf

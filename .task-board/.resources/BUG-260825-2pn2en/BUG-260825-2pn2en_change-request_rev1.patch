@@ -1,0 +1,502 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index 9ae2b72..8ded948 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -5,6 +5,16 @@
+ 
+ ## 2026-08-25
+ 
++### 2018 — Chrome Run-JS Owns Private Output Publication
++- FIX: `cmd/mac-chrome-session/main.go` preflights a same-directory private temp file, writes the guarded result, and atomically renames it to `--out` with mode `0600` for both `--script` and `--file`.
++- SAFETY: Invalid/preflight failures dispatch no page payload; guard or publish failures create no final artifact and never fall back to page content on stdout.
++- EVIDENCE: A whitespace-gate narrowing mutant failed the named production-entry test; targeted race, full tests, vet, build, signed setup/install parity, and no-focus live `--script`/`--file` smokes passed under `BUG-260825-2pn2en`.
++
++### 2008 — Chrome Output Drift Was Narrower Than Reproduction
++- FINDING: `BUG-260825-2pn2en` reproduced installed `run-js --out` rejection, while current source and installed help already agreed on `--file`; the attached note's source-only `--script` observation was stale.
++- ROOT CAUSE: Chrome `run-js` had no owned output-artifact path, while README and the installed Chrome skill documented only stdout capture; shell redirection remained the privacy-safe fallback.
++- DECISION: Preserve the existing exact target/origin and browser-secret guards; add preflighted atomic `0600` publication shared by `--script` and `--file`, with no page-content fallback to stdout.
++
+ ### 1944 — Token Prefix Boundaries Were an Evasion Surface
+ - FINDING: CR revision 1 showed that alphanumeric glue such as `axoxb-*` or `zzBearer ...` bypassed the boundary-aware span patterns in both Slack response keys and values, while the randomized differential test asserted only detector agreement rather than sanitized-output leak freedom.
+ - FIX: Treat the distinctive xox/xapp/Bearer/JWT shapes as sensitive at any string offset, assert that a 200,000-input corpus contains no token-shaped span after sanitization, and pin the secret-key branch, pre-branch collision guard, and whitespace-wrapped URL offset with production-path tests under `BUG-260825-3ewejy`.
+diff --git a/README.md b/README.md
+index b4cdcd5..04f403a 100644
+--- a/README.md
++++ b/README.md
+@@ -13,7 +13,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
+ | `mac-disk-profile` | Profile disk usage and explain heavy paths without deleting files | `mac-disk-profile scan PATH`, `mac-disk-profile top PATH`, `mac-disk-profile explain PATH` | optional JSON artifact via `--json PATH` |
+ | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
+ | `mac-safari-session` | Guarded, window-exact authenticated Safari page access without exporting browser secrets | `mac-safari-session open-bg URL`, `mac-safari-session run-js --window-id ID --origin ORIGIN --script JS`, `mac-safari-session snapshot --url URL --origin ORIGIN --json PATH`, `mac-safari-session fetch-file --page URL --origin ORIGIN --resource URL --out PATH`, explicit `focus --window-id ID` | private temporary JS under `.temp/mac-safari-session/`; optional `0600` snapshots, downloads, and metadata wherever specified |
+-| `mac-chrome-session` | Guarded exact Chrome tab access, sealed allowlisted Slack reads, bounded repeated-element extraction, and named Chrome/Safari heartbeats without focus churn | `mac-chrome-session list`, `mac-chrome-session run-js --window-id ID --tab-id ID --origin ORIGIN --script JS`, `mac-chrome-session slack-read --window-id ID --tab-id ID --origin https://app.slack.com --workspace-id T... --request-stdin`, `mac-chrome-session extract ...`, `mac-chrome-session heartbeat start\|status\|stop\|list`, explicit `focus`/`close` | Slack requests/results stay in process/page memory unless the caller explicitly stores stdout; private extraction output under task-scoped `.temp/`; heartbeat state/logs and pinned executables under `~/Library/Application Support/mac-infra/browser-session/`; LaunchAgents under `~/Library/LaunchAgents/` |
++| `mac-chrome-session` | Guarded exact Chrome tab access, sealed allowlisted Slack reads, bounded repeated-element extraction, and named Chrome/Safari heartbeats without focus churn | `mac-chrome-session list`, `mac-chrome-session run-js --window-id ID --tab-id ID --origin ORIGIN --script JS [--out PATH]`, `mac-chrome-session slack-read --window-id ID --tab-id ID --origin https://app.slack.com --workspace-id T... --request-stdin`, `mac-chrome-session extract ...`, `mac-chrome-session heartbeat start\|status\|stop\|list`, explicit `focus`/`close` | optional atomic `0600` `run-js --out` artifacts; Slack requests/results stay in process/page memory unless the caller explicitly stores stdout; private extraction output under task-scoped `.temp/`; heartbeat state/logs and pinned executables under `~/Library/Application Support/mac-infra/browser-session/`; LaunchAgents under `~/Library/LaunchAgents/` |
+ | `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected and sanitized `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no cookies, browser storage, authorization material, or cursor/session state |
+ | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
+ | `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display LaunchAgent under `~/Library/LaunchAgents/`; idle-lock restore snapshot under `~/Library/Application Support/mac-infra/` |
+@@ -285,7 +285,8 @@ mac-chrome-session run-js \
+   --window-id 704793720 \
+   --tab-id 704793726 \
+   --origin https://example.com \
+-  --script 'document.readyState'
++  --script 'document.readyState' \
++  --out .temp/mac-chrome-session/result.txt
+ 
+ # Safari: exact window, current tab, mandatory origin
+ mac-safari-session run-js \
+@@ -301,6 +302,12 @@ requested visible handoff; it is the sole command allowed to activate or raise
+ a browser window. `close`/`close-window` also require an exact target and should
+ only be used for agent-owned state or an explicit user request.
+ 
++Chrome `run-js` accepts exactly one of `--script` or `--file`. Optional
++`--out PATH` preflights a private temporary file in the destination directory,
++then atomically publishes the page result with mode `0600`; stdout reports only
++the artifact path and never duplicates page content. Missing, blank, invalid,
++or unwritable output paths fail without falling back to stdout.
++
+ The shared JavaScript guard refuses case-insensitive occurrences of
+ `document.cookie`, `cookieStore`, `localStorage`, `sessionStorage`, `indexedDB`,
+ `navigator.credentials`, and `openDatabase` on every CLI path that reaches page
+diff --git a/agents/skills/mac-infra/SKILL.md b/agents/skills/mac-infra/SKILL.md
+index f8c43f6..8d3db10 100644
+--- a/agents/skills/mac-infra/SKILL.md
++++ b/agents/skills/mac-infra/SKILL.md
+@@ -264,6 +264,8 @@ authorization headers, credentials, or tokens. Start with:
+ 
+ The user must manually enable the browser's JavaScript-from-Apple-Events menu
+ item. `mac-chrome-session heartbeat` owns named Chrome/Safari keepalives.
++Chrome `run-js` accepts `--script` or `--file` plus optional `--out PATH`; the
++output is atomically published with mode `0600` and is not duplicated to stdout.
+ For a read-only Slack Web API call, use `mac-chrome-session slack-read` with an
+ exact Chrome target, `https://app.slack.com`, a pinned workspace id, and a
+ versioned stdin request. This compiled sealed path may use browser-owned Slack
+diff --git a/agents/skills/mac-infra/references/chrome-session.md b/agents/skills/mac-infra/references/chrome-session.md
+index 9d28281..bb1b5ec 100644
+--- a/agents/skills/mac-infra/references/chrome-session.md
++++ b/agents/skills/mac-infra/references/chrome-session.md
+@@ -44,9 +44,17 @@ mac-chrome-session run-js \
+   --window-id 123456 \
+   --tab-id 123457 \
+   --origin https://example.com \
+-  --file .temp/browser/read.js
++  --file .temp/browser/read.js \
++  --out .temp/browser/result.txt
+ ```
+ 
++Optional `--out PATH` works with both `--script` and `--file`. The command
++preflights a private temporary file in the destination directory before browser
++dispatch, then atomically publishes the result with mode `0600`. Stdout reports
++only `out: PATH`, never the page content. A missing value, blank or invalid
++path, preflight failure, or publish failure returns nonzero without falling back
++to stdout.
++
+ For repeated page elements, use the deterministic extractor instead of an ad
+ hoc DOM text dump. A template owns the item selector, optional capped open
+ shadow-root traversal, field selectors, allowlisted sources, and per-field text
+diff --git a/cmd/mac-chrome-session/main.go b/cmd/mac-chrome-session/main.go
+index 9638526..66b7ae4 100644
+--- a/cmd/mac-chrome-session/main.go
++++ b/cmd/mac-chrome-session/main.go
+@@ -28,8 +28,14 @@ var (
+ 	newHeartbeatManager           = browsersession.NewHeartbeatManager
+ 	executablePath                = os.Executable
+ 	stdinReader         io.Reader = os.Stdin
++	prepareRunJSOutput            = prepareAtomicOutputArtifact
+ )
+ 
++type runJSOutputArtifact interface {
++	Commit(string) error
++	Abort()
++}
++
+ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+ 
+ func run(args []string, stdout, stderr io.Writer) int {
+@@ -210,9 +216,14 @@ func runJS(args []string, stdout, stderr io.Writer) int {
+ 	origin := fs.String("origin", "", "expected location.origin guard; strongly recommended")
+ 	script := fs.String("script", "", "bounded JavaScript source")
+ 	file := fs.String("file", "", "path to bounded JavaScript source")
++	outPath := fs.String("out", "", "atomically write JavaScript result to PATH with mode 0600 instead of stdout")
+ 	if err := fs.Parse(args); err != nil {
+ 		return 2
+ 	}
++	outRequested := false
++	fs.Visit(func(f *flag.Flag) {
++		outRequested = outRequested || f.Name == "out"
++	})
+ 	if len(fs.Args()) != 0 || strings.TrimSpace(*windowID) == "" || strings.TrimSpace(*tabID) == "" {
+ 		fmt.Fprintln(stderr, "run-js requires --window-id and --tab-id and accepts no positional arguments")
+ 		return 2
+@@ -221,6 +232,20 @@ func runJS(args []string, stdout, stderr io.Writer) int {
+ 	if !ok {
+ 		return 2
+ 	}
++	var output runJSOutputArtifact
++	if outRequested {
++		if strings.TrimSpace(*outPath) == "" {
++			fmt.Fprintln(stderr, "run-js requires a non-empty --out PATH")
++			return 2
++		}
++		var err error
++		output, err = prepareRunJSOutput(*outPath)
++		if err != nil {
++			fmt.Fprintf(stderr, "run-js failed: prepare output: %v\n", err)
++			return 1
++		}
++		defer output.Abort()
++	}
+ 	if strings.TrimSpace(*origin) == "" {
+ 		fmt.Fprintln(stderr, "guard: unguarded (no --origin supplied)")
+ 	}
+@@ -231,6 +256,14 @@ func runJS(args []string, stdout, stderr io.Writer) int {
+ 		fmt.Fprintln(stderr, chromectl.FormatAutomationError(err))
+ 		return 1
+ 	}
++	if output != nil {
++		if err := output.Commit(result + "\n"); err != nil {
++			fmt.Fprintf(stderr, "run-js failed: write output: %v\n", err)
++			return 1
++		}
++		fmt.Fprintf(stdout, "out: %s\n", *outPath)
++		return 0
++	}
+ 	fmt.Fprintln(stdout, result)
+ 	return 0
+ }
+@@ -501,6 +534,72 @@ func readJavaScriptInput(script, file string, stderr io.Writer) (string, bool) {
+ 	return string(data), true
+ }
+ 
++type atomicOutputArtifact struct {
++	finalPath string
++	tempPath  string
++	file      *os.File
++}
++
++func prepareAtomicOutputArtifact(path string) (runJSOutputArtifact, error) {
++	if strings.TrimSpace(path) == "" {
++		return nil, fmt.Errorf("path is required")
++	}
++	if info, err := os.Lstat(path); err == nil {
++		if info.IsDir() {
++			return nil, fmt.Errorf("path is a directory")
++		}
++	} else if !os.IsNotExist(err) {
++		return nil, fmt.Errorf("inspect path: %w", err)
++	}
++	dir := filepath.Dir(path)
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		return nil, fmt.Errorf("create output directory: %w", err)
++	}
++	temporary, err := os.CreateTemp(dir, ".mac-chrome-session-run-js-*")
++	if err != nil {
++		return nil, fmt.Errorf("create temporary output: %w", err)
++	}
++	artifact := &atomicOutputArtifact{finalPath: path, tempPath: temporary.Name(), file: temporary}
++	if err := temporary.Chmod(0o600); err != nil {
++		artifact.Abort()
++		return nil, fmt.Errorf("chmod temporary output: %w", err)
++	}
++	return artifact, nil
++}
++
++func (a *atomicOutputArtifact) Commit(content string) error {
++	if a == nil || a.file == nil || a.tempPath == "" || a.finalPath == "" {
++		return fmt.Errorf("output artifact is not prepared")
++	}
++	if _, err := io.WriteString(a.file, content); err != nil {
++		return fmt.Errorf("write temporary output: %w", err)
++	}
++	if err := a.file.Close(); err != nil {
++		a.file = nil
++		return fmt.Errorf("close temporary output: %w", err)
++	}
++	a.file = nil
++	if err := os.Rename(a.tempPath, a.finalPath); err != nil {
++		return fmt.Errorf("publish output: %w", err)
++	}
++	a.tempPath = ""
++	return nil
++}
++
++func (a *atomicOutputArtifact) Abort() {
++	if a == nil {
++		return
++	}
++	if a.file != nil {
++		_ = a.file.Close()
++		a.file = nil
++	}
++	if a.tempPath != "" {
++		_ = os.Remove(a.tempPath)
++		a.tempPath = ""
++	}
++}
++
+ func printJSON(stdout, stderr io.Writer, value any) int {
+ 	data, err := json.MarshalIndent(value, "", "  ")
+ 	if err != nil {
+@@ -515,7 +614,7 @@ func usage(w io.Writer) {
+ 	fmt.Fprintln(w, "usage: mac-chrome-session <command> [options]")
+ 	fmt.Fprintln(w, "commands:")
+ 	fmt.Fprintln(w, "  list                              list sanitized Chrome window/tab metadata")
+-	fmt.Fprintln(w, "  run-js                            run guarded JavaScript on exact Chrome IDs")
++	fmt.Fprintln(w, "  run-js                            run guarded JavaScript on exact Chrome IDs; optional atomic 0600 --out PATH")
+ 	fmt.Fprintln(w, "  slack-read                        run one sealed allowlisted Slack read from stdin")
+ 	fmt.Fprintln(w, "  extract                           run bounded template-based repeated-element extraction")
+ 	fmt.Fprintln(w, "  focus                             explicitly show one exact Chrome tab for handoff")
+diff --git a/cmd/mac-chrome-session/main_test.go b/cmd/mac-chrome-session/main_test.go
+index 29c44e4..169f89a 100644
+--- a/cmd/mac-chrome-session/main_test.go
++++ b/cmd/mac-chrome-session/main_test.go
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"bytes"
+ 	"encoding/json"
++	"errors"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+@@ -16,13 +17,181 @@ func TestUsageDocumentsGuardedAndHeartbeatLifecycle(t *testing.T) {
+ 	if code := run([]string{"help"}, &stdout, &stderr); code != 0 {
+ 		t.Fatalf("code = %d stderr=%s", code, stderr.String())
+ 	}
+-	for _, want := range []string{"run-js", "slack-read", "extract", "focus", "close", "heartbeat start|status|stop|list", "Chrome/Safari"} {
++	for _, want := range []string{"run-js", "atomic 0600 --out PATH", "slack-read", "extract", "focus", "close", "heartbeat start|status|stop|list", "Chrome/Safari"} {
+ 		if !strings.Contains(stdout.String(), want) {
+ 			t.Fatalf("usage missing %q:\n%s", want, stdout.String())
+ 		}
+ 	}
+ }
+ 
++func TestRunJSHelpDocumentsScriptFileAndPrivateOutputParity(t *testing.T) {
++	var stdout, stderr bytes.Buffer
++	if code := run([]string{"run-js", "--help"}, &stdout, &stderr); code != 2 {
++		t.Fatalf("code=%d want=2 stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++	}
++	for _, want := range []string{"-script string", "-file string", "-out string", "atomically", "0600", "instead of stdout"} {
++		if !strings.Contains(stderr.String(), want) {
++			t.Fatalf("run-js help missing %q:\n%s", want, stderr.String())
++		}
++	}
++}
++
++func TestRunJSProductionEntryWritesPrivateAtomicOutputForScriptAndFileWithoutPayloadOnStdout(t *testing.T) {
++	const pageResult = "private-page-result"
++	result := `{"__macBrowserSessionGuard":"works.relux.mac-infra/browser-session-guard/v1","outcome":"ok","origin":"https://example.com","readyState":"complete","value":"` + pageResult + `"}`
++	fake := filepath.Join(t.TempDir(), "osascript")
++	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' '"+result+"'\n"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	oldNew := newChromeSession
++	newChromeSession = func() chromectl.Session { return chromectl.Session{OsaScriptPath: fake} }
++	defer func() { newChromeSession = oldNew }()
++
++	scriptFile := filepath.Join(t.TempDir(), "read.js")
++	if err := os.WriteFile(scriptFile, []byte("document.readyState"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	for _, tc := range []struct {
++		name     string
++		input    []string
++		existing bool
++	}{
++		{name: "script-replaces-existing", input: []string{"--script", "document.readyState"}, existing: true},
++		{name: "file-creates-parent", input: []string{"--file", scriptFile}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			outPath := filepath.Join(t.TempDir(), "nested", "result.txt")
++			if tc.existing {
++				if err := os.MkdirAll(filepath.Dir(outPath), 0o700); err != nil {
++					t.Fatal(err)
++				}
++				if err := os.WriteFile(outPath, []byte("old-result\n"), 0o644); err != nil {
++					t.Fatal(err)
++				}
++			}
++			args := []string{"run-js", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com"}
++			args = append(args, tc.input...)
++			args = append(args, "--out", outPath)
++			var stdout, stderr bytes.Buffer
++			if code := run(args, &stdout, &stderr); code != 0 {
++				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++			}
++			if strings.Contains(stdout.String(), pageResult) || stdout.String() != "out: "+outPath+"\n" {
++				t.Fatalf("stdout duplicated page payload or omitted artifact path: %q", stdout.String())
++			}
++			data, err := os.ReadFile(outPath)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if got, want := string(data), pageResult+"\n"; got != want {
++				t.Fatalf("artifact=%q want=%q", got, want)
++			}
++			info, err := os.Stat(outPath)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if got := info.Mode().Perm(); got != 0o600 {
++				t.Fatalf("artifact mode=%#o want=0600", got)
++			}
++			entries, err := os.ReadDir(filepath.Dir(outPath))
++			if err != nil {
++				t.Fatal(err)
++			}
++			if len(entries) != 1 || entries[0].Name() != filepath.Base(outPath) {
++				t.Fatalf("temporary output was not cleaned up: %v", entries)
++			}
++		})
++	}
++}
++
++func TestRunJSProductionEntryFailsClosedOnMissingInvalidAndUnwritableOutput(t *testing.T) {
++	marker := filepath.Join(t.TempDir(), "executed")
++	t.Setenv("MARKER", marker)
++	fake := filepath.Join(t.TempDir(), "osascript")
++	if err := os.WriteFile(fake, []byte("#!/bin/sh\ntouch \"$MARKER\"\nexit 99\n"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	oldNew := newChromeSession
++	oldPrepare := prepareRunJSOutput
++	newChromeSession = func() chromectl.Session { return chromectl.Session{OsaScriptPath: fake} }
++	defer func() {
++		newChromeSession = oldNew
++		prepareRunJSOutput = oldPrepare
++	}()
++	base := []string{"run-js", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--script", "document.readyState"}
++	directoryTarget := t.TempDir()
++	tests := []struct {
++		name string
++		args []string
++		code int
++	}{
++		{name: "missing-value", args: append(append([]string{}, base...), "--out"), code: 2},
++		{name: "blank-path", args: append(append([]string{}, base...), "--out", "  "), code: 2},
++		{name: "directory-target", args: append(append([]string{}, base...), "--out", directoryTarget), code: 1},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			var stdout, stderr bytes.Buffer
++			if code := run(tc.args, &stdout, &stderr); code != tc.code {
++				t.Fatalf("code=%d want=%d stdout=%s stderr=%s", code, tc.code, stdout.String(), stderr.String())
++			}
++			if stdout.Len() != 0 {
++				t.Fatalf("failed output path leaked stdout: %q", stdout.String())
++			}
++			if _, err := os.Stat(marker); !os.IsNotExist(err) {
++				t.Fatalf("failed output path dispatched page JavaScript; marker err=%v", err)
++			}
++		})
++	}
++
++	prepareRunJSOutput = func(string) (runJSOutputArtifact, error) {
++		return nil, errors.New("permission denied")
++	}
++	var stdout, stderr bytes.Buffer
++	if code := run(append(append([]string{}, base...), "--out", filepath.Join(t.TempDir(), "result.txt")), &stdout, &stderr); code != 1 {
++		t.Fatalf("unwritable code=%d want=1 stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++	}
++	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "prepare output: permission denied") {
++		t.Fatalf("unwritable path did not fail closed: stdout=%q stderr=%q", stdout.String(), stderr.String())
++	}
++	if _, err := os.Stat(marker); !os.IsNotExist(err) {
++		t.Fatalf("unwritable output dispatched page JavaScript; marker err=%v", err)
++	}
++}
++
++type failingRunJSOutputArtifact struct{}
++
++func (failingRunJSOutputArtifact) Commit(string) error { return errors.New("publish denied") }
++func (failingRunJSOutputArtifact) Abort()              {}
++
++func TestRunJSProductionEntryDoesNotFallbackToStdoutWhenAtomicPublishFails(t *testing.T) {
++	const pageResult = "private-page-result"
++	result := `{"__macBrowserSessionGuard":"works.relux.mac-infra/browser-session-guard/v1","outcome":"ok","origin":"https://example.com","readyState":"complete","value":"` + pageResult + `"}`
++	fake := filepath.Join(t.TempDir(), "osascript")
++	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' '"+result+"'\n"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	oldNew := newChromeSession
++	oldPrepare := prepareRunJSOutput
++	newChromeSession = func() chromectl.Session { return chromectl.Session{OsaScriptPath: fake} }
++	prepareRunJSOutput = func(string) (runJSOutputArtifact, error) { return failingRunJSOutputArtifact{}, nil }
++	defer func() {
++		newChromeSession = oldNew
++		prepareRunJSOutput = oldPrepare
++	}()
++	var stdout, stderr bytes.Buffer
++	args := []string{"run-js", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--script", "document.readyState", "--out", filepath.Join(t.TempDir(), "result.txt")}
++	if code := run(args, &stdout, &stderr); code != 1 {
++		t.Fatalf("code=%d want=1 stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++	}
++	if strings.Contains(stdout.String(), pageResult) || stdout.Len() != 0 {
++		t.Fatalf("publish failure leaked page result to stdout: %q", stdout.String())
++	}
++	if !strings.Contains(stderr.String(), "write output: publish denied") {
++		t.Fatalf("stderr=%q", stderr.String())
++	}
++}
++
+ func TestSlackReadProductionEntryRejectsWritesAndInvalidGuardsBeforeExecution(t *testing.T) {
+ 	marker := filepath.Join(t.TempDir(), "executed")
+ 	t.Setenv("MARKER", marker)
+@@ -164,24 +333,57 @@ func TestRunJSProductionEntryRejectsSecretScriptAndFileWithoutExecution(t *testi
+ 	if err := os.WriteFile(secretFile, []byte("navigator.credentials.get({})"), 0o600); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	cases := [][]string{
+-		{"run-js", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--script", "document.cookie"},
+-		{"run-js", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--file", secretFile},
++	cases := []struct {
++		args    []string
++		outPath string
++	}{
++		{args: []string{"run-js", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--script", "document.cookie"}, outPath: filepath.Join(t.TempDir(), "script-result.txt")},
++		{args: []string{"run-js", "--window-id", "1", "--tab-id", "2", "--origin", "https://example.com", "--file", secretFile}, outPath: filepath.Join(t.TempDir(), "file-result.txt")},
+ 	}
+-	for _, args := range cases {
++	for _, tc := range cases {
+ 		var stdout, stderr bytes.Buffer
++		args := append(tc.args, "--out", tc.outPath)
+ 		if code := run(args, &stdout, &stderr); code == 0 {
+ 			t.Fatalf("run(%v) unexpectedly passed", args)
+ 		}
+ 		if !strings.Contains(stderr.String(), "blocked token") {
+ 			t.Fatalf("stderr missing secret refusal: %s", stderr.String())
+ 		}
++		if stdout.Len() != 0 {
++			t.Fatalf("secret refusal leaked stdout: %q", stdout.String())
++		}
++		if _, err := os.Stat(tc.outPath); !os.IsNotExist(err) {
++			t.Fatalf("secret refusal published output artifact; err=%v", err)
++		}
+ 	}
+ 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+ 		t.Fatalf("secret payload reached osascript; marker err=%v", err)
+ 	}
+ }
+ 
++func TestRunJSProductionEntryDoesNotPublishOutputOnOriginRefusal(t *testing.T) {
++	result := `{"__macBrowserSessionGuard":"works.relux.mac-infra/browser-session-guard/v1","outcome":"origin-mismatch","origin":"https://drifted.example"}`
++	fake := filepath.Join(t.TempDir(), "osascript")
++	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' '"+result+"'\n"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	oldNew := newChromeSession
++	newChromeSession = func() chromectl.Session { return chromectl.Session{OsaScriptPath: fake} }
++	defer func() { newChromeSession = oldNew }()
++	outPath := filepath.Join(t.TempDir(), "result.txt")
++	var stdout, stderr bytes.Buffer
++	args := []string{"run-js", "--window-id", "1", "--tab-id", "2", "--origin", "https://expected.example", "--script", "document.readyState", "--out", outPath}
++	if code := run(args, &stdout, &stderr); code != 1 {
++		t.Fatalf("code=%d want=1 stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++	}
++	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "browser target origin changed") {
++		t.Fatalf("origin refusal was not fail-closed: stdout=%q stderr=%q", stdout.String(), stderr.String())
++	}
++	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
++		t.Fatalf("origin refusal published output artifact; err=%v", err)
++	}
++}
++
+ func TestRunJSProductionEntryCoversEveryBlockedToken(t *testing.T) {
+ 	marker := filepath.Join(t.TempDir(), "executed")
+ 	t.Setenv("MARKER", marker)

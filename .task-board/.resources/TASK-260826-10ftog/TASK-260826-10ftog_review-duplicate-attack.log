@@ -1,0 +1,8 @@
+=== RUN   TestReviewerAttackUploadFilesRejectsDuplicateActualMetadata
+    reviewer_upload_duplicate_attack_test.go:80: result=chromectl.UploadResult{Version:1, OK:true, Origin:"https://example.com", Count:2, Files:[]string{"a.pdf", "b.pdf"}} err=<nil> pageCalls=3
+    reviewer_upload_duplicate_attack_test.go:83: duplicate actual metadata was attested as exact: {"version":1,"ok":true,"origin":"https://example.com","count":2,"files":["a.pdf","b.pdf"]} (page calls=3)
+--- FAIL: TestReviewerAttackUploadFilesRejectsDuplicateActualMetadata (0.59s)
+FAIL
+FAIL	github.com/relux-works/mac-infra/internal/chromectl	1.103s
+FAIL
+exit=1

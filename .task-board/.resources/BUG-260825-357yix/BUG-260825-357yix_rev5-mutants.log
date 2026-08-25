@@ -1,0 +1,58 @@
+# BUG-260825-357yix CR revision 5 — reviewer mutant battery (RUN-260825-759ebe)
+#
+# Harness: .temp/BUG-260825-357yix/rev5/mutants.py
+# Each mutant is applied to a pristine copy of candidate tree 86eb6341, then
+#   go test ./internal/chromectl ./cmd/mac-chrome-session -count=1
+# is run uncached. SURVIVED == coverage hole. 16/16 KILLED.
+# Reviewer attack test files are removed before each mutant run, so every kill
+# below is by a test the candidate actually ships.
+
+M01-url-fallthrough-reverted               KILLED by TestSlackReadProductionPathRedactsTokenInURLPath
+M02-drop-slack-token-class                 KILLED by TestSlackReadKnownStringArgumentsRejectSecretShapes, TestSlackReadKnownStringArgumentsRejectSecretShapes/history-cursor, TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope, TestSlackReadProductionPathAtResponseCeilingMeetsCostBound
+M03-drop-bearer-class                      KILLED by TestSlackReadKnownStringArgumentsRejectSecretShapes, TestSlackReadKnownStringArgumentsRejectSecretShapes/list-cursor, TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope, TestSlackReadProductionEntryRejectsWritesAndInvalidGuardsBeforeExecution
+M04-drop-jwt-class                         KILLED by TestSlackReadKnownStringArgumentsRejectSecretShapes, TestSlackReadKnownStringArgumentsRejectSecretShapes/search-query, TestSlackReadProductionPathPreservesNonSecretBytesAroundEveryTokenSpan, TestSlackReadProductionPathRedactsEveryCompactTokenSegment
+M05-only-first-span-redacted               KILLED by TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope, TestSlackReadProductionPathEveryOccurrenceCannotBeNarrowed, TestSlackReadProductionPathPreservesNonSecretBytesAroundEveryTokenSpan
+M06-whole-string-redaction-restored        KILLED by TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope, TestSlackReadProductionPathAtResponseCeilingMeetsCostBound, TestSlackReadProductionPathBearerClassCannotBeNarrowed, TestSlackReadProductionPathEveryOccurrenceCannotBeNarrowed
+M07-jwt-tail-segments-removed              KILLED by TestSlackReadProductionPathRedactsEveryCompactTokenSegment
+M08-union-end-extension-deleted            KILLED by TestSlackReadProductionPathUnionsPartiallyOverlappingSecretSpans
+M09-whole-merge-loop-deleted               KILLED by TestSlackReadProductionPathUnionsOverlappingSecretSpans
+M10-slack-min-len-8-to-24                  KILLED by TestSlackReadKnownStringArgumentsRejectSecretShapes, TestSlackReadKnownStringArgumentsRejectSecretShapes/history-cursor, TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope, TestSlackReadProductionPathAtResponseCeilingMeetsCostBound
+M11-bearer-min-len-8-to-24                 KILLED by TestSlackReadKnownStringArgumentsRejectSecretShapes, TestSlackReadKnownStringArgumentsRejectSecretShapes/list-cursor, TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope, TestSlackReadProductionEntryRejectsWritesAndInvalidGuardsBeforeExecution
+M12-jwt-min-len-12-to-24                   KILLED by TestSlackReadKnownStringArgumentsRejectSecretShapes, TestSlackReadKnownStringArgumentsRejectSecretShapes/search-query, TestSlackReadProductionPathPreservesNonSecretBytesAroundEveryTokenSpan, TestSlackReadProductionPathRedactsEveryCompactTokenSegment
+M13-secret-key-token-suffix-dropped        KILLED by TestSanitizeSlackResponsePreservesURLPolicyAndStructuredSecretKeys, TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope, TestSlackReadProductionPathRecursivelyRedactsSecrets
+M14-url-https-branch-narrowed-to-http      KILLED by TestSanitizeSlackResponsePreservesURLPolicyAndStructuredSecretKeys, TestSlackReadProductionPathRecursivelyRedactsSecrets
+M15-request-guard-always-clean             KILLED by TestSlackReadKnownStringArgumentsRejectSecretShapes, TestSlackReadKnownStringArgumentsRejectSecretShapes/history-cursor, TestSlackReadKnownStringArgumentsRejectSecretShapes/list-cursor, TestSlackReadKnownStringArgumentsRejectSecretShapes/search-query
+M16-span-start-off-by-one                  KILLED by TestSlackReadProductionEntryEmitsVersionedSanitizedEnvelope, TestSlackReadProductionPathAtResponseCeilingMeetsCostBound, TestSlackReadProductionPathBearerClassCannotBeNarrowed, TestSlackReadProductionPathEveryOccurrenceCannotBeNarrowed
+
+
+# --- Cost-bound non-vacuity: CR revision 2 scanner reconstructed on top of rev5 ---
+#
+# The rev2 quadratic scanner (patterns without the encoded left boundary +
+# per-byte boundary rescan in appendSlackTokenSpans) was lifted verbatim from
+# BUG-260825-357yix_change-request_rev2.patch and grafted onto the rev5 tree.
+#
+# $ go test ./internal/chromectl -count=1 \
+#     -run TestSlackReadProductionPathAtResponseCeilingMeetsCostBound -v
+#   slack_test.go:410: production SlackRead exceeded 3s at the 262144-byte response ceiling
+#   --- FAIL: TestSlackReadProductionPathAtResponseCeilingMeetsCostBound (3.00s)
+#   FAIL
+#
+# Shipped rev5 tree, same test, 3 consecutive uncached runs: ok 1.716s / 1.627s / 1.540s.
+
+
+# --- Cost headroom decomposition (reviewer instrumentation, rev5 tree) ---
+#
+# redactSlackTokenSpans() alone at the 256 KiB ceiling, six hostile shapes:
+#   hostile-xapp-prefix    in=262133 out=262119 elapsed=33ms
+#   hostile-dots           in=262128 out=262128 elapsed=26ms
+#   hostile-bearer         in=262129 out=262129 elapsed=28ms
+#   hostile-dashes         in=262133 out=262133 elapsed=35ms
+#   hostile-xoxb           in=262128 out=262128 elapsed=31ms
+#   benign-text            in=262128 out=262128 elapsed=28ms
+#
+# Full production Session.SlackRead through the fake-osascript harness:
+#   tiny     SlackRead elapsed=957ms (response 16 bytes)
+#   ceiling  SlackRead elapsed=970ms (response 262144 bytes)
+#
+# The scanner contributes ~13ms of the 3s budget; the remaining ~957ms is fixed
+# fake-osascript spawn + 100ms poll plumbing, identical for a 16-byte response.

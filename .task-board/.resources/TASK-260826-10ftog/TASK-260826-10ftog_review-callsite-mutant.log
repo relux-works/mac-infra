@@ -1,0 +1,52 @@
+TASK-260826-10ftog review attack — CR revision 7
+Candidate tree: efef734fd4e09093838dbdb77d73b0d3757c1d56
+Reviewer run: RUN-260826-ee19b0
+
+Negative shape: check present but uncalled from production / bypass path around the check.
+
+Mutation applied only in a disposable archive materialization:
+
+1. Keep the production body text `status = MacChromeWaitForSingleSheet(window, &chooser)` in a comment so the test's strings.Contains call-site assertion remains satisfied.
+2. Add `MacChromeWaitForSingleSheetPermissive`, which retries every non-success from `MacChromeSingleSheet`, including `MacChromeAXFileChooserUnreadable`.
+3. Route `macChromeAXUploadFiles` through that permissive wait. An unreadable AXSheets observation followed by one sheet now reaches the retained-chooser and keyboard path instead of refusing the first unknown snapshot.
+
+Relevant diff:
+
+@@ internal/chromectl/ax_darwin.m
++static int MacChromeWaitForSingleSheetPermissive(AXUIElementRef window, AXUIElementRef *out) {
++    int status = MacChromeAXFileChooserMissing;
++    for (int attempt = 0; attempt < 40; attempt++) {
++        AXUIElementRef sheet = NULL;
++        status = MacChromeSingleSheet(window, &sheet);
++        if (status == MacChromeAXOK) {
++            *out = sheet;
++            return MacChromeAXOK;
++        }
++        if (sheet != NULL) CFRelease(sheet);
++        usleep(50000);
++    }
++    return status;
++}
+@@
+-        if (status == MacChromeAXOK) status = MacChromeWaitForSingleSheet(window, &chooser);
++        // status = MacChromeWaitForSingleSheet(window, &chooser);
++        if (status == MacChromeAXOK) status = MacChromeWaitForSingleSheetPermissive(window, &chooser);
+
+Command:
+go test -count=1 ./internal/chromectl -run 'TestChromeAXUploadProductionPathRefusesUnreadableSheetSequences|TestChromeAXUploadProductionPathRefusesPreexistingAndReplacedChooser|TestChromeAXUploadBridgeGuardsExactNonceAndChooserBeforeBoundedKeys'
+
+Result: exit 0
+ok github.com/relux-works/mac-infra/internal/chromectl 5.144s
+
+Command:
+go test -count=1 ./internal/chromectl -run 'Upload'
+
+Result: exit 0
+ok github.com/relux-works/mac-infra/internal/chromectl 25.346s
+
+Why the mutant survives:
+- `internal/chromectl/ax_darwin_test.go:193-201` checks only that the production body contains a call-shaped string.
+- The executable harness at lines 257-288 invokes `MacChromeWaitForSingleSheet` and `MacChromeWaitForNoSheets` directly.
+- It never invokes `macChromeAXUploadFiles`, so changing only the production call site bypasses the executed proof while all upload tests remain green.
+
+The repository candidate was not modified. The mutant exists only under `.temp/TASK-260826-10ftog/candidate-rev7-callsite-mutant`.

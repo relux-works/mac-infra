@@ -1,0 +1,3 @@
+ok  	github.com/relux-works/mac-infra/cmd/mac-safari-session	2.731s
+ok  	github.com/relux-works/mac-infra/internal/browsersession	1.377s
+ok  	github.com/relux-works/mac-infra/internal/safarictl	2.962s

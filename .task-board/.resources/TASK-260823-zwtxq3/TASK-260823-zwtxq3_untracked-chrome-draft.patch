@@ -1,0 +1,834 @@
+diff --git a/cmd/mac-chrome-session/main.go b/cmd/mac-chrome-session/main.go
+new file mode 100644
+index 0000000..fca9ffb
+--- /dev/null
++++ b/cmd/mac-chrome-session/main.go
+@@ -0,0 +1,217 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"flag"
++	"fmt"
++	"io"
++	"os"
++	"strings"
++	"time"
++
++	"github.com/relux-works/mac-infra/internal/chromectl"
++)
++
++var (
++	Version   = "dev"
++	Commit    = "unknown"
++	BuildDate = "unknown"
++)
++
++func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
++
++func run(args []string, stdout, stderr io.Writer) int {
++	if len(args) == 0 {
++		usage(stdout)
++		return 2
++	}
++	switch args[0] {
++	case "list":
++		return runList(args[1:], stdout, stderr)
++	case "run-js":
++		return runJS(args[1:], stdout, stderr)
++	case "heartbeat":
++		return runHeartbeat(args[1:], stdout, stderr)
++	case "version":
++		fmt.Fprintf(stdout, "mac-chrome-session %s %s %s\n", Version, Commit, BuildDate)
++		return 0
++	case "help", "-h", "--help":
++		usage(stdout)
++		return 0
++	default:
++		fmt.Fprintf(stderr, "unknown command %q\n", args[0])
++		usage(stderr)
++		return 2
++	}
++}
++
++func runList(args []string, stdout, stderr io.Writer) int {
++	fs := flag.NewFlagSet("list", flag.ContinueOnError)
++	fs.SetOutput(stderr)
++	if err := fs.Parse(args); err != nil || len(fs.Args()) != 0 {
++		return 2
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++	defer cancel()
++	tabs, err := chromectl.New().List(ctx)
++	if err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	return printJSON(stdout, stderr, tabs)
++}
++
++func runJS(args []string, stdout, stderr io.Writer) int {
++	fs := flag.NewFlagSet("run-js", flag.ContinueOnError)
++	fs.SetOutput(stderr)
++	windowID := fs.String("window-id", "", "exact Chrome window id")
++	tabID := fs.String("tab-id", "", "exact Chrome tab id")
++	origin := fs.String("origin", "", "expected location.origin guard")
++	script := fs.String("script", "", "bounded JavaScript source")
++	if err := fs.Parse(args); err != nil {
++		return 2
++	}
++	if len(fs.Args()) != 0 || *windowID == "" || *tabID == "" || strings.TrimSpace(*script) == "" {
++		fmt.Fprintln(stderr, "run-js requires --window-id, --tab-id, and --script")
++		return 2
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
++	defer cancel()
++	result, err := chromectl.New().RunJavaScript(ctx, *windowID, *tabID, *origin, *script)
++	if err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	fmt.Fprintln(stdout, result)
++	return 0
++}
++
++func runHeartbeat(args []string, stdout, stderr io.Writer) int {
++	if len(args) == 0 {
++		fmt.Fprintln(stderr, "heartbeat requires start, status, stop, or run")
++		return 2
++	}
++	switch args[0] {
++	case "start":
++		return heartbeatStart(args[1:], stdout, stderr)
++	case "status":
++		return heartbeatStatus(args[1:], stdout, stderr)
++	case "stop":
++		return heartbeatStop(args[1:], stdout, stderr)
++	case "run":
++		return heartbeatRun(args[1:], stderr)
++	default:
++		fmt.Fprintf(stderr, "unknown heartbeat command %q\n", args[0])
++		return 2
++	}
++}
++
++func heartbeatStart(args []string, stdout, stderr io.Writer) int {
++	fs := flag.NewFlagSet("heartbeat start", flag.ContinueOnError)
++	fs.SetOutput(stderr)
++	name := fs.String("name", "", "stable heartbeat name")
++	windowID := fs.String("window-id", "", "exact Chrome window id")
++	tabID := fs.String("tab-id", "", "exact Chrome tab id")
++	origin := fs.String("origin", "", "required expected location.origin")
++	interval := fs.Duration("interval", 45*time.Second, "heartbeat interval (minimum 15s)")
++	if err := fs.Parse(args); err != nil {
++		return 2
++	}
++	executable, err := os.Executable()
++	if err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	cfg, err := chromectl.DefaultHeartbeatConfig(*name, *windowID, *tabID, *origin, executable, *interval)
++	if err != nil {
++		fmt.Fprintln(stderr, err)
++		return 2
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	defer cancel()
++	if err := chromectl.New().StartHeartbeat(ctx, cfg); err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	status, err := chromectl.InspectHeartbeat(ctx, *name)
++	if err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	return printJSON(stdout, stderr, status)
++}
++
++func heartbeatStatus(args []string, stdout, stderr io.Writer) int {
++	fs := flag.NewFlagSet("heartbeat status", flag.ContinueOnError)
++	fs.SetOutput(stderr)
++	name := fs.String("name", "", "heartbeat name")
++	if err := fs.Parse(args); err != nil || *name == "" {
++		fmt.Fprintln(stderr, "heartbeat status requires --name")
++		return 2
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++	defer cancel()
++	status, err := chromectl.InspectHeartbeat(ctx, *name)
++	if err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	return printJSON(stdout, stderr, status)
++}
++
++func heartbeatStop(args []string, stdout, stderr io.Writer) int {
++	fs := flag.NewFlagSet("heartbeat stop", flag.ContinueOnError)
++	fs.SetOutput(stderr)
++	name := fs.String("name", "", "heartbeat name")
++	if err := fs.Parse(args); err != nil || *name == "" {
++		fmt.Fprintln(stderr, "heartbeat stop requires --name")
++		return 2
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++	defer cancel()
++	if err := chromectl.StopHeartbeat(ctx, *name); err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	fmt.Fprintf(stdout, "stopped: %s\n", *name)
++	return 0
++}
++
++func heartbeatRun(args []string, stderr io.Writer) int {
++	fs := flag.NewFlagSet("heartbeat run", flag.ContinueOnError)
++	fs.SetOutput(stderr)
++	name := fs.String("name", "", "heartbeat name")
++	if err := fs.Parse(args); err != nil || *name == "" {
++		return 2
++	}
++	cfg, err := chromectl.LoadHeartbeatConfig(*name)
++	if err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	if err := chromectl.New().RunHeartbeat(context.Background(), cfg); err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	return 0
++}
++
++func printJSON(stdout, stderr io.Writer, value any) int {
++	data, err := json.MarshalIndent(value, "", "  ")
++	if err != nil {
++		fmt.Fprintln(stderr, err)
++		return 1
++	}
++	_, _ = stdout.Write(append(data, '\n'))
++	return 0
++}
++
++func usage(w io.Writer) {
++	fmt.Fprintln(w, "usage: mac-chrome-session <command> [options]")
++	fmt.Fprintln(w, "commands:")
++	fmt.Fprintln(w, "  list                         list sanitized Chrome window/tab metadata")
++	fmt.Fprintln(w, "  run-js                       run guarded JavaScript on exact IDs")
++	fmt.Fprintln(w, "  heartbeat start|status|stop  manage persistent silent tab heartbeat")
++	fmt.Fprintln(w, "  version                      print version")
++}
+diff --git a/cmd/mac-chrome-session/main_test.go b/cmd/mac-chrome-session/main_test.go
+new file mode 100644
+index 0000000..76aac61
+--- /dev/null
++++ b/cmd/mac-chrome-session/main_test.go
+@@ -0,0 +1,29 @@
++package main
++
++import (
++	"bytes"
++	"strings"
++	"testing"
++)
++
++func TestUsageDocumentsHeartbeatLifecycle(t *testing.T) {
++	var stdout, stderr bytes.Buffer
++	if code := run([]string{"help"}, &stdout, &stderr); code != 0 {
++		t.Fatalf("code = %d stderr=%s", code, stderr.String())
++	}
++	for _, want := range []string{"run-js", "heartbeat start|status|stop", "list"} {
++		if !strings.Contains(stdout.String(), want) {
++			t.Fatalf("usage missing %q:\n%s", want, stdout.String())
++		}
++	}
++}
++
++func TestRunJSRequiresExactIDsAndScript(t *testing.T) {
++	var stdout, stderr bytes.Buffer
++	if code := run([]string{"run-js", "--script", "document.title"}, &stdout, &stderr); code != 2 {
++		t.Fatalf("code = %d, want 2", code)
++	}
++	if !strings.Contains(stderr.String(), "--window-id") {
++		t.Fatalf("stderr = %q", stderr.String())
++	}
++}
+diff --git a/internal/chromectl/session.go b/internal/chromectl/session.go
+new file mode 100644
+index 0000000..185d10b
+--- /dev/null
++++ b/internal/chromectl/session.go
+@@ -0,0 +1,365 @@
++package chromectl
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/url"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"regexp"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/relux-works/mac-infra/internal/safarictl"
++)
++
++const (
++	DefaultStateDir = "Library/Application Support/mac-infra/chrome-session"
++	labelPrefix     = "works.relux.mac-infra-chrome-heartbeat."
++)
++
++var heartbeatNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
++
++type Session struct {
++	OsaScriptPath string
++}
++
++type Tab struct {
++	WindowID string `json:"windowId"`
++	TabID    string `json:"tabId"`
++	Title    string `json:"title"`
++	URL      string `json:"url"`
++	Origin   string `json:"origin,omitempty"`
++}
++
++type HeartbeatConfig struct {
++	Name       string        `json:"name"`
++	WindowID   string        `json:"windowId"`
++	TabID      string        `json:"tabId"`
++	Origin     string        `json:"origin"`
++	Interval   time.Duration `json:"interval"`
++	Executable string        `json:"executable"`
++	Label      string        `json:"label"`
++	PlistPath  string        `json:"plistPath"`
++	LogPath    string        `json:"logPath"`
++	StatePath  string        `json:"statePath"`
++	UID        int           `json:"uid"`
++}
++
++type HeartbeatStatus struct {
++	Name      string `json:"name"`
++	State     string `json:"state"`
++	Label     string `json:"label"`
++	WindowID  string `json:"windowId,omitempty"`
++	TabID     string `json:"tabId,omitempty"`
++	Origin    string `json:"origin,omitempty"`
++	Interval  string `json:"interval,omitempty"`
++	PlistPath string `json:"plistPath"`
++	LogPath   string `json:"logPath"`
++}
++
++func New() Session {
++	return Session{OsaScriptPath: "/usr/bin/osascript"}
++}
++
++func (s Session) List(ctx context.Context) ([]Tab, error) {
++	out, err := s.runJXA(ctx, listJXA())
++	if err != nil {
++		return nil, err
++	}
++	var windows []struct {
++		ID   string `json:"id"`
++		Tabs []struct {
++			ID    string `json:"id"`
++			Title string `json:"title"`
++			URL   string `json:"url"`
++		} `json:"tabs"`
++	}
++	if err := json.Unmarshal([]byte(out), &windows); err != nil {
++		return nil, fmt.Errorf("decode Chrome windows: %w", err)
++	}
++	var tabs []Tab
++	for _, window := range windows {
++		for _, tab := range window.Tabs {
++			redacted := redactTabURL(tab.URL)
++			tabs = append(tabs, Tab{WindowID: window.ID, TabID: tab.ID, Title: tab.Title, URL: redacted, Origin: originOf(redacted)})
++		}
++	}
++	return tabs, nil
++}
++
++func (s Session) RunJavaScript(ctx context.Context, windowID, tabID, expectedOrigin, source string) (string, error) {
++	if strings.TrimSpace(windowID) == "" || strings.TrimSpace(tabID) == "" {
++		return "", errors.New("window id and tab id are required")
++	}
++	if err := safarictl.GuardJavaScript(source); err != nil {
++		return "", err
++	}
++	expectedOrigin = strings.TrimSpace(expectedOrigin)
++	if expectedOrigin != "" {
++		actual, err := s.runJXA(ctx, executeJXA(), windowID, tabID, "location.origin")
++		if err != nil {
++			return "", err
++		}
++		if strings.TrimSpace(actual) != expectedOrigin {
++			return "", fmt.Errorf("Chrome target origin changed: got %q, want %q", strings.TrimSpace(actual), expectedOrigin)
++		}
++	}
++	return s.runJXA(ctx, executeJXA(), windowID, tabID, source)
++}
++
++func HeartbeatJavaScript() string {
++	return `(() => {
++  const target = document.querySelector("textarea,input,[contenteditable=true]") || document.body || document.documentElement;
++  target.dispatchEvent(new PointerEvent("pointermove", {bubbles:true, clientX:1, clientY:1}));
++  target.dispatchEvent(new KeyboardEvent("keydown", {bubbles:true, key:"Shift", code:"ShiftLeft"}));
++  target.dispatchEvent(new KeyboardEvent("keyup", {bubbles:true, key:"Shift", code:"ShiftLeft"}));
++  return JSON.stringify({ok:true,title:document.title,origin:location.origin,readyState:document.readyState});
++})()`
++}
++
++func DefaultHeartbeatConfig(name, windowID, tabID, origin, executable string, interval time.Duration) (HeartbeatConfig, error) {
++	if !heartbeatNamePattern.MatchString(name) {
++		return HeartbeatConfig{}, errors.New("heartbeat name must match [a-z0-9][a-z0-9-]{0,47}")
++	}
++	if strings.TrimSpace(windowID) == "" || strings.TrimSpace(tabID) == "" || strings.TrimSpace(origin) == "" {
++		return HeartbeatConfig{}, errors.New("heartbeat requires window id, tab id, and expected origin")
++	}
++	if interval < 15*time.Second {
++		return HeartbeatConfig{}, errors.New("heartbeat interval must be at least 15s")
++	}
++	home, err := os.UserHomeDir()
++	if err != nil {
++		return HeartbeatConfig{}, fmt.Errorf("resolve user home: %w", err)
++	}
++	stateDir := filepath.Join(home, DefaultStateDir)
++	label := labelPrefix + name
++	return HeartbeatConfig{
++		Name: name, WindowID: windowID, TabID: tabID, Origin: origin, Interval: interval,
++		Executable: executable, Label: label, UID: os.Getuid(),
++		PlistPath: filepath.Join(home, "Library", "LaunchAgents", label+".plist"),
++		LogPath:   filepath.Join(stateDir, name+".log"), StatePath: filepath.Join(stateDir, name+".json"),
++	}, nil
++}
++
++func (s Session) StartHeartbeat(ctx context.Context, cfg HeartbeatConfig) error {
++	if _, err := s.RunJavaScript(ctx, cfg.WindowID, cfg.TabID, cfg.Origin, HeartbeatJavaScript()); err != nil {
++		return fmt.Errorf("heartbeat preflight: %w", err)
++	}
++	if err := os.MkdirAll(filepath.Dir(cfg.StatePath), 0o700); err != nil {
++		return err
++	}
++	if err := os.MkdirAll(filepath.Dir(cfg.PlistPath), 0o700); err != nil {
++		return err
++	}
++	if err := os.WriteFile(cfg.LogPath, nil, 0o600); err != nil {
++		return err
++	}
++	state, _ := json.MarshalIndent(cfg, "", "  ")
++	state = append(state, '\n')
++	if err := writeAtomic(cfg.StatePath, state, 0o600); err != nil {
++		return err
++	}
++	if err := writeAtomic(cfg.PlistPath, RenderHeartbeatLaunchAgent(cfg), 0o600); err != nil {
++		return err
++	}
++	service := "gui/" + strconv.Itoa(cfg.UID) + "/" + cfg.Label
++	_ = runLaunchctl(ctx, "bootout", service)
++	return runLaunchctl(ctx, "bootstrap", "gui/"+strconv.Itoa(cfg.UID), cfg.PlistPath)
++}
++
++func StopHeartbeat(ctx context.Context, name string) error {
++	cfg, err := LoadHeartbeatConfig(name)
++	if err != nil && !os.IsNotExist(err) {
++		return err
++	}
++	if os.IsNotExist(err) {
++		template, cfgErr := DefaultHeartbeatConfig(name, "x", "x", "x", "x", 15*time.Second)
++		if cfgErr != nil {
++			return cfgErr
++		}
++		cfg = template
++	}
++	service := "gui/" + strconv.Itoa(cfg.UID) + "/" + cfg.Label
++	if launchErr := runLaunchctl(ctx, "bootout", service); launchErr != nil && !isMissingLaunchAgent(launchErr) {
++		return launchErr
++	}
++	_ = os.Remove(cfg.PlistPath)
++	_ = os.Remove(cfg.StatePath)
++	return nil
++}
++
++func InspectHeartbeat(ctx context.Context, name string) (HeartbeatStatus, error) {
++	cfg, err := LoadHeartbeatConfig(name)
++	if err != nil {
++		if os.IsNotExist(err) {
++			template, cfgErr := DefaultHeartbeatConfig(name, "x", "x", "x", "x", 15*time.Second)
++			if cfgErr != nil {
++				return HeartbeatStatus{}, cfgErr
++			}
++			return HeartbeatStatus{Name: name, State: "stopped", Label: template.Label, PlistPath: template.PlistPath, LogPath: template.LogPath}, nil
++		}
++		return HeartbeatStatus{}, err
++	}
++	status := HeartbeatStatus{Name: name, State: "stopped", Label: cfg.Label, WindowID: cfg.WindowID, TabID: cfg.TabID, Origin: cfg.Origin, Interval: cfg.Interval.String(), PlistPath: cfg.PlistPath, LogPath: cfg.LogPath}
++	service := "gui/" + strconv.Itoa(cfg.UID) + "/" + cfg.Label
++	if err := runLaunchctl(ctx, "print", service); err == nil {
++		status.State = "running"
++	} else if !isMissingLaunchAgent(err) {
++		status.State = "unavailable"
++		return status, err
++	}
++	return status, nil
++}
++
++func LoadHeartbeatConfig(name string) (HeartbeatConfig, error) {
++	template, err := DefaultHeartbeatConfig(name, "x", "x", "x", "x", 15*time.Second)
++	if err != nil {
++		return HeartbeatConfig{}, err
++	}
++	data, err := os.ReadFile(template.StatePath)
++	if err != nil {
++		return HeartbeatConfig{}, err
++	}
++	var cfg HeartbeatConfig
++	if err := json.Unmarshal(data, &cfg); err != nil {
++		return HeartbeatConfig{}, err
++	}
++	return cfg, nil
++}
++
++func (s Session) RunHeartbeat(ctx context.Context, cfg HeartbeatConfig) error {
++	ticker := time.NewTicker(cfg.Interval)
++	defer ticker.Stop()
++	for {
++		started := time.Now().UTC()
++		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
++		result, err := s.RunJavaScript(probeCtx, cfg.WindowID, cfg.TabID, cfg.Origin, HeartbeatJavaScript())
++		cancel()
++		if err != nil {
++			fmt.Fprintf(os.Stdout, "%s error=%q\n", started.Format(time.RFC3339), err.Error())
++		} else {
++			fmt.Fprintf(os.Stdout, "%s result=%q\n", started.Format(time.RFC3339), result)
++		}
++		select {
++		case <-ctx.Done():
++			return nil
++		case <-ticker.C:
++		}
++	}
++}
++
++func RenderHeartbeatLaunchAgent(cfg HeartbeatConfig) []byte {
++	args := []string{cfg.Executable, "heartbeat", "run", "--name", cfg.Name}
++	var b strings.Builder
++	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n")
++	b.WriteString("  <key>Label</key><string>" + xmlEscape(cfg.Label) + "</string>\n  <key>ProgramArguments</key><array>\n")
++	for _, arg := range args {
++		b.WriteString("    <string>" + xmlEscape(arg) + "</string>\n")
++	}
++	b.WriteString("  </array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>Umask</key><integer>63</integer>\n")
++	b.WriteString("  <key>StandardOutPath</key><string>" + xmlEscape(cfg.LogPath) + "</string>\n  <key>StandardErrorPath</key><string>" + xmlEscape(cfg.LogPath) + "</string>\n</dict>\n</plist>\n")
++	return []byte(b.String())
++}
++
++func listJXA() string {
++	return `const c=Application("Google Chrome"); JSON.stringify(c.windows().map(w=>({id:String(w.id()),tabs:w.tabs().map(t=>({id:String(t.id()),title:String(t.title()||""),url:String(t.url()||"")}))})))`
++}
++
++func executeJXA() string {
++	return `function run(argv){const c=Application("Google Chrome");const ws=c.windows.whose({id:String(argv[0])})();if(!ws.length)throw new Error("Chrome target window is no longer open");const ts=ws[0].tabs.whose({id:String(argv[1])})();if(!ts.length)throw new Error("Chrome target tab is no longer open");return c.execute(ts[0],{javascript:String(argv[2])});}`
++}
++
++func (s Session) runJXA(ctx context.Context, script string, args ...string) (string, error) {
++	path := strings.TrimSpace(s.OsaScriptPath)
++	if path == "" {
++		path = "/usr/bin/osascript"
++	}
++	cmdArgs := []string{"-l", "JavaScript", "-e", script}
++	cmdArgs = append(cmdArgs, args...)
++	cmd := exec.CommandContext(ctx, path, cmdArgs...)
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout, cmd.Stderr = &stdout, &stderr
++	if err := cmd.Run(); err != nil {
++		detail := strings.TrimSpace(stderr.String())
++		if detail == "" {
++			detail = err.Error()
++		}
++		return "", fmt.Errorf("Chrome Apple Events failed: %s", detail)
++	}
++	return strings.TrimRight(stdout.String(), "\n"), nil
++}
++
++func originOf(raw string) string {
++	for _, prefix := range []string{"https://", "http://"} {
++		if strings.HasPrefix(raw, prefix) {
++			rest := strings.TrimPrefix(raw, prefix)
++			if i := strings.IndexAny(rest, "/?#"); i >= 0 {
++				rest = rest[:i]
++			}
++			return prefix + rest
++		}
++	}
++	return ""
++}
++
++func redactTabURL(raw string) string {
++	redacted := safarictl.RedactSensitiveURL(raw)
++	parsed, err := url.Parse(redacted)
++	if err != nil {
++		return redacted
++	}
++	if parsed.Fragment != "" {
++		parsed.Fragment = "[redacted]"
++	}
++	return parsed.String()
++}
++
++func writeAtomic(path string, data []byte, mode os.FileMode) error {
++	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++		return err
++	}
++	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
++	if err != nil {
++		return err
++	}
++	name := tmp.Name()
++	defer os.Remove(name)
++	if err := tmp.Chmod(mode); err != nil {
++		_ = tmp.Close()
++		return err
++	}
++	if _, err := tmp.Write(data); err != nil {
++		_ = tmp.Close()
++		return err
++	}
++	if err := tmp.Close(); err != nil {
++		return err
++	}
++	return os.Rename(name, path)
++}
++
++func runLaunchctl(ctx context.Context, args ...string) error {
++	cmd := exec.CommandContext(ctx, "/bin/launchctl", args...)
++	var output bytes.Buffer
++	cmd.Stdout, cmd.Stderr = &output, &output
++	if err := cmd.Run(); err != nil {
++		return fmt.Errorf("launchctl %s: %s", strings.Join(args, " "), strings.TrimSpace(output.String()))
++	}
++	return nil
++}
++
++func isMissingLaunchAgent(err error) bool {
++	text := strings.ToLower(err.Error())
++	return strings.Contains(text, "could not find service") || strings.Contains(text, "service not found") || strings.Contains(text, "no such process") || strings.Contains(text, "113")
++}
++
++func xmlEscape(value string) string {
++	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;", "'", "&apos;")
++	return replacer.Replace(value)
++}
+diff --git a/internal/chromectl/session_test.go b/internal/chromectl/session_test.go
+new file mode 100644
+index 0000000..c310540
+--- /dev/null
++++ b/internal/chromectl/session_test.go
+@@ -0,0 +1,71 @@
++package chromectl
++
++import (
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestHeartbeatJavaScriptDoesNotFocusChromeOrReadSecrets(t *testing.T) {
++	source := HeartbeatJavaScript()
++	for _, forbidden := range []string{"document.cookie", "localStorage", "sessionStorage", "activate", "active tab"} {
++		if strings.Contains(source, forbidden) {
++			t.Fatalf("heartbeat contains forbidden token %q", forbidden)
++		}
++	}
++	for _, want := range []string{"pointermove", "ShiftLeft", "location.origin"} {
++		if !strings.Contains(source, want) {
++			t.Fatalf("heartbeat missing %q", want)
++		}
++	}
++}
++
++func TestRenderHeartbeatLaunchAgentPinsExactTargetThroughStateName(t *testing.T) {
++	cfg := HeartbeatConfig{Name: "fns", Label: "works.relux.test.fns", Executable: "/tmp/mac-chrome-session", LogPath: "/tmp/fns.log"}
++	plist := string(RenderHeartbeatLaunchAgent(cfg))
++	for _, want := range []string{"/tmp/mac-chrome-session", "heartbeat", "run", "--name", "fns", "<key>Umask</key><integer>63</integer>", "/tmp/fns.log"} {
++		if !strings.Contains(plist, want) {
++			t.Fatalf("plist missing %q:\n%s", want, plist)
++		}
++	}
++	for _, forbidden := range []string{"activate", "System Events", "set active tab"} {
++		if strings.Contains(plist, forbidden) {
++			t.Fatalf("plist contains focus mutation %q", forbidden)
++		}
++	}
++}
++
++func TestDefaultHeartbeatConfigRejectsUnsafeNameAndFastInterval(t *testing.T) {
++	if _, err := DefaultHeartbeatConfig("../bad", "1", "2", "https://example.com", "/bin/tool", 30*time.Second); err == nil {
++		t.Fatal("unsafe name accepted")
++	}
++	if _, err := DefaultHeartbeatConfig("safe", "1", "2", "https://example.com", "/bin/tool", 5*time.Second); err == nil {
++		t.Fatal("fast interval accepted")
++	}
++}
++
++func TestAutomationScriptsUseExactIDsWithoutActivation(t *testing.T) {
++	source := executeJXA()
++	for _, want := range []string{"windows.whose", "tabs.whose", "c.execute"} {
++		if !strings.Contains(source, want) {
++			t.Fatalf("execute script missing %q", want)
++		}
++	}
++	for _, forbidden := range []string{"activate", "frontmost", "activeTabIndex"} {
++		if strings.Contains(source, forbidden) {
++			t.Fatalf("execute script contains focus mutation %q", forbidden)
++		}
++	}
++}
++
++func TestRedactTabURLRemovesFragmentAndSensitiveQueryValues(t *testing.T) {
++	got := redactTabURL("https://example.com/path?code=secret&next=ok#conversation/private")
++	if strings.Contains(got, "secret") || strings.Contains(got, "private") {
++		t.Fatalf("redacted URL leaked sensitive values: %q", got)
++	}
++	for _, want := range []string{"code=%5Bredacted%5D", "next=ok", "#%5Bredacted%5D"} {
++		if !strings.Contains(got, want) {
++			t.Fatalf("redacted URL missing %q: %q", want, got)
++		}
++	}
++}
+diff --git a/agents/skills/mac-infra/references/chrome-session.md b/agents/skills/mac-infra/references/chrome-session.md
+new file mode 100644
+index 0000000..7dcdcd2
+--- /dev/null
++++ b/agents/skills/mac-infra/references/chrome-session.md
+@@ -0,0 +1,122 @@
++# Authenticated Google Chrome Session
++
++Use this workflow when the user has an authenticated page open in Google Chrome
++and Safari automation is unavailable or the site requires Chrome-specific
++extensions, signing software, or browser behavior.
++
++Core rule: let Chrome retain the authenticated session. Never read, export,
++print, copy, or persist cookies, `cookieStore`, `localStorage`, `sessionStorage`,
++authorization headers, access tokens, or refresh tokens. Persist only bounded
++page content, URLs after sensitive query values are redacted, downloaded files,
++and sanitized task evidence.
++
++## Enable Apple Events JavaScript
++
++Chrome rejects `execute ... javascript` until the user manually enables:
++
++```text
++View -> Developer -> Allow JavaScript from Apple Events
++```
++
++The menu item is a Chrome preference, not a per-tab permission. If AppleScript
++reports that JavaScript through Apple Events is turned off, ask the user to
++enable this exact item. Do not use UI scripting to toggle it.
++
++## Choose Silent Or Visible Mode
++
++Use **silent mode** by default. Inspect and interact with the exact Chrome tab
++through Apple Events without activating Chrome, raising a window, or selecting
++the tab. This is the normal mode when the user asks the agent to investigate or
++operate on a page but does not need to watch or take over.
++
++Use **visible/handoff mode** only when the user explicitly asks to open or show
++the page, work in the tab they are currently using, bring the relevant tab
++forward, or leave the browser ready for their manual interaction. In that mode,
++focus only the exact resolved window and tab needed for the request. Do not
++interpret permission to work in an authenticated tab as permission to surface
++Chrome; the visible transition must be part of the user's request.
++
++If a step unexpectedly needs human interaction, such as a CAPTCHA, passkey,
++OTP, signing prompt, file picker, or permission dialog, remain in silent mode,
++describe the exact required action, and let the user foreground the browser
++unless they explicitly ask the agent to do it.
++
++## Resolve Exact Targets Without Focus
++
++Do not use `activate`, `set index of window`, System Events clicks, or frontmost
++window assumptions. Enumerate Chrome windows and tabs without changing focus:
++
++```applescript
++tell application "Google Chrome"
++  set output to ""
++  repeat with chromeWindow in windows
++    set output to output & "window=" & (id of chromeWindow as text) & linefeed
++    repeat with chromeTab in tabs of chromeWindow
++      set output to output & "  tab=" & (id of chromeTab as text) & ¬
++        " title=" & (title of chromeTab as text) & ¬
++        " url=" & (URL of chromeTab as text) & linefeed
++    end repeat
++  end repeat
++  return output
++end tell
++```
++
++Resolve the target from a sanitized enumeration and then pin every later action
++to both IDs. Do not keep using an old ID after tabs or windows have changed.
++Never guess from tab position or operate on `active tab` merely because it was
++correct during an earlier step.
++
++The verified silent-mode pattern is to resolve `targetWindow` and `targetTab`, then
++run every DOM read or same-page interaction directly with `execute targetTab
++javascript ...`. This does not require Chrome to become active, the window to be
++raised, or the tab to be selected. DOM `click()` calls and dispatched input,
++pointer, or mouse events stay in page context and are background-safe under the
++same rule. Do not wrap this pattern with `activate`, `set active tab`, `set index
++of window`, `bring to front`, or System Events UI scripting; those additions are
++what create focus churn and belong only in an explicitly requested visible
++handoff.
++
++Treat user-owned tabs as borrowed state: do not close, reload, navigate, or move
++them unless the user explicitly requests that action. Track and close only tabs
++or windows created by the agent.
++
++## Verify DOM Access
++
++Run a bounded, non-mutating smoke test against the exact IDs:
++
++```applescript
++tell application "Google Chrome"
++  set targetWindow to first window whose id is 123456
++  set targetTab to first tab of targetWindow whose id is 123457
++  return execute targetTab javascript ¬
++    "JSON.stringify({title:document.title,origin:location.origin,readyState:document.readyState,bodyPresent:!!document.body})"
++end tell
++```
++
++This confirms that the toggle is enabled and that the intended tab is reachable.
++Before a mutation, re-check `location.origin` and a page-specific marker so a
++stale tab ID cannot send a click to the wrong page.
++
++## Read And Interact Safely
++
++- Keep DOM reads bounded with `slice(...)` and bounded element lists.
++- Prefer semantic selectors, accessible names, stable labels, and explicit form
++  values. Avoid screen-coordinate clicks.
++- Inspect current state before each consequential click. Verify the resulting
++  state afterward.
++- Stop for passkeys, OTPs, CAPTCHAs, signing confirmations, file pickers, or
++  permission prompts that require human interaction. Tell the user exactly what
++  must be confirmed without focusing Chrome for them.
++- Do not submit payments, legal filings, signatures, or other consequential
++  actions unless the user has explicitly authorized that mutation.
++- Do not transfer authenticated browser requests to `curl` by copying session
++  material. Use same-origin page-context requests only when needed and return
++  only bounded, sanitized response data.
++
++Apple Events output may contain personal data. Write raw command output only to
++a task-scoped private file (`umask 077`), sanitize it with
++`mac-document-sanitize`, and inspect only the returned sanitized path. Remove
++only raw artifacts created by the agent after the task no longer needs them.
++
++Chrome AppleScript is currently a documented low-level workflow, not a guarded
++`mac-chrome-session` CLI. Apply the safety checks in this reference manually.

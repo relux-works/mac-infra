@@ -1,0 +1,12 @@
+Command: go test ./internal/chromectl -run '^TestSlackReadProductionPathUnionsPartiallyOverlappingSecretSpans$' -count=1 -v
+Mutant: delete only the findSlackTokenSpans overlap end-extension branch.
+Exit code: 1 (expected red; proves the named production-path regression rejects the narrowed union)
+
+=== RUN   TestSlackReadProductionPathUnionsPartiallyOverlappingSecretSpans
+    slack_test.go:355: text = "REF-SYN-4242 [redacted] abcdefghij tail"
+--- FAIL: TestSlackReadProductionPathUnionsPartiallyOverlappingSecretSpans (0.60s)
+FAIL
+FAIL github.com/relux-works/mac-infra/internal/chromectl 1.116s
+FAIL
+
+Production file restoration: byte-identical SHA-256 c457edb54aeeeb12411cf34943d19e5982634be151cb14cd58c824db2d8f8144.

@@ -1,0 +1,583 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index c52d415..fca0919 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -5,6 +5,11 @@
+ 
+ ## 2026-08-25
+ 
++### 1627 — Slack Sealed Reads Use Closed Typed Decoders
++- DECISION: `internal/chromectl/slack.go` admits only five added reads; search query/page bounds are 512 bytes/1000, conversation ids are `C|D|G` plus 8..31 alphanumerics, and timestamps are bounded `seconds.fraction` values.
++- SAFETY: Every method rejects unknown/trailing fields and secret-shaped strings; supplied `team_id` must equal the exact guarded workspace before `osascript`; page-origin/workspace guards, browser-only authorization, response bounds, and generic `run-js` storage refusal are unchanged.
++- EVIDENCE: A pagination-gate narrowing reached fake `osascript` and failed the named production-entry test; focused/full tests, vet, build, setup/install, installed-artifact checks, and content-free live smokes for all seven reads passed under `TASK-260825-ghny8q`.
++
+ ### 1601 — Refusal Tests Must Own Independent Fixtures And Phase Evidence
+ - ROOT CAUSE: Browser-secret tests iterated the production blocklist itself, so removing `cookiestore` or `opendatabase` removed their own cases; Slack tests merged start and poll sources, so poll guards masked missing start guards.
+ - FIX: `internal/browsersession/session_test.go` and `cmd/mac-chrome-session/main_test.go` pin a literal blocked-token contract; `internal/chromectl/slack_test.go` captures the production start evaluation separately and verifies origin/workspace guards precede secret lookup and request start.
+diff --git a/README.md b/README.md
+index 6395845..944276a 100644
+--- a/README.md
++++ b/README.md
+@@ -327,10 +327,12 @@ the request. Origin/workspace drift dispatches nothing. Missing or changed
+ browser storage schema returns `capability-unavailable`; there is no credential
+ export fallback.
+ 
+-Only compiled read methods are admitted: `auth.test` and
+-`conversations.list`. One versioned request arrives over bounded stdin; caller
+-JavaScript, writes, unknown methods/arguments, oversized input/output, deep
+-JSON, and token-shaped output are refused or redacted:
++Only these compiled read methods are admitted: `auth.test`,
++`conversations.list`, `conversations.info`, `conversations.history`,
++`conversations.replies`, `users.list`, and `search.messages`. One versioned
++request arrives over bounded stdin; caller JavaScript, writes, unknown
++methods/arguments, oversized input/output, deep JSON, and token-shaped input or
++output are refused or redacted:
+ 
+ ```bash
+ printf '%s\n' \
+@@ -343,6 +345,27 @@ printf '%s\n' \
+     --request-stdin
+ ```
+ 
++Method arguments are typed and closed to unknown fields:
++
++- `conversations.info`: required conversation `channel`; optional
++  `include_locale` and `include_num_members` booleans.
++- `conversations.history`: required `channel`; optional bounded `cursor`,
++  `limit` from 1 through 100, Slack `oldest`/`latest` timestamps, `inclusive`,
++  and `include_all_metadata`.
++- `conversations.replies`: the history arguments plus a required Slack `ts`.
++- `users.list`: optional bounded `cursor`, `limit` from 1 through 100,
++  `include_locale`, and `team_id`; when supplied, `team_id` must exactly match
++  `--workspace-id`.
++- `search.messages`: required query of at most 512 bytes; optional `count` from
++  1 through 100, `page` from 1 through 1000, bounded `cursor`, `sort` (`score`
++  or `timestamp`), `sort_dir` (`asc` or `desc`), `highlight`, and a matching
++  `team_id`.
++
++Conversation ids, Slack timestamps, cursors, queries, and team ids are
++validated before Chrome execution. Secret-shaped values, trailing JSON, and
++unknown fields are refused. `auth.test` still accepts no arguments, and the
++existing bounded `conversations.list` contract is unchanged.
++
+ The response is a versioned JSON envelope. It can contain ordinary Slack data,
+ so keep live evidence to booleans/counts with a bounded projection and never
+ persist channel, user, or message content unless the task explicitly requires a
+diff --git a/agents/skills/mac-infra/references/chrome-session.md b/agents/skills/mac-infra/references/chrome-session.md
+index 16ba667..9d28281 100644
+--- a/agents/skills/mac-infra/references/chrome-session.md
++++ b/agents/skills/mac-infra/references/chrome-session.md
+@@ -132,9 +132,11 @@ for the handoff.
+ 
+ ## Sealed Slack Reads
+ 
+-Use `slack-read` for the two compiled Slack Web API reads `auth.test` and
+-`conversations.list`. Do not weaken `run-js`: caller JavaScript still cannot
+-read cookies, storage, authorization data, or tokens.
++Use `slack-read` for the compiled Slack Web API reads `auth.test`,
++`conversations.list`, `conversations.info`, `conversations.history`,
++`conversations.replies`, `users.list`, and `search.messages`. Do not weaken
++`run-js`: caller JavaScript still cannot read cookies, storage, authorization
++data, or tokens.
+ 
+ ```bash
+ printf '%s\n' '{"version":1,"method":"auth.test","args":{}}' |
+@@ -160,6 +162,27 @@ data can still be present. Project live-smoke evidence to booleans/counts and do
+ not persist channel, user, or message content unless explicitly required in a
+ private artifact.
+ 
++Typed argument contract:
++
++- `conversations.info` requires a Slack conversation `channel` and optionally
++  accepts `include_locale` and `include_num_members`.
++- `conversations.history` requires `channel` and optionally accepts a cursor,
++  `limit` 1..100, Slack `oldest`/`latest` timestamps, `inclusive`, and
++  `include_all_metadata`.
++- `conversations.replies` has the history arguments and additionally requires
++  a Slack message `ts`.
++- `users.list` optionally accepts a cursor, `limit` 1..100, `include_locale`,
++  and `team_id`; a supplied team must equal the guarded workspace.
++- `search.messages` requires a query of at most 512 bytes and optionally accepts
++  `count` 1..100, `page` 1..1000, a bounded cursor, `sort` (`score` or
++  `timestamp`), `sort_dir` (`asc` or `desc`), `highlight`, and a matching
++  `team_id`.
++
++All argument objects reject unknown fields and trailing JSON. Malformed or
++oversized ids, timestamps, cursors, and queries, plus token/JWT/Bearer-shaped
++values, fail before browser execution. `auth.test` and `conversations.list`
++retain their version-1 behavior.
++
+ ## Named Heartbeats
+ 
+ The shared heartbeat lifecycle supports Chrome exact tabs and Safari exact
+diff --git a/cmd/mac-chrome-session/main_test.go b/cmd/mac-chrome-session/main_test.go
+index 6388c7d..3386792 100644
+--- a/cmd/mac-chrome-session/main_test.go
++++ b/cmd/mac-chrome-session/main_test.go
+@@ -46,7 +46,13 @@ func TestSlackReadProductionEntryRejectsWritesAndInvalidGuardsBeforeExecution(t
+ 		code      int
+ 	}{
+ 		{name: "write", origin: chromectl.SlackOrigin, workspace: "T073GL82HJB", request: `{"version":1,"method":"chat.postMessage","args":{}}`, kind: "method-not-allowed", code: 2},
+-		{name: "unknown-method", origin: chromectl.SlackOrigin, workspace: "T073GL82HJB", request: `{"version":1,"method":"users.list","args":{}}`, kind: "method-not-allowed", code: 2},
++		{name: "unknown-method", origin: chromectl.SlackOrigin, workspace: "T073GL82HJB", request: `{"version":1,"method":"admin.users.list","args":{}}`, kind: "method-not-allowed", code: 2},
++		{name: "unknown-argument", origin: chromectl.SlackOrigin, workspace: "T073GL82HJB", request: `{"version":1,"method":"users.list","args":{"token":"forged"}}`, kind: "invalid-arguments", code: 2},
++		{name: "out-of-range-pagination", origin: chromectl.SlackOrigin, workspace: "T073GL82HJB", request: `{"version":1,"method":"conversations.history","args":{"channel":"C12345678","limit":101}}`, kind: "invalid-arguments", code: 2},
++		{name: "invalid-conversation-id", origin: chromectl.SlackOrigin, workspace: "T073GL82HJB", request: `{"version":1,"method":"conversations.info","args":{"channel":"general"}}`, kind: "invalid-arguments", code: 2},
++		{name: "invalid-timestamp", origin: chromectl.SlackOrigin, workspace: "T073GL82HJB", request: `{"version":1,"method":"conversations.replies","args":{"channel":"C12345678","ts":"yesterday"}}`, kind: "invalid-arguments", code: 2},
++		{name: "secret-shaped-argument", origin: chromectl.SlackOrigin, workspace: "T073GL82HJB", request: `{"version":1,"method":"search.messages","args":{"query":"Bearer abcdefghijklmnop"}}`, kind: "invalid-arguments", code: 2},
++		{name: "cross-workspace-team", origin: chromectl.SlackOrigin, workspace: "T073GL82HJB", request: `{"version":1,"method":"users.list","args":{"team_id":"T12345678"}}`, kind: "invalid-arguments", code: 1},
+ 		{name: "wrong-origin", origin: "https://evil.example", workspace: "T073GL82HJB", request: `{"version":1,"method":"auth.test","args":{}}`, kind: "invalid-origin", code: 1},
+ 		{name: "invalid-workspace", origin: chromectl.SlackOrigin, workspace: "../T073GL82HJB", request: `{"version":1,"method":"auth.test","args":{}}`, kind: "invalid-workspace", code: 1},
+ 	}
+diff --git a/internal/chromectl/slack.go b/internal/chromectl/slack.go
+index e60cd51..937a801 100644
+--- a/internal/chromectl/slack.go
++++ b/internal/chromectl/slack.go
+@@ -24,16 +24,21 @@ const (
+ 	MaxSlackResponseBytes  = 256 * 1024
+ 	maxSlackResponseDepth  = 32
+ 	maxSlackResponseNodes  = 20_000
++	maxSlackCursorBytes    = 512
++	maxSlackSearchQuery    = 512
++	maxSlackSearchPage     = 1_000
+ 	slackReadGuardSentinel = "works.relux.mac-infra/slack-sealed-read/v1"
+ 	slackReadPollInterval  = 100 * time.Millisecond
+ 	slackBrowserDeadlineMS = 20_000
+ )
+ 
+ var (
+-	workspaceIDPattern = regexp.MustCompile(`^T[A-Z0-9]{8,}$`)
+-	slackTokenPattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])(xox[a-z]-[a-z0-9-]{8,}|xapp-[a-z0-9-]{8,})($|[^a-z0-9])`)
+-	bearerTokenPattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])bearer[[:space:]]+[a-z0-9._~+/=-]{8,}`)
+-	jwtTokenPattern    = regexp.MustCompile(`(^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}($|[^A-Za-z0-9_-])`)
++	workspaceIDPattern    = regexp.MustCompile(`^T[A-Z0-9]{8,}$`)
++	conversationIDPattern = regexp.MustCompile(`^[CDG][A-Z0-9]{8,31}$`)
++	slackTimestampPattern = regexp.MustCompile(`^[0-9]{1,16}\.[0-9]{1,6}$`)
++	slackTokenPattern     = regexp.MustCompile(`(?i)(^|[^a-z0-9])(xox[a-z]-[a-z0-9-]{8,}|xapp-[a-z0-9-]{8,})($|[^a-z0-9])`)
++	bearerTokenPattern    = regexp.MustCompile(`(?i)(^|[^a-z0-9])bearer[[:space:]]+[a-z0-9._~+/=-]{8,}`)
++	jwtTokenPattern       = regexp.MustCompile(`(^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}($|[^A-Za-z0-9_-])`)
+ )
+ 
+ type SlackReadRequest struct {
+@@ -80,7 +85,7 @@ func DecodeSlackReadRequest(reader io.Reader) (SlackReadRequest, error) {
+ 	if err := requireJSONEOF(decoder); err != nil {
+ 		return SlackReadRequest{}, slackError("invalid-request", "request must contain one JSON envelope")
+ 	}
+-	if err := request.validate(); err != nil {
++	if err := request.validate(""); err != nil {
+ 		return SlackReadRequest{}, err
+ 	}
+ 	return request, nil
+@@ -100,10 +105,10 @@ func (s Session) SlackRead(ctx context.Context, windowID, tabID, expectedOrigin,
+ 	if !workspaceIDPattern.MatchString(workspaceID) {
+ 		return SlackReadResult{}, slackError("invalid-workspace", "workspace id must be a Slack T-prefixed id")
+ 	}
+-	if err := request.validate(); err != nil {
++	if err := request.validate(workspaceID); err != nil {
+ 		return SlackReadResult{}, err
+ 	}
+-	args, err := request.arguments()
++	args, err := request.arguments(workspaceID)
+ 	if err != nil {
+ 		return SlackReadResult{}, err
+ 	}
+@@ -205,20 +210,20 @@ func SlackReadErrorMessage(kind string) string {
+ 	}
+ }
+ 
+-func (r SlackReadRequest) validate() error {
++func (r SlackReadRequest) validate(workspaceID string) error {
+ 	if r.Version != SlackReadVersion {
+ 		return slackError("invalid-request", "unsupported request version")
+ 	}
+ 	switch r.Method {
+-	case "auth.test", "conversations.list":
++	case "auth.test", "conversations.list", "conversations.info", "conversations.history", "conversations.replies", "users.list", "search.messages":
+ 	default:
+ 		return slackError("method-not-allowed", "method is not in the compiled read allowlist")
+ 	}
+-	_, err := r.arguments()
++	_, err := r.arguments(workspaceID)
+ 	return err
+ }
+ 
+-func (r SlackReadRequest) arguments() (map[string]any, error) {
++func (r SlackReadRequest) arguments(workspaceID string) (map[string]any, error) {
+ 	raw := bytes.TrimSpace(r.Args)
+ 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+ 		raw = []byte("{}")
+@@ -226,9 +231,7 @@ func (r SlackReadRequest) arguments() (map[string]any, error) {
+ 	switch r.Method {
+ 	case "auth.test":
+ 		var args struct{}
+-		decoder := json.NewDecoder(bytes.NewReader(raw))
+-		decoder.DisallowUnknownFields()
+-		if err := decoder.Decode(&args); err != nil || requireJSONEOF(decoder) != nil {
++		if err := decodeSlackArguments(raw, &args); err != nil {
+ 			return nil, slackError("invalid-arguments", "auth.test accepts no arguments")
+ 		}
+ 		return map[string]any{}, nil
+@@ -239,17 +242,12 @@ func (r SlackReadRequest) arguments() (map[string]any, error) {
+ 			Limit           *int   `json:"limit,omitempty"`
+ 			Types           string `json:"types,omitempty"`
+ 		}
+-		decoder := json.NewDecoder(bytes.NewReader(raw))
+-		decoder.DisallowUnknownFields()
+-		if err := decoder.Decode(&args); err != nil || requireJSONEOF(decoder) != nil {
++		if err := decodeSlackArguments(raw, &args); err != nil {
+ 			return nil, slackError("invalid-arguments", "conversations.list arguments are malformed or unknown")
+ 		}
+ 		out := map[string]any{}
+-		if args.Cursor != "" {
+-			if len(args.Cursor) > 512 || containsTokenShape(args.Cursor) {
+-				return nil, slackError("invalid-arguments", "cursor is oversized or secret-shaped")
+-			}
+-			out["cursor"] = args.Cursor
++		if err := addSlackCursor(out, args.Cursor); err != nil {
++			return nil, err
+ 		}
+ 		if args.ExcludeArchived != nil {
+ 			out["exclude_archived"] = *args.ExcludeArchived
+@@ -270,11 +268,238 @@ func (r SlackReadRequest) arguments() (map[string]any, error) {
+ 			out["types"] = args.Types
+ 		}
+ 		return out, nil
++	case "conversations.info":
++		var args struct {
++			Channel           string `json:"channel"`
++			IncludeLocale     *bool  `json:"include_locale,omitempty"`
++			IncludeNumMembers *bool  `json:"include_num_members,omitempty"`
++		}
++		if err := decodeSlackArguments(raw, &args); err != nil {
++			return nil, slackError("invalid-arguments", "conversations.info arguments are malformed or unknown")
++		}
++		out := map[string]any{}
++		if err := addSlackConversationID(out, "channel", args.Channel); err != nil {
++			return nil, err
++		}
++		addSlackBool(out, "include_locale", args.IncludeLocale)
++		addSlackBool(out, "include_num_members", args.IncludeNumMembers)
++		return out, nil
++	case "conversations.history":
++		var args struct {
++			Channel            string `json:"channel"`
++			Cursor             string `json:"cursor,omitempty"`
++			Limit              *int   `json:"limit,omitempty"`
++			Oldest             string `json:"oldest,omitempty"`
++			Latest             string `json:"latest,omitempty"`
++			Inclusive          *bool  `json:"inclusive,omitempty"`
++			IncludeAllMetadata *bool  `json:"include_all_metadata,omitempty"`
++		}
++		if err := decodeSlackArguments(raw, &args); err != nil {
++			return nil, slackError("invalid-arguments", "conversations.history arguments are malformed or unknown")
++		}
++		out := map[string]any{}
++		if err := addSlackConversationID(out, "channel", args.Channel); err != nil {
++			return nil, err
++		}
++		if err := addSlackPagination(out, args.Cursor, args.Limit); err != nil {
++			return nil, err
++		}
++		if err := addSlackTimestamp(out, "oldest", args.Oldest, false); err != nil {
++			return nil, err
++		}
++		if err := addSlackTimestamp(out, "latest", args.Latest, false); err != nil {
++			return nil, err
++		}
++		addSlackBool(out, "inclusive", args.Inclusive)
++		addSlackBool(out, "include_all_metadata", args.IncludeAllMetadata)
++		return out, nil
++	case "conversations.replies":
++		var args struct {
++			Channel            string `json:"channel"`
++			TS                 string `json:"ts"`
++			Cursor             string `json:"cursor,omitempty"`
++			Limit              *int   `json:"limit,omitempty"`
++			Oldest             string `json:"oldest,omitempty"`
++			Latest             string `json:"latest,omitempty"`
++			Inclusive          *bool  `json:"inclusive,omitempty"`
++			IncludeAllMetadata *bool  `json:"include_all_metadata,omitempty"`
++		}
++		if err := decodeSlackArguments(raw, &args); err != nil {
++			return nil, slackError("invalid-arguments", "conversations.replies arguments are malformed or unknown")
++		}
++		out := map[string]any{}
++		if err := addSlackConversationID(out, "channel", args.Channel); err != nil {
++			return nil, err
++		}
++		if err := addSlackTimestamp(out, "ts", args.TS, true); err != nil {
++			return nil, err
++		}
++		if err := addSlackPagination(out, args.Cursor, args.Limit); err != nil {
++			return nil, err
++		}
++		if err := addSlackTimestamp(out, "oldest", args.Oldest, false); err != nil {
++			return nil, err
++		}
++		if err := addSlackTimestamp(out, "latest", args.Latest, false); err != nil {
++			return nil, err
++		}
++		addSlackBool(out, "inclusive", args.Inclusive)
++		addSlackBool(out, "include_all_metadata", args.IncludeAllMetadata)
++		return out, nil
++	case "users.list":
++		var args struct {
++			Cursor        string  `json:"cursor,omitempty"`
++			Limit         *int    `json:"limit,omitempty"`
++			IncludeLocale *bool   `json:"include_locale,omitempty"`
++			TeamID        *string `json:"team_id,omitempty"`
++		}
++		if err := decodeSlackArguments(raw, &args); err != nil {
++			return nil, slackError("invalid-arguments", "users.list arguments are malformed or unknown")
++		}
++		out := map[string]any{}
++		if err := addSlackPagination(out, args.Cursor, args.Limit); err != nil {
++			return nil, err
++		}
++		addSlackBool(out, "include_locale", args.IncludeLocale)
++		if err := addSlackTeamID(out, args.TeamID, workspaceID); err != nil {
++			return nil, err
++		}
++		return out, nil
++	case "search.messages":
++		var args struct {
++			Query     string  `json:"query"`
++			Count     *int    `json:"count,omitempty"`
++			Page      *int    `json:"page,omitempty"`
++			Cursor    string  `json:"cursor,omitempty"`
++			Sort      *string `json:"sort,omitempty"`
++			SortDir   *string `json:"sort_dir,omitempty"`
++			Highlight *bool   `json:"highlight,omitempty"`
++			TeamID    *string `json:"team_id,omitempty"`
++		}
++		if err := decodeSlackArguments(raw, &args); err != nil {
++			return nil, slackError("invalid-arguments", "search.messages arguments are malformed or unknown")
++		}
++		out := map[string]any{}
++		if strings.TrimSpace(args.Query) == "" || len(args.Query) > maxSlackSearchQuery || containsTokenShape(args.Query) {
++			return nil, slackError("invalid-arguments", "query is required, bounded to 512 bytes, and must not be secret-shaped")
++		}
++		out["query"] = args.Query
++		if args.Count != nil {
++			if *args.Count < 1 || *args.Count > 100 {
++				return nil, slackError("invalid-arguments", "count must be between 1 and 100")
++			}
++			out["count"] = *args.Count
++		}
++		if args.Page != nil {
++			if *args.Page < 1 || *args.Page > maxSlackSearchPage {
++				return nil, slackError("invalid-arguments", "page must be between 1 and 1000")
++			}
++			out["page"] = *args.Page
++		}
++		if err := addSlackCursor(out, args.Cursor); err != nil {
++			return nil, err
++		}
++		if err := addSlackEnum(out, "sort", args.Sort, "score", "timestamp"); err != nil {
++			return nil, err
++		}
++		if err := addSlackEnum(out, "sort_dir", args.SortDir, "asc", "desc"); err != nil {
++			return nil, err
++		}
++		addSlackBool(out, "highlight", args.Highlight)
++		if err := addSlackTeamID(out, args.TeamID, workspaceID); err != nil {
++			return nil, err
++		}
++		return out, nil
+ 	default:
+ 		return nil, slackError("method-not-allowed", "method is not in the compiled read allowlist")
+ 	}
+ }
+ 
++func decodeSlackArguments(raw []byte, destination any) error {
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(destination); err != nil {
++		return err
++	}
++	return requireJSONEOF(decoder)
++}
++
++func addSlackConversationID(out map[string]any, key, value string) error {
++	if !conversationIDPattern.MatchString(value) {
++		return slackError("invalid-arguments", key+" must be a Slack conversation id")
++	}
++	out[key] = value
++	return nil
++}
++
++func addSlackCursor(out map[string]any, cursor string) error {
++	if cursor == "" {
++		return nil
++	}
++	if len(cursor) > maxSlackCursorBytes || containsTokenShape(cursor) {
++		return slackError("invalid-arguments", "cursor is oversized or secret-shaped")
++	}
++	out["cursor"] = cursor
++	return nil
++}
++
++func addSlackPagination(out map[string]any, cursor string, limit *int) error {
++	if err := addSlackCursor(out, cursor); err != nil {
++		return err
++	}
++	if limit != nil {
++		if *limit < 1 || *limit > 100 {
++			return slackError("invalid-arguments", "limit must be between 1 and 100")
++		}
++		out["limit"] = *limit
++	}
++	return nil
++}
++
++func addSlackTimestamp(out map[string]any, key, value string, required bool) error {
++	if value == "" && !required {
++		return nil
++	}
++	if !slackTimestampPattern.MatchString(value) || containsTokenShape(value) {
++		return slackError("invalid-arguments", key+" must be a Slack timestamp")
++	}
++	out[key] = value
++	return nil
++}
++
++func addSlackBool(out map[string]any, key string, value *bool) {
++	if value != nil {
++		out[key] = *value
++	}
++}
++
++func addSlackTeamID(out map[string]any, teamID *string, workspaceID string) error {
++	if teamID == nil {
++		return nil
++	}
++	if !workspaceIDPattern.MatchString(*teamID) || len(*teamID) > 32 || containsTokenShape(*teamID) {
++		return slackError("invalid-arguments", "team_id must be a Slack workspace id")
++	}
++	if workspaceID != "" && *teamID != workspaceID {
++		return slackError("invalid-arguments", "team_id must match the configured workspace")
++	}
++	out["team_id"] = *teamID
++	return nil
++}
++
++func addSlackEnum(out map[string]any, key string, value *string, allowed ...string) error {
++	if value == nil {
++		return nil
++	}
++	for _, candidate := range allowed {
++		if *value == candidate {
++			out[key] = *value
++			return nil
++		}
++	}
++	return slackError("invalid-arguments", key+" contains an unsupported value")
++}
++
+ type slackPageEnvelope struct {
+ 	Sentinel string `json:"__macSlackSealedRead"`
+ 	Outcome  string `json:"outcome"`
+diff --git a/internal/chromectl/slack_test.go b/internal/chromectl/slack_test.go
+index 0ae7f6f..a8d97ac 100644
+--- a/internal/chromectl/slack_test.go
++++ b/internal/chromectl/slack_test.go
+@@ -17,6 +17,11 @@ func TestDecodeSlackReadRequestUsesCompiledReadAllowlistAndBoundedArguments(t *t
+ 	valid := []string{
+ 		`{"version":1,"method":"auth.test","args":{}}`,
+ 		`{"version":1,"method":"conversations.list","args":{"limit":1,"exclude_archived":true,"types":"public_channel,private_channel"}}`,
++		`{"version":1,"method":"conversations.info","args":{"channel":"C12345678","include_locale":true,"include_num_members":false}}`,
++		`{"version":1,"method":"conversations.history","args":{"channel":"C12345678","cursor":"next-page","limit":100,"oldest":"1700000000.000001","latest":"1700000001.000002","inclusive":true,"include_all_metadata":false}}`,
++		`{"version":1,"method":"conversations.replies","args":{"channel":"G12345678","ts":"1700000000.000001","cursor":"next-page","limit":1,"oldest":"1700000000.000001","latest":"1700000001.000002","inclusive":false,"include_all_metadata":true}}`,
++		`{"version":1,"method":"users.list","args":{"cursor":"next-page","limit":100,"include_locale":true,"team_id":"T073GL82HJB"}}`,
++		`{"version":1,"method":"search.messages","args":{"query":"deployment failure","count":100,"page":1000,"cursor":"next-page","sort":"timestamp","sort_dir":"desc","highlight":false,"team_id":"T073GL82HJB"}}`,
+ 	}
+ 	for _, input := range valid {
+ 		if _, err := DecodeSlackReadRequest(strings.NewReader(input)); err != nil {
+@@ -25,7 +30,7 @@ func TestDecodeSlackReadRequestUsesCompiledReadAllowlistAndBoundedArguments(t *t
+ 	}
+ 	invalid := map[string]string{
+ 		"write":          `{"version":1,"method":"chat.postMessage","args":{}}`,
+-		"unknown-read":   `{"version":1,"method":"users.list","args":{}}`,
++		"unknown-read":   `{"version":1,"method":"admin.users.list","args":{}}`,
+ 		"unknown-field":  `{"version":1,"method":"auth.test","args":{},"script":"localStorage"}`,
+ 		"method-args":    `{"version":1,"method":"auth.test","args":{"token":"forged"}}`,
+ 		"large-limit":    `{"version":1,"method":"conversations.list","args":{"limit":101}}`,
+@@ -45,6 +50,78 @@ func TestDecodeSlackReadRequestUsesCompiledReadAllowlistAndBoundedArguments(t *t
+ 	}
+ }
+ 
++func TestSlackReadTypedArgumentBoundsAndWorkspaceConstraint(t *testing.T) {
++	tests := map[string]SlackReadRequest{
++		"info-missing-channel":        {Version: 1, Method: "conversations.info", Args: json.RawMessage(`{}`)},
++		"info-malformed-channel":      {Version: 1, Method: "conversations.info", Args: json.RawMessage(`{"channel":"general"}`)},
++		"history-limit-zero":          {Version: 1, Method: "conversations.history", Args: json.RawMessage(`{"channel":"C12345678","limit":0}`)},
++		"history-limit-large":         {Version: 1, Method: "conversations.history", Args: json.RawMessage(`{"channel":"C12345678","limit":101}`)},
++		"history-malformed-oldest":    {Version: 1, Method: "conversations.history", Args: json.RawMessage(`{"channel":"C12345678","oldest":"yesterday"}`)},
++		"history-oversized-cursor":    {Version: 1, Method: "conversations.history", Args: json.RawMessage(`{"channel":"C12345678","cursor":"` + strings.Repeat("x", maxSlackCursorBytes+1) + `"}`)},
++		"replies-missing-ts":          {Version: 1, Method: "conversations.replies", Args: json.RawMessage(`{"channel":"C12345678"}`)},
++		"replies-malformed-ts":        {Version: 1, Method: "conversations.replies", Args: json.RawMessage(`{"channel":"C12345678","ts":"1700000000"}`)},
++		"users-limit-large":           {Version: 1, Method: "users.list", Args: json.RawMessage(`{"limit":101}`)},
++		"users-malformed-team":        {Version: 1, Method: "users.list", Args: json.RawMessage(`{"team_id":"workspace"}`)},
++		"users-cross-workspace-team":  {Version: 1, Method: "users.list", Args: json.RawMessage(`{"team_id":"T12345678"}`)},
++		"search-empty-query":          {Version: 1, Method: "search.messages", Args: json.RawMessage(`{"query":"  "}`)},
++		"search-oversized-query":      {Version: 1, Method: "search.messages", Args: json.RawMessage(`{"query":"` + strings.Repeat("x", maxSlackSearchQuery+1) + `"}`)},
++		"search-count-zero":           {Version: 1, Method: "search.messages", Args: json.RawMessage(`{"query":"safe","count":0}`)},
++		"search-page-zero":            {Version: 1, Method: "search.messages", Args: json.RawMessage(`{"query":"safe","page":0}`)},
++		"search-page-large":           {Version: 1, Method: "search.messages", Args: json.RawMessage(`{"query":"safe","page":1001}`)},
++		"search-sort":                 {Version: 1, Method: "search.messages", Args: json.RawMessage(`{"query":"safe","sort":"channel"}`)},
++		"search-sort-dir":             {Version: 1, Method: "search.messages", Args: json.RawMessage(`{"query":"safe","sort_dir":"sideways"}`)},
++		"search-cross-workspace-team": {Version: 1, Method: "search.messages", Args: json.RawMessage(`{"query":"safe","team_id":"T12345678"}`)},
++	}
++	for name, request := range tests {
++		t.Run(name, func(t *testing.T) {
++			if _, err := request.arguments("T073GL82HJB"); SlackReadErrorKind(err) != "invalid-arguments" {
++				t.Fatalf("unsafe arguments error = %v", err)
++			}
++		})
++	}
++}
++
++func TestSlackReadEveryArgumentDecoderRejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
++	methods := map[string]string{
++		"auth.test":             `{}`,
++		"conversations.list":    `{}`,
++		"conversations.info":    `{"channel":"C12345678"}`,
++		"conversations.history": `{"channel":"C12345678"}`,
++		"conversations.replies": `{"channel":"C12345678","ts":"1700000000.000001"}`,
++		"users.list":            `{}`,
++		"search.messages":       `{"query":"safe"}`,
++	}
++	for method, validArgs := range methods {
++		t.Run(method+"/unknown", func(t *testing.T) {
++			request := SlackReadRequest{Version: 1, Method: method, Args: json.RawMessage(`{"unknown":"value"}`)}
++			if _, err := request.arguments("T073GL82HJB"); SlackReadErrorKind(err) != "invalid-arguments" {
++				t.Fatalf("unknown field error = %v", err)
++			}
++		})
++		t.Run(method+"/trailing", func(t *testing.T) {
++			request := SlackReadRequest{Version: 1, Method: method, Args: json.RawMessage(validArgs + ` {}`)}
++			if _, err := request.arguments("T073GL82HJB"); SlackReadErrorKind(err) != "invalid-arguments" {
++				t.Fatalf("trailing JSON error = %v", err)
++			}
++		})
++	}
++}
++
++func TestSlackReadKnownStringArgumentsRejectSecretShapes(t *testing.T) {
++	tests := map[string]SlackReadRequest{
++		"list-cursor":    {Version: 1, Method: "conversations.list", Args: json.RawMessage(`{"cursor":"Bearer abcdefghijklmnop"}`)},
++		"history-cursor": {Version: 1, Method: "conversations.history", Args: json.RawMessage(`{"channel":"C12345678","cursor":"xoxc-12345678-secret"}`)},
++		"search-query":   {Version: 1, Method: "search.messages", Args: json.RawMessage(`{"query":"abcdefghijkl.mnopqrstuvwx.yzABCDEFGHIJ"}`)},
++	}
++	for name, request := range tests {
++		t.Run(name, func(t *testing.T) {
++			if _, err := request.arguments("T073GL82HJB"); SlackReadErrorKind(err) != "invalid-arguments" {
++				t.Fatalf("secret-shaped argument error = %v", err)
++			}
++		})
++	}
++}
++
+ func TestSlackReadAtomicStartUsesExactTargetWithoutFocusOrSecretArgv(t *testing.T) {
+ 	captureDir := t.TempDir()
+ 	start := slackEnvelope(t, "started", "")

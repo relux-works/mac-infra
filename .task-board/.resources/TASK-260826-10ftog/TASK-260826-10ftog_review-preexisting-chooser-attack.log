@@ -1,0 +1,7 @@
+candidate_tree=9300bb116aaad5063238b08de6f343e78e15882a
+production_call=macChromeAXUploadFiles
+upload_body_start=498
+native_press_line=532
+pre_press_sheet_gate=ABSENT
+attack=pre-existing chooser sheet is not distinguished from the sheet expected after nonce input press
+result=FAIL: native bridge can proceed from AXPress to MacChromeWaitForSingleSheet without proving zero sheets before AXPress

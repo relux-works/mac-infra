@@ -1,0 +1,331 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index 0205fb0..c212a75 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -20,6 +20,11 @@
+ - EVIDENCE: `TestFetchFileProductionEntryNeverReflectsForgedNestedOriginMismatch` drives the real `run(fetch-file)` against two narrowed forges (nested `origin-mismatch`, and nested `ok` with a drifted origin), reads back what the child actually received as a positive control, and additionally asserts the drift classification survives so a delete-only mutant cannot pass. The narrowing mutant that restores `errors.As` passthrough of `Observed` fails both subtests.
+ - LESSON: Discarding a channel's *bytes* is not the same as distrusting its *values*. Enumerate every field of a parsed response that can be echoed by a party holding the secret, not just the raw streams.
+ 
++### 0529 — JSON Maps Are Too Late for Duplicate-Key Gates
++- ROOT CAUSE: `sanitizeSlackResponse` decoded Slack JSON into `map[string]any` before sanitizing keys or counting nodes. Go collapsed identical and escape-equivalent object members first, so `Session.SlackRead` could return the last value and 20,001 duplicate members counted as one.
++- FIX: `internal/chromectl/slack.go` now consumes JSON tokens in source order, counts every raw value, sanitizes keys before insertion, and records decoded/normalized collisions without overwriting. Object parsing continues after a collision so the raw-node ceiling still refuses an oversized duplicate-member response.
++- EVIDENCE: `BUG-260825-4fodlv` production tests drive identical, escaped-equivalent, nested, and over-bound duplicates through `Session.SlackRead` and the CLI envelope; narrowing collision detection to nested objects or widening the node ceiling makes the named tests fail with `-count=1`.
++
+ ### 0438 — LaunchAgent Absence Must Come From Exit Evidence, Not The Service Label
+ - ROOT CAUSE: `internal/browsersession/heartbeat.go:isMissingLaunchAgent` searched the composed `launchctl` error for the bare substring `113`. Valid heartbeat names and UIDs may contain those digits, so `hb113` plus a genuine `bootout` permission failure was misclassified as an absent service after expiry had removed its managed artifacts.
+ - FIX: `runLaunchctl` now preserves the verb, exit code, and child output in a typed error. Missing `print` requires exit `113` plus the `Could not find service` response; missing `bootout` requires exit `3` plus the exact `Boot-out failed: 3: No such process` response. Unstructured test hooks accept only whole sentinel messages.
+diff --git a/cmd/mac-chrome-session/main_test.go b/cmd/mac-chrome-session/main_test.go
+index 58096ce..219ca04 100644
+--- a/cmd/mac-chrome-session/main_test.go
++++ b/cmd/mac-chrome-session/main_test.go
+@@ -575,6 +575,55 @@ func TestSlackReadProductionEntryFailsClosedOnKeyCollisionWithoutLeakingKeys(t *
+ 	}
+ }
+ 
++func TestSlackReadProductionEntryFailsClosedOnDuplicateMembersWithoutLeakingResponseMaterial(t *testing.T) {
++	const secretKey = "xoxb-87654321-keyvalue"
++	cases := []struct {
++		name      string
++		response  string
++		kind      string
++		forbidden []string
++	}{
++		{
++			name:      "identical-secret-shaped-key",
++			response:  `{"` + secretKey + `":"first-value","` + secretKey + `":"second-value"}`,
++			kind:      "response-key-collision",
++			forbidden: []string{secretKey, "first-value", "second-value"},
++		},
++		{
++			name:      "equivalent-escaped-key",
++			response:  `{"` + secretKey + `":"literal","xoxb-87654321-\u006beyvalue":"escaped"}`,
++			kind:      "response-key-collision",
++			forbidden: []string{secretKey, "literal", "escaped"},
++		},
++		{
++			name:     "raw-node-bound",
++			response: `{` + strings.TrimSuffix(strings.Repeat(`"a":0,`, 20_001), ",") + `}`,
++			kind:     "response-too-complex",
++		},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			if len(tc.response) > chromectl.MaxSlackResponseBytes {
++				t.Fatalf("response bytes = %d, exceeds %d-byte response ceiling", len(tc.response), chromectl.MaxSlackResponseBytes)
++			}
++			code, stdout, stderr := runSlackReadResponse(t, tc.response)
++			if code != 1 {
++				t.Fatalf("code=%d want=1 stdout=%s stderr=%s", code, stdout, stderr)
++			}
++			for _, want := range []string{`"version": 1`, `"ok": false`, `"kind": "` + tc.kind + `"`, `"message": "Slack response was refused by the bounded output policy"`} {
++				if !strings.Contains(stdout, want) {
++					t.Fatalf("refusal envelope missing %q: %s", want, stdout)
++				}
++			}
++			for _, forbidden := range tc.forbidden {
++				if strings.Contains(stdout, forbidden) {
++					t.Fatalf("refusal envelope leaked response material %q: %s", forbidden, stdout)
++				}
++			}
++		})
++	}
++}
++
+ func runSlackReadResponse(t *testing.T, response string) (int, string, string) {
+ 	t.Helper()
+ 	dir := t.TempDir()
+diff --git a/internal/chromectl/slack.go b/internal/chromectl/slack.go
+index 9132200..07bbcff 100644
+--- a/internal/chromectl/slack.go
++++ b/internal/chromectl/slack.go
+@@ -643,91 +643,98 @@ func sanitizeSlackResponse(raw []byte) (any, error) {
+ 	if len(raw) == 0 || len(raw) > MaxSlackResponseBytes {
+ 		return nil, slackError("response-too-large", "Slack response is empty or oversized")
+ 	}
+-	if err := validateSlackJSONDepth(raw, maxSlackResponseDepth); err != nil {
+-		return nil, err
+-	}
+ 	decoder := json.NewDecoder(bytes.NewReader(raw))
+ 	decoder.UseNumber()
+-	var value any
+-	if err := decoder.Decode(&value); err != nil || requireJSONEOF(decoder) != nil {
+-		return nil, slackError("response-invalid", "Slack response is not one JSON value")
+-	}
+ 	nodes := 0
+-	sanitized, err := sanitizeSlackValue(value, 0, &nodes)
++	sanitized, err := decodeSanitizedSlackValue(decoder, 0, &nodes)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return sanitized, nil
+-}
+-
+-func validateSlackJSONDepth(raw []byte, maximum int) error {
+-	decoder := json.NewDecoder(bytes.NewReader(raw))
+-	depth := 0
+-	for {
+-		token, err := decoder.Token()
+-		if errors.Is(err, io.EOF) {
+-			return nil
+-		}
+-		if err != nil {
+-			return slackError("response-invalid", "Slack response JSON is malformed")
+-		}
+-		delim, ok := token.(json.Delim)
+-		if !ok {
+-			continue
+-		}
+-		switch delim {
+-		case '{', '[':
+-			depth++
+-			if depth > maximum {
+-				return slackError("response-too-deep", "Slack response nesting exceeds bound")
+-			}
+-		case '}', ']':
+-			depth--
+-		}
++	if requireJSONEOF(decoder) != nil {
++		return nil, slackError("response-invalid", "Slack response is not one JSON value")
+ 	}
++	return sanitized, nil
+ }
+ 
+-func sanitizeSlackValue(value any, depth int, nodes *int) (any, error) {
+-	*nodes++
++// decodeSanitizedSlackValue consumes object members in source order so duplicate
++// decoded names cannot be collapsed before collision and raw-node checks run.
++func decodeSanitizedSlackValue(decoder *json.Decoder, depth int, nodes *int) (any, error) {
++	*nodes = *nodes + 1
+ 	if *nodes > maxSlackResponseNodes {
+ 		return nil, slackError("response-too-complex", "Slack response node count exceeds bound")
+ 	}
+-	if depth > maxSlackResponseDepth {
+-		return nil, slackError("response-too-deep", "Slack response nesting exceeds bound")
++	token, err := decoder.Token()
++	if err != nil {
++		return nil, slackError("response-invalid", "Slack response JSON is malformed")
+ 	}
+-	switch typed := value.(type) {
+-	case map[string]any:
+-		out := make(map[string]any, len(typed))
+-		for key, item := range typed {
+-			sanitizedKey := sanitizeSlackString(key)
+-			if _, exists := out[sanitizedKey]; exists {
+-				return nil, slackError("response-key-collision", "Slack response keys collide after redaction")
++
++	if delim, ok := token.(json.Delim); ok {
++		if depth+1 > maxSlackResponseDepth {
++			return nil, slackError("response-too-deep", "Slack response nesting exceeds bound")
++		}
++		switch delim {
++		case '{':
++			out := make(map[string]any)
++			collision := false
++			for decoder.More() {
++				keyToken, err := decoder.Token()
++				if err != nil {
++					return nil, slackError("response-invalid", "Slack response JSON is malformed")
++				}
++				key, ok := keyToken.(string)
++				if !ok {
++					return nil, slackError("response-invalid", "Slack response object key is malformed")
++				}
++				sanitizedKey := sanitizeSlackString(key)
++				_, exists := out[sanitizedKey]
++				sanitized, err := decodeSanitizedSlackValue(decoder, depth+1, nodes)
++				if err != nil {
++					return nil, err
++				}
++				if exists {
++					collision = true
++					continue
++				}
++				if isSlackSecretKey(key) {
++					out[sanitizedKey] = slackRedactedMarker
++				} else {
++					out[sanitizedKey] = sanitized
++				}
+ 			}
+-			if isSlackSecretKey(key) {
+-				out[sanitizedKey] = slackRedactedMarker
+-				continue
++			closing, err := decoder.Token()
++			if err != nil || closing != json.Delim('}') {
++				return nil, slackError("response-invalid", "Slack response JSON is malformed")
+ 			}
+-			sanitized, err := sanitizeSlackValue(item, depth+1, nodes)
+-			if err != nil {
+-				return nil, err
++			if collision {
++				return nil, slackError("response-key-collision", "Slack response keys collide after redaction")
+ 			}
+-			out[sanitizedKey] = sanitized
+-		}
+-		return out, nil
+-	case []any:
+-		out := make([]any, len(typed))
+-		for index, item := range typed {
+-			sanitized, err := sanitizeSlackValue(item, depth+1, nodes)
+-			if err != nil {
+-				return nil, err
++			return out, nil
++		case '[':
++			out := make([]any, 0)
++			for decoder.More() {
++				sanitized, err := decodeSanitizedSlackValue(decoder, depth+1, nodes)
++				if err != nil {
++					return nil, err
++				}
++				out = append(out, sanitized)
+ 			}
+-			out[index] = sanitized
++			closing, err := decoder.Token()
++			if err != nil || closing != json.Delim(']') {
++				return nil, slackError("response-invalid", "Slack response JSON is malformed")
++			}
++			return out, nil
++		default:
++			return nil, slackError("response-invalid", "Slack response JSON is malformed")
+ 		}
+-		return out, nil
++	}
++
++	switch typed := token.(type) {
+ 	case string:
+ 		return sanitizeSlackString(typed), nil
+-	default:
++	case json.Number, bool, nil:
+ 		return typed, nil
++	default:
++		return nil, slackError("response-invalid", "Slack response JSON contains an unsupported value")
+ 	}
+ }
+ 
+diff --git a/internal/chromectl/slack_test.go b/internal/chromectl/slack_test.go
+index a6b0ca5..402bf62 100644
+--- a/internal/chromectl/slack_test.go
++++ b/internal/chromectl/slack_test.go
+@@ -407,6 +407,58 @@ func TestSlackReadProductionPathFailsClosedOnRedactedKeyCollisions(t *testing.T)
+ 	}
+ }
+ 
++func TestSlackReadProductionPathFailsClosedOnIdenticalDuplicateSecretShapedKeys(t *testing.T) {
++	const secretKey = "xoxb-12345678-keyvalue"
++	response := `{"` + secretKey + `":"first-value","` + secretKey + `":"second-value"}`
++
++	result, err := slackReadProductionResult(t, response)
++	if kind := SlackReadErrorKind(err); kind != "response-key-collision" {
++		t.Fatalf("Session.SlackRead duplicate-key error = %q (%v), result = %#v", kind, err, result)
++	}
++	if result.Data != nil {
++		t.Fatalf("duplicate-key refusal returned partial data: %#v", result.Data)
++	}
++}
++
++func TestSlackReadProductionPathFailsClosedOnEquivalentEscapedDuplicateKeys(t *testing.T) {
++	const response = `{"xoxb-12345678-keyvalue":"literal","xoxb-12345678-\u006beyvalue":"escaped"}`
++
++	result, err := slackReadProductionResult(t, response)
++	if kind := SlackReadErrorKind(err); kind != "response-key-collision" {
++		t.Fatalf("Session.SlackRead escaped duplicate-key error = %q (%v), result = %#v", kind, err, result)
++	}
++	if result.Data != nil {
++		t.Fatalf("escaped duplicate-key refusal returned partial data: %#v", result.Data)
++	}
++}
++
++func TestSlackReadProductionPathFailsClosedOnNestedDuplicateSecretShapedKeys(t *testing.T) {
++	const response = `{"outer":[{"Bearer abcdefghijklmnop":"first","Bearer abcdefghijklmnop":"second"}]}`
++
++	result, err := slackReadProductionResult(t, response)
++	if kind := SlackReadErrorKind(err); kind != "response-key-collision" {
++		t.Fatalf("Session.SlackRead nested duplicate-key error = %q (%v), result = %#v", kind, err, result)
++	}
++	if result.Data != nil {
++		t.Fatalf("nested duplicate-key refusal returned partial data: %#v", result.Data)
++	}
++}
++
++func TestSlackReadProductionPathCountsDuplicateMembersAgainstRawNodeBound(t *testing.T) {
++	response := `{` + strings.TrimSuffix(strings.Repeat(`"a":0,`, maxSlackResponseNodes+1), ",") + `}`
++	if len(response) > MaxSlackResponseBytes {
++		t.Fatalf("duplicate-member response bytes = %d, exceeds %d-byte response ceiling", len(response), MaxSlackResponseBytes)
++	}
++
++	result, err := slackReadProductionResult(t, response)
++	if kind := SlackReadErrorKind(err); kind != "response-too-complex" {
++		t.Fatalf("Session.SlackRead raw-node error = %q (%v), result = %#v", kind, err, result)
++	}
++	if result.Data != nil {
++		t.Fatalf("raw-node refusal returned partial data: %#v", result.Data)
++	}
++}
++
+ func TestSlackReadProductionPathBearerClassCannotBeNarrowed(t *testing.T) {
+ 	got := slackReadProductionData(t, `{"text":"before Bearer abcdefghijklmnop after"}`)
+ 	if got["text"] != "before [redacted] after" {
+@@ -665,9 +717,7 @@ func TestSanitizeSlackResponseBoundsDepthAndSize(t *testing.T) {
+ 
+ func slackReadProductionData(t *testing.T, response string) map[string]any {
+ 	t.Helper()
+-	osa := writeSlackFakeOsa(t, slackEnvelope(t, "started", ""), slackEnvelope(t, "ok", response), t.TempDir())
+-	request := SlackReadRequest{Version: SlackReadVersion, Method: "auth.test", Args: json.RawMessage(`{}`)}
+-	result, err := (Session{OsaScriptPath: osa}).SlackRead(context.Background(), "11", "22", SlackOrigin, "T073GL82HJB", request)
++	result, err := slackReadProductionResult(t, response)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -678,6 +728,13 @@ func slackReadProductionData(t *testing.T, response string) map[string]any {
+ 	return data
+ }
+ 
++func slackReadProductionResult(t *testing.T, response string) (SlackReadResult, error) {
++	t.Helper()
++	osa := writeSlackFakeOsa(t, slackEnvelope(t, "started", ""), slackEnvelope(t, "ok", response), t.TempDir())
++	request := SlackReadRequest{Version: SlackReadVersion, Method: "auth.test", Args: json.RawMessage(`{}`)}
++	return (Session{OsaScriptPath: osa}).SlackRead(context.Background(), "11", "22", SlackOrigin, "T073GL82HJB", request)
++}
++
+ func slackEnvelope(t *testing.T, outcome, response string) string {
+ 	t.Helper()
+ 	value := slackPageEnvelope{Sentinel: slackReadGuardSentinel, Outcome: outcome, Response: response}

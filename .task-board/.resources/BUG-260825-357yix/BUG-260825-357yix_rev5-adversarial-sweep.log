@@ -1,0 +1,55 @@
+=== RUN   TestAttackProductionStringBattery
+    zz_attack_test.go:88: a01-plain              residue=false in="xoxb-12345678-secret" out="[redacted]"
+    zz_attack_test.go:88: a02-uppercase          residue=false in="XOXB-ABCDEFGH-SECRET" out="[redacted]"
+    zz_attack_test.go:88: a03-mixed-case         residue=false in="XoXb-AbCdEfGh-Secret" out="[redacted]"
+    zz_attack_test.go:88: a04-letter-prefixed    residue=false in="zzxoxb-12345678-secret" out="zzxoxb-12345678-secret"
+    zz_attack_test.go:88: a05-digit-prefixed     residue=false in="9xoxb-12345678-secret" out="9xoxb-12345678-secret"
+    zz_attack_test.go:88: a06-unicode-boundary   residue=false in="Жxoxb-12345678-secretЖ" out="Ж[redacted]Ж"
+    zz_attack_test.go:88: a07-emoji-boundary     residue=false in="🔐xoxb-12345678-secret🔐" out="🔐[redacted]🔐"
+    zz_attack_test.go:88: a08-bearer-tab         residue=false in="pre Bearer\tabcdefghijkl post" out="pre [redacted] post"
+    zz_attack_test.go:88: a09-bearer-newline     residue=false in="pre Bearer\nabcdefghijkl post" out="pre [redacted] post"
+    zz_attack_test.go:88: a10-bearer-lower       residue=false in="pre bearer abcdefghijkl post" out="pre [redacted] post"
+    zz_attack_test.go:88: a11-bearer-crlf        residue=false in="pre BEARER \r\n abcdefghijkl post" out="pre [redacted] post"
+    zz_attack_test.go:88: a12-jwt-3              residue=false in="pre aaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc post" out="pre [redacted] post"
+    zz_attack_test.go:88: a13-jwt-5              residue=false in="pre aaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc.dddddddddddd.eeeeeeeeeeee post" out="pre [redacted] post"
+    zz_attack_test.go:88: a14-jwe-empty-key      residue=false in="pre aaaaaaaaaaaa..bbbbbbbbbbbb.cccccccccccc.dddddddddddd post" out="pre aaaaaaaaaaaa..[redacted] post"
+    zz_attack_test.go:88: a15-three-repeats      residue=false in="a xoxb-1111111111 b xoxb-2222222222 c xoxb-3333333333 d" out="a [redacted] b [redacted] c [redacted] d"
+    zz_attack_test.go:88: a16-adjacent-classes   residue=false in="xoxb-1111111111|Bearer abcdefghijkl|aaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc" out="[redacted]|[redacted]|[redacted]"
+    zz_attack_test.go:88: a17-bearer-then-slack  residue=false in="Bearer xoxb-1111111111 tail" out="[redacted] tail"
+    zz_attack_test.go:88: a18-slack-then-bearer  residue=false in="xoxb-1111111111Bearer abcdefghijkl" out="[redacted] abcdefghijkl"
+    zz_attack_test.go:88: a19-url-query          residue=false in="https://example.com/a?token=xoxb-12345678-secret&keep=ok" out="https://example.com/a?keep=ok&token=%5Bredacted%5D"
+    zz_attack_test.go:88: a20-url-fragment       residue=false in="https://example.com/a#xoxb-12345678-secret" out="https://example.com/a#%5Bredacted%5D"
+    zz_attack_test.go:88: a21-url-path           residue=false in="https://example.com/p/xoxb-12345678-secret" out="https://example.com/p/[redacted]"
+    zz_attack_test.go:88: a22-url-leading-space  residue=false in="   https://example.com/p/xoxb-12345678-secret   " out="   https://example.com/p/[redacted]   "
+    zz_attack_test.go:88: a23-url-upper-scheme   residue=false in="HTTPS://example.com/p/xoxb-12345678-secret" out="https://example.com/p/[redacted]"
+    zz_attack_test.go:88: a24-not-url-prefix     residue=false in="see https://example.com/p/xoxb-12345678-secret now" out="see https://example.com/p/[redacted] now"
+    zz_attack_test.go:88: a25-token-only-tail    residue=false in="text ends with xapp-1-abcdefgh-12345678" out="text ends with [redacted]"
+    zz_attack_test.go:88: a26-token-only-head    residue=false in="xapp-1-abcdefgh-12345678 starts the text" out="[redacted] starts the text"
+    zz_attack_test.go:88: a27-nested-start       residue=false in="9xapp-xapp-12345678secret" out="9xapp-[redacted]"
+    zz_attack_test.go:88: a28-double-nested      residue=false in="9xapp-9xapp-xapp-12345678secret" out="9xapp-9xapp-[redacted]"
+    zz_attack_test.go:88: a29-partial-overlap    residue=false in="REF-SYN-4242 aaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc-Bearer abcdefghij tail" out="REF-SYN-4242 [redacted] tail"
+    zz_attack_test.go:88: a30-marker-injection   residue=false in="[redacted] xoxb-12345678-secret [redacted]" out="[redacted] [redacted] [redacted]"
+    zz_attack_test.go:88: a31-trailing-tail      residue=false in="xoxb-12345678-secret tail" out="[redacted] tail"
+    zz_attack_test.go:88: a32-rtl-override       residue=false in="\u202exoxb-12345678-secret\u202c" out="\u202e[redacted]\u202c"
+    zz_attack_test.go:88: a33-zero-width         residue=false in="xoxb-\u200b12345678-secret" out="xoxb-\u200b12345678-secret"
+    zz_attack_test.go:88: a34-token-in-base64ish residue=false in="Zm9vYmFy xoxc-99999999-zzzz Zm9vYmFy" out="Zm9vYmFy [redacted] Zm9vYmFy"
+    zz_attack_test.go:88: a35-xoxp               residue=false in="pre xoxp-12345678-abcdefgh post" out="pre [redacted] post"
+    zz_attack_test.go:88: a36-xoxe               residue=false in="pre xoxe-12345678-abcdefgh post" out="pre [redacted] post"
+    zz_attack_test.go:88: a37-many-dots          residue=false in="pre aaaaaaaaaaaa.aaaaaaaaaaaa.aaaaaaaaaaaa.aaaaaaaaaaaa.aaaaaaaaaaaa.aaaaaaaaaaaa.aaaaaaaaaaaa.aaaaaaaaaaaa.aaaaaaaaaaaa.aaaaaaaaaaaa.bbbbbbbbbbbb post" out="pre [redacted] post"
+    zz_attack_test.go:88: a38-token-with-dot     residue=false in="pre xoxb-1234.5678-secret post" out="pre xoxb-1234.5678-secret post"
+    zz_attack_test.go:88: a39-jwt-underscore     residue=false in="pre aaaa_aaaa_aaa.bbbb-bbbb-bbb.cccc_cccc_ccc post" out="pre [redacted] post"
+    zz_attack_test.go:88: a40-bearer-equals      residue=false in="pre Bearer YWJjZGVmZ2hpams= post" out="pre [redacted] post"
+--- PASS: TestAttackProductionStringBattery (0.75s)
+=== RUN   TestAttackProductionObjectKeyCarriesToken
+    zz_attack_test.go:100: key-carrying output: {"outer":{"Bearer abcdefghijkl":"v"},"xoxb-12345678-secret":"[redacted]"}
+    zz_attack_test.go:102: OBSERVED: raw slack token survives as a JSON object KEY
+    zz_attack_test.go:105: OBSERVED: raw bearer token survives as a nested JSON object KEY
+--- PASS: TestAttackProductionObjectKeyCarriesToken (0.58s)
+=== RUN   TestAttackFixpointFuzz
+    zz_attack_test.go:135: fixpoint fuzz: 400000 cases, residues=0
+--- PASS: TestAttackFixpointFuzz (1.38s)
+=== RUN   TestAttackDetectionParityFuzz
+    zz_attack_test.go:169: detection parity: legacyHits=179093 narrowed=0
+--- PASS: TestAttackDetectionParityFuzz (1.21s)
+PASS
+ok  	github.com/relux-works/mac-infra/internal/chromectl	6.482s

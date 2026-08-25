@@ -1,0 +1,9 @@
+Real binary: .temp/TASK-260823-17qhsl/smoke/bin/mac-browser-site
+Transport: task-scoped fake mac-chrome-session; no user browser session accessed
+
+q batch schema + projected list: exit 0
+q projected compact list: exit 0
+grep named per-site cache file: exit 0
+m --dry-run: exit 0, verification=not-run
+m without --confirm: exit 1, CONFIRM_REQUIRED (expected refusal)
+m --confirm against fake transport: exit 0, verification=unknown

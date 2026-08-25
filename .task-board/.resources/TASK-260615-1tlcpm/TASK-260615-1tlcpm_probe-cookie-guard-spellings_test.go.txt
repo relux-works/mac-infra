@@ -1,0 +1,62 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/relux-works/mac-infra/internal/safarictl"
+)
+
+// Does the cookie/storage guard actually stop a caller who spells the same
+// read differently? Dispatch is observed by recording what osascript received.
+func TestReviewProbeCookieGuardSpellings(t *testing.T) {
+	cases := map[string]string{
+		"blocked-literal":    "document.cookie",
+		"bracket":            "document['cookie']",
+		"spaced":             "document . cookie",
+		"concat":             "document['coo'+'kie']",
+		"proto-descriptor":   "Object.getOwnPropertyDescriptor(Document.prototype,'cookie').get.call(document)",
+		"window-storage-idx": "window['local'+'Storage'].getItem('token')",
+		"self-storage":       "self['sessionSt'+'orage']",
+	}
+	for name, src := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			seen := filepath.Join(dir, "dispatched.js")
+			script := filepath.Join(dir, "osascript")
+			env, _ := json.Marshal(map[string]string{
+				"__macBrowserSessionGuard": "works.relux.mac-infra/browser-session-guard/v1",
+				"outcome":                  "ok", "origin": "https://example.com",
+				"readyState": "complete", "value": "SECRET_COOKIE_VALUE",
+			})
+			body := "#!/bin/sh\n# argv: -e <applescript> <jsPath> <windowId>\ncat \"$3\" > " + seen + "\ncat <<'JSON'\n" + string(env) + "\nJSON\n"
+			if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			old := newSafariSession
+			newSafariSession = func(artifactDir string) *safarictl.Session {
+				s := safarictl.New(artifactDir)
+				s.OsaScriptPath = script
+				return s
+			}
+			t.Cleanup(func() { newSafariSession = old })
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"run-js", "--script", src, "--window-id", "123",
+				"--origin", "https://example.com", "--artifact-dir", filepath.Join(dir, "art")}, &stdout, &stderr)
+			dispatched := ""
+			if b, err := os.ReadFile(seen); err == nil {
+				dispatched = string(b)
+			}
+			t.Logf("src=%q exit=%d dispatched=%t stdout=%q stderr=%q",
+				src, code, dispatched != "", strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
+			if dispatched != "" && strings.Contains(stdout.String(), "SECRET_COOKIE_VALUE") {
+				t.Errorf("GUARD BYPASSED: %q reached Safari and its value was printed to stdout", src)
+			}
+		})
+	}
+}

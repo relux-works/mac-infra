@@ -1,0 +1,18 @@
+Candidate: 3c9f76e29c333ad11f9d667650dc4f7ee81abefc
+Production entry point: internal/chromectl.Session.UploadFiles
+Attack: input initially accept=.pdf; after generated prepare returns ready,
+change the same state-bound input to accept=.png, provide trusted change and the
+exact staged evidence.pdf metadata, then execute generated inspection.
+
+Command:
+go test -count=1 -run '^TestReviewerUploadFilesRefusesAcceptDriftBeforeAttestingSelection$' ./internal/chromectl
+
+Result (expected red, exit 1):
+--- FAIL: TestReviewerUploadFilesRefusesAcceptDriftBeforeAttestingSelection (0.69s)
+    reviewer_dom_drift_test.go:84: DOM accept drift was attested: result={Version:1 OK:true Origin:https://example.com Count:1 Files:[evidence.pdf]} err=<nil> pageCalls=3
+FAIL
+FAIL github.com/relux-works/mac-infra/internal/chromectl 2.056s
+
+No live Chrome or native Accessibility surface was contacted. Exact-target and
+native selection were deterministic test seams; both generated page programs
+were the candidate production programs.

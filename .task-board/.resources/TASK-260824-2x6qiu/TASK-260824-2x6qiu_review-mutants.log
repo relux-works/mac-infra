@@ -1,0 +1,82 @@
+TASK-260824-2x6qiu review mutation log
+Reviewer run: RUN-260825-1027f1
+Change Request: CR-TASK-260824-2x6qiu-2 revision 2
+Base:      fa43cb316036b0b20bed8906417ab97e408fea4b
+Candidate: 013d2426ed381d48ea4251f0c6ca640b27362160
+Method: candidate tree materialised with `git archive`, mutated in an isolated copy,
+        `go test -count=1` re-run per mutant. Narrowing preferred over deletion.
+
+KILLED (gate is pinned by a test that fails when the gate admits what it must reject)
+--------------------------------------------------------------------------------
+M2  ResolveDeadline: replace exclusivity `(ttl > 0) == (raw != "")` with `ttl <= 0 && raw == ""`
+    (accept --ttl and --deadline together)
+    -> KILLED: TestDeadlineGateRejectsMissingAmbiguousAndExpiredInputs/ambiguous
+
+M3  RenderHeartbeatLaunchAgent: relax exact stable-launcher path to "any file in managed bin"
+    (re-admit legacy mac-browser-session-<hash> pinned copies)
+    -> KILLED: TestRenderLaunchAgentRejectsLegacyContentAddressedExecutable
+
+M4  validateInstalledHeartbeatLauncher: drop IsRegular()/exec-mode clause, keep existence only
+    -> KILLED: TestStartRefusesNonExecutableOrNonRegularStableLauncherBeforeBrowserPreflight
+               (both /non-executable and /directory)
+
+M5b Run: delete the interval-sleep expiry arm `case <-time.After(deadline.Sub(m.now()))`
+    -> KILLED: TestRunExpiresDuringIntervalSleepAtRealDeadlineAndCleansManagedState (real clock, 2s bound)
+
+M6  Run: delete the pre-probe expiry refusal
+    -> KILLED: TestRunRefusesExpiredHeartbeatBeforeBrowserProbeAndCleansState
+
+M7  Inspect: report state=expired but skip m.expire() cleanup
+    -> KILLED: TestInspectExpiresHeartbeatAndCleansManagedArtifactsWithoutBrowserProbe
+
+M8  validateStoredConfig: narrow migration trigger from `legacyLauncher || cfg.Deadline == ""`
+    to `legacyLauncher` (deadline-free state on the stable launcher stops requiring migration)
+    -> KILLED: TestStableLauncherHeartbeatWithoutDeadlineRequiresMigration
+
+M9  CLI (both mac-chrome-session and mac-safari-session): default --ttl to 8h so a caller that
+    supplies neither --ttl nor --deadline silently gets an 8h heartbeat
+    -> KILLED: TestHeartbeatStartProductionEntryRequiresFiniteDeadline
+               TestSafariHeartbeatStartProductionEntryRequiresFiniteDeadline
+
+M10 Load: stop refusing migration-required state (`if migrationRequired && false`)
+    -> KILLED: TestStableLauncherHeartbeatWithoutDeadlineRequiresMigration
+
+SURVIVED (redundant second layer; no production bypass — recorded as non-blocking findings)
+--------------------------------------------------------------------------------
+M1  NewConfig: narrow `deadline.IsZero() || !deadline.After(m.now())` to `deadline.IsZero()`
+    (accept a deadline already in the past)
+    -> SURVIVED. Both production callers (chrome + safari heartbeatStart/heartbeatRestart)
+       run ResolveDeadline first, which rejects past instants and IS pinned
+       (TestDeadlineGateRejectsMissingAmbiguousAndExpiredInputs/expired, plus the installed
+       smoke below). No reachable bypass; the clause is defence in depth only.
+
+M5  Run: delete the post-probe expiry re-check
+    `if !m.now().Before(deadline) || (runCtx DeadlineExceeded && ctx.Err() == nil) { expire }`
+    -> SURVIVED. The probe is still bounded by `runCtx` (pinned: without it
+       TestRunExpiresDuringProbeAtRealDeadlineAndCleansManagedState blows its 1.5s bound),
+       and the sleep-window arm (M5b, pinned) still expires the heartbeat immediately after.
+       Deleting the re-check only appends one extra outcome line to a log that expire()
+       then deletes. Deadline enforcement is not weakened, but the test named for mid-probe
+       expiry does not pin this specific clause.
+
+M11 Start: delete the `m.validateConfig(cfg)` call
+    -> SURVIVED. Every production caller builds cfg through NewConfig, and
+       RenderHeartbeatLaunchAgent still refuses a non-stable executable inside Start.
+       Untested redundant layer, not a bypass.
+
+REVIEW PROBE (pre-existing hazard, unchanged by this change)
+--------------------------------------------------------------------------------
+isMissingLaunchAgent matches the substring "113" anywhere in the launchctl error text, and
+runLaunchctl formats that text as `launchctl <args>: <output>` where <args> contains
+`gui/<uid>/works.relux.mac-infra-browser-heartbeat.<name>`. A temporary probe test proved a
+genuine failure is misclassified:
+
+  launchctl bootout gui/501/works.relux.mac-infra-browser-heartbeat.hb113:
+  Operation not permitted while System Integrity Protection is engaged
+  -> isMissingLaunchAgent() == true
+
+Heartbeat names match [a-z0-9][a-z0-9-]{0,47}, so `hb113` is legal; a uid containing 113 has the
+same effect. Identical helper exists at base (fa43cb3:internal/browsersession/heartbeat.go:777),
+so this is not a regression, but expire() is a new caller that removes the plist and state
+BEFORE bootout, so a swallowed genuine failure leaves a loaded KeepAlive job with no plist
+(throttled respawn until logout) instead of returning an error.

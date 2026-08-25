@@ -1,0 +1,12 @@
+=== RUN   TestFetchFileRequiresResourceAndOutput
+--- PASS: TestFetchFileRequiresResourceAndOutput (0.00s)
+=== RUN   TestFetchFileProductionEntryReassemblesCompleteFile
+--- PASS: TestFetchFileProductionEntryReassemblesCompleteFile (0.34s)
+=== RUN   TestFetchFileProductionEntryRefusesIncompleteTransferWithoutPublishing
+=== RUN   TestFetchFileProductionEntryRefusesIncompleteTransferWithoutPublishing/browser-size-mismatch
+=== RUN   TestFetchFileProductionEntryRefusesIncompleteTransferWithoutPublishing/missing-middle-chunk
+--- PASS: TestFetchFileProductionEntryRefusesIncompleteTransferWithoutPublishing (0.71s)
+    --- PASS: TestFetchFileProductionEntryRefusesIncompleteTransferWithoutPublishing/browser-size-mismatch (0.38s)
+    --- PASS: TestFetchFileProductionEntryRefusesIncompleteTransferWithoutPublishing/missing-middle-chunk (0.33s)
+PASS
+ok  	github.com/relux-works/mac-infra/cmd/mac-safari-session	1.369s

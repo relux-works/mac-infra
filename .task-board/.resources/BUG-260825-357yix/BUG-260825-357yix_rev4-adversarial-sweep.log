@@ -1,0 +1,42 @@
+BUG-260825-357yix reviewer RUN-260825-308408 — independent adversarial sweep
+(reviewer-authored throwaway tests; removed after the run, tree left pristine)
+
+1) Differential + fail-closed fuzz, reviewer seed 0x5eed4242, 400,000 generated
+   strings over an alphabet independent of the CR's own corpus
+   (xox*/xapp/Bearer variants, tabs/newlines, ./-/_//=/+/~/|/:, Cyrillic, emoji,
+   %20, ?code=, #frag, https:// prefixes):
+     legacyHits=55948  narrowings=0  residual=0
+   - no panic in redactSlackTokenSpans
+   - every input the legacy detector flagged is also flagged by containsTokenShape
+   - every input the legacy detector flagged comes back modified (never byte-identical)
+   - no sanitized OUTPUT ever still matches a legacy xox/Bearer/JWT shape
+
+2) Targeted attacks driven through production Session.SlackRead (all fail-closed,
+   all output valid UTF-8, no fragment of any synthetic secret survived):
+     nested-after-dash        "9xapp-xapp-12345678secret"        -> "9xapp-[redacted]"
+     nested-after-underscore  "tag_xoxb-12345678secret end"      -> "tag_[redacted] end"
+     nested-after-dot         "v1.xoxb-12345678secret end"       -> "v1.[redacted] end"
+     nested-triple            "xoxb-xoxb-xoxb-12345678secret"    -> "[redacted]"
+     multibyte-adjacent       "Приветxoxb-12345678secret мир"    -> "Привет[redacted] мир"
+     emoji-adjacent           "<emoji>xoxb-12345678secret<emoji>"-> "<emoji>[redacted]<emoji>"
+     jwe-4 / jwe-5 / jwe-6-short-tail                            -> "pre [redacted] post"
+     overlap-equal-start      "pre Bearer xoxc-12345678-secret post" -> "pre [redacted] post"
+     overlap-partial          jwt-then-Bearer-past-end           -> "REF [redacted] tail"
+     overlap-chain            jwt+Bearer+xox chained             -> "REF [redacted] tail"
+     bearer-tab / bearer-newline                                 -> "pre [redacted] post"
+     token-at-bos / token-at-eos / repeated-adjacent             -> redacted, edges preserved
+     upper-tok "PRE XOXB-12345678SECRET POST"                    -> "PRE [redacted] POST"
+     url-path-tok  "https://example.com/p/xoxb-12345678-secret"  -> "https://example.com/p/[redacted]"
+     url-space-pad "   https://.../xoxb-12345678-secret   "      -> "   https://example.com/p/[redacted]   "
+
+3) Request-side guard (Session.SlackRead before osascript, OsaScriptPath pointed at a
+   non-existent binary so any execution would error differently): every nested-start,
+   multibyte-prefixed, 4-segment-JWE and Bearer query returned error kind
+   "invalid-arguments" — no query reached browser execution.
+
+4) Cost bound, shipped implementation, three consecutive runs:
+     ok 1.130s / 1.024s / 1.034s wall for the whole test against its 3s bound (~3x headroom)
+
+5) Producer claims spot-checked and reproduced exactly:
+   - differential corpus log line: "preserved all 101326 legacy detections across 200000 cases"
+   - rev4 mutant output "REF-SYN-4242 [redacted] abcdefghij tail" — byte-identical to mine

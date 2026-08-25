@@ -1,0 +1,5 @@
+--- FAIL: TestChromeAXUploadProductionPathRefusesUnreadableSheetSequences (1.33s)
+    ax_darwin_test.go:319: production macChromeAXUploadFiles sheet sequence gate admitted unreadable evidence: exit status 11
+FAIL
+FAIL	github.com/relux-works/mac-infra/internal/chromectl	2.051s
+FAIL
