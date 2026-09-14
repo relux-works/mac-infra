@@ -20,8 +20,8 @@ import (
 const (
 	DaemonPath = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd"
 
-	DefaultRSSWarnBytes     int64 = 2 * 1024 * 1024 * 1024
-	DefaultRSSCriticalBytes int64 = 4 * 1024 * 1024 * 1024
+	DefaultRSSWarnBytes     int64 = 256 * 1024 * 1024
+	DefaultRSSCriticalBytes int64 = 512 * 1024 * 1024
 	DefaultCPUWarnPercent         = 50.0
 	// DefaultTempBuildWarnBytes flags leftover go-build temp directories that
 	// keep growing when test loops are killed mid-run.

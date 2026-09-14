@@ -59,7 +59,7 @@ func withWatchdogStubs(t *testing.T, cfg maccore.FSEventsWatchdogConfig) (enable
 // --force skips the local guard and forwards force to the daemon.
 func TestFSEventsRestartRefusesBelowThresholdAndForceForwards(t *testing.T) {
 	withInspectFSEventsDaemon(t, func() (maccore.FSEventsDaemonState, maccore.CommandResult, error) {
-		return maccore.FSEventsDaemonState{Found: true, PID: 368, RSSBytes: 512 * 1024 * 1024}, maccore.CommandResult{}, nil
+		return maccore.FSEventsDaemonState{Found: true, PID: 368, RSSBytes: 64 * 1024 * 1024}, maccore.CommandResult{}, nil
 	})
 	called := false
 	var gotForce bool
@@ -81,10 +81,10 @@ func TestFSEventsRestartRefusesBelowThresholdAndForceForwards(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"fseventsd-restart", "--force", "--threshold-gb", "2"}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"fseventsd-restart", "--force", "--threshold-gb", "0.25"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code = %d; stderr = %q", code, stderr.String())
 	}
-	if !called || !gotForce || gotThreshold != 2*1024*1024*1024 {
+	if !called || !gotForce || gotThreshold != 256*1024*1024 {
 		t.Fatalf("called = %t force = %t threshold = %d", called, gotForce, gotThreshold)
 	}
 	if !strings.Contains(stdout.String(), "fseventsd-restart: applied") || !strings.Contains(stdout.String(), "pid=999") {

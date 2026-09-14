@@ -10,8 +10,10 @@
   - `~/.colima/*/colima.yaml` `mountInotify` and `mounts` findings
   - `go-build*` leftover size under the temp dir
   - `--json` output
-- Added `mac-infra-core fseventsd-restart`: allowlisted daemon action `launchctl kickstart -k system/com.apple.fseventsd`, refused below the RSS threshold (default 4 GB) unless `--force`, with before/after pid and RSS.
+- Added `mac-infra-core fseventsd-restart`: allowlisted daemon action `launchctl kickstart -k system/com.apple.fseventsd`, refused below the RSS threshold (default 512 MB) unless `--force`, with before/after pid and RSS.
 - Added `mac-infra-core fseventsd-watchdog enable|disable|status`: current-user LaunchAgent `works.relux.mac-infra-fseventsd-watchdog` that checks fseventsd on an interval (default 10m), notifies over the threshold with a cooldown, and restarts only with opt-in `--auto-restart`.
+
+- Default fseventsd thresholds are 256 MB (warn) and 512 MB (critical); a healthy fseventsd uses 10-20 MB, so gigabytes are already pathology.
 
 ### Operational notes
 

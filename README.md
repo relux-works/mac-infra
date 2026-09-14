@@ -236,7 +236,7 @@ thresholds, lists known consumers from a pattern allowlist, parses
 `~/.colima/*/colima.yaml` for `mountInotify`/`mounts`, and sizes `go-build*`
 leftovers. `fseventsd-restart` is an allowlisted root-daemon action
 (`launchctl kickstart -k system/com.apple.fseventsd`) that refuses below the
-4 GB threshold unless `--force` is given; update the installed daemon with
+512 MB threshold unless `--force` is given; update the installed daemon with
 `mac-infra-core install` first. The watchdog is a current-user LaunchAgent that
 checks every 10 minutes, notifies over the threshold, and restarts only with
 the opt-in `--auto-restart`. Do not renice or throttle fseventsd: dropped

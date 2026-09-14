@@ -387,8 +387,8 @@ mac-load-profile fsevents
 mac-load-profile fsevents --json
 ```
 
-It reports fseventsd pid/RSS/CPU against thresholds (warn 2 GB, critical
-4 GB, CPU 50%), known FSEvents consumers and event generators from a pattern
+It reports fseventsd pid/RSS/CPU against thresholds (warn 256 MB, critical
+512 MB, CPU 50%; a healthy fseventsd sits at 10-20 MB), known FSEvents consumers and event generators from a pattern
 allowlist (Colima `--inotify` daemon, Spotlight, Time Machine, iCloud Drive,
 git fsmonitor, watchman, third-party sync agents, running `go test`), every
 `~/.colima/*/colima.yaml` with `mountInotify` and `mounts`, and the size of
@@ -415,7 +415,7 @@ system/com.apple.fseventsd` and reports before/after pid and RSS. It needs
 the installed daemon to be updated from a build that includes the action:
 run `mac-infra-core install` after `scripts/setup.sh`.
 
-- Keep a watchdog so the next bloat is caught at 4 GB, not 40:
+- Keep a watchdog so the next bloat is caught at 512 MB, not 40 GB:
 
 ```bash
 mac-infra-core fseventsd-watchdog enable
