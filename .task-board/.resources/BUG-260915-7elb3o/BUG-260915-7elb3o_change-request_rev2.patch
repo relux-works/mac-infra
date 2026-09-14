@@ -1,0 +1,628 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index d399a08..1007371 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -3,6 +3,19 @@
+ > Institutional memory. Concise, factual, high-signal.
+ > Newest entries first. One block per insight.
+ 
++## 2026-09-15
++
++### 1726 — Ambiguous Browser Fields Require Value Evidence
++- ROOT CAUSE: `internal/docsanitize/sanitize.go` classified generic `name`/`author` and every field containing `address` as PII, corrupting product and organization metadata before facade render/cache.
++- FIX: Whole-field classification now covers only unambiguous personal-data headers; generic metadata relies on value-level patterns.
++- REGRESSION: `TestRunQProductionEntryPreservesNonPIIValuesInAmbiguousFields` covers JSON/compact stdout, cache, and grep with an adjacent true-name control.
++
++### 1701 — Browser Records Compose PII And Secret Boundaries
++- DECISION: `internal/browserfacade/facade.go` keeps secret refusal ahead of one complete-result `internal/docsanitize.SanitizeRecords` pass, then persists and renders only depersonalized records.
++- FIX: `internal/docsanitize/sanitize.go` now owns structured field classification, camel-case normalization, stable cross-record placeholders, and invalid-UTF-8 refusal; `internal/browserfacade/cache.go` refuses cache records whose depersonalization is not idempotent.
++- SAFETY: Canonical document placeholders are explicitly admitted by `internal/browserfacade/outbound.go`; malformed bracket-shaped values, secret-shaped values, malformed records, and raw-PII cache remain fail-closed.
++- EVIDENCE: `TestRunQProductionEntryDepersonalizesListStdoutCacheAndGrep`, `TestRunQProductionEntryRefusesMalformedRecordWithoutOutputOrCache`, and `TestRunGrepProductionEntryRefusesCacheContainingRawPII` drive the public CLI boundary; focused packages pass uncached.
++
+ ## 2026-08-26
+ 
+ ### 2213 — Task-board Restart Double-Prefixes Local Board Paths
+diff --git a/README.md b/README.md
+index 3b30100..aefd543 100644
+--- a/README.md
++++ b/README.md
+@@ -14,7 +14,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
+ | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
+ | `mac-safari-session` | Guarded, window-exact authenticated Safari page access and finite named keepalives without exporting browser secrets | `mac-safari-session open-bg URL`, guarded `run-js`/`snapshot`/`fetch-file`, `heartbeat start\|restart\|status\|list\|stop`, explicit `focus --window-id ID` | private temporary JS under `.temp/mac-safari-session/`; optional `0600` artifacts; heartbeat state/logs and one stable launcher under `~/Library/Application Support/mac-infra/browser-session/` |
+ | `mac-chrome-session` | Guarded exact Chrome tab access, explicit exact-tab handoff, trusted form input and native file upload, sealed authenticated same-origin downloads and Slack reads, bounded extraction, and finite named Chrome/Safari heartbeats without focus churn | `mac-chrome-session list`, guarded `run-js`/`fetch-file`/`slack-read`/`extract`, explicit `focus`, `trusted-input`, or `upload` with exact IDs/origin plus `--human-authorized`; upload/trusted input and protected fetch requests arrive through `--request-stdin`; `heartbeat start\|restart\|status\|stop\|list`, exact `close` | atomic private `run-js --out` and `fetch-file --out` artifacts; protected resource URLs, trusted values, and upload source paths stay out of argv and normal output; upload uses a short-lived private staging directory and reports only guarded origin, accepted basenames, and count; other private outputs and heartbeat state use the paths described below |
+-| `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected and sanitized `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no cookies, browser storage, authorization material, or cursor/session state |
++| `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected, PII-depersonalized, secret-checked `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no raw recognized personal data, cookies, browser storage, authorization material, or cursor/session state |
+ | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
+ | `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
+ | `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
+@@ -698,6 +698,19 @@ canonical re-encoding of the exact validated record. See the
+ [site facade reference](agents/skills/mac-infra/references/browser-site-facade.md)
+ for the adapter schema and pagination semantics.
+ 
++Successful `list` calls depersonalize the complete projected result through
++`internal/docsanitize` before cache persistence or public rendering. Recognized
++names, email addresses, phone numbers, addresses, birth dates, passport/SNILS/tax
++identifiers, payment cards, and IP addresses become stable category placeholders
++within that result; field names, record order, and ordinary values stay intact.
++Ambiguous public fields such as product `name`, `addressType`, and application or
++organization `author` are changed only when their values contain recognizable PII.
++`grep` accepts only cache records that are already depersonalized and refuses raw
++PII or malformed records instead of repairing them during a read. The independent
++secret scanner still runs first and refuses the entire operation without partial
++stdout or cache bytes; an unsafe or lossy depersonalization result likewise fails
++closed.
++
+ ### Named persistent heartbeats
+ 
+ Both browser CLIs use the same Go heartbeat manager and managed namespace.
+diff --git a/agents/skills/mac-infra/references/browser-site-facade.md b/agents/skills/mac-infra/references/browser-site-facade.md
+index 251e007..744c806 100644
+--- a/agents/skills/mac-infra/references/browser-site-facade.md
++++ b/agents/skills/mac-infra/references/browser-site-facade.md
+@@ -91,6 +91,17 @@ targets, origins, or transport state. Semicolon-separated batches are parsed
+ without shell evaluation. Compact list output is CSV-style with one header,
+ followed by bounded metadata.
+ 
++After the independent secret boundary accepts the complete browser response,
++`list` applies the shared `internal/docsanitize` structured-record sanitizer to
++the complete projected result before cache persistence or public rendering.
++Recognized full names, email addresses, phone numbers, addresses, birth dates,
++passport/SNILS/tax identifiers, payment cards, and IP addresses become stable
++category placeholders within that result. Field names, record order, and
++non-PII values are preserved; ambiguous metadata fields such as product `name`,
++`addressType`, and application or organization `author` require value-level PII
++evidence before their values change. Malformed, lossy, or otherwise unsafely
++sanitizable records fail closed with no partial stdout or cache write.
++
+ ## Cache-Scoped Search (`grep`)
+ 
+ Successful `list` results are written as projected, sanitized `0600` JSONL
+@@ -112,8 +123,10 @@ descriptor-rooted site directory; every facade-owned path component is checked
+ before opening that root, and symlinked components are refused. An explicitly
+ named final symlink returns `CACHE_SCOPE_REFUSED`; it is not skipped into an
+ empty result. Files are capped at 4 MiB / 1,000 records, context at 5 lines, and
+-matches at 100. A malformed or unsanitized cache is a refusal, not an empty
+-search result.
++matches at 100. A malformed, secret-bearing, or non-depersonalized cache is a
++refusal, not an empty search result. `grep` never repairs cache records during a
++read and therefore returns only the canonical PII placeholders persisted by a
++successful `list` call.
+ 
+ ## Guarded Mutations (`m`)
+ 
+diff --git a/cmd/mac-browser-site/main_test.go b/cmd/mac-browser-site/main_test.go
+index b3c20b8..8ab5513 100644
+--- a/cmd/mac-browser-site/main_test.go
++++ b/cmd/mac-browser-site/main_test.go
+@@ -34,6 +34,156 @@ printf '%s\n' '{"matched":1,"skip":0,"take":100,"returned":1,"items":[{"id":"p-1
+ 	}
+ }
+ 
++func TestRunQProductionEntryDepersonalizesListStdoutCacheAndGrep(t *testing.T) {
++	// This proves the public q entry depersonalizes every required PII class before both rendering and persistence, and grep sees only that cache.
++	fields := []string{"id", "title", "price", "full_name", "email", "phone", "address", "date_of_birth", "passport", "snils", "tax_id", "payment_card", "ip_address"}
++	query := `list(take=2) { id title price full_name email phone address date_of_birth passport snils tax_id payment_card ip_address }`
++	rawValues := []string{"Иванов Иван Иванович", "alexey.petrov@example.com", "+7 (999) 123-45-67", "г. Москва, ул. Тестовая, д. 1", "01.02.1990", "45 10 123456", "112-233-445 95", "123456789012", "4111 1111 1111 1111", "192.168.10.22"}
++	for _, format := range []string{"json", "compact"} {
++		t.Run(format, func(t *testing.T) {
++			home := t.TempDir()
++			t.Setenv("HOME", home)
++			bin := t.TempDir()
++			writeExecutable(t, filepath.Join(bin, "mac-chrome-session"), `
++printf '%s\n' '{"matched":2,"skip":0,"take":100,"returned":2,"items":[{"id":"p-1","title":"Clock Integrity","price":"$20","full_name":"Иванов Иван Иванович","email":"alexey.petrov@example.com","phone":"+7 (999) 123-45-67","address":"г. Москва, ул. Тестовая, д. 1","date_of_birth":"01.02.1990","passport":"45 10 123456","snils":"112-233-445 95","tax_id":"123456789012","payment_card":"4111 1111 1111 1111","ip_address":"192.168.10.22"},{"id":"p-2","title":"Clock Integrity","price":"$20","full_name":"Иванов Иван Иванович","email":"alexey.petrov@example.com","phone":"+7 (999) 123-45-67","address":"г. Москва, ул. Тестовая, д. 1","date_of_birth":"01.02.1990","passport":"45 10 123456","snils":"112-233-445 95","tax_id":"123456789012","payment_card":"4111 1111 1111 1111","ip_address":"192.168.10.22"}]}'
++`)
++			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
++			adapter := writeAdapterWithFields(t, home, fields)
++			var stdout, stderr bytes.Buffer
++			code := run([]string{"q", "--adapter", adapter, "--format", format, query}, &stdout, &stderr)
++			if code != 0 {
++				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++			}
++			assertDepersonalized(t, stdout.Bytes(), rawValues)
++			for _, want := range []string{"p-1", "p-2", "Clock Integrity", "$20", "[FULL_NAME_1]", "[EMAIL_1]", "[PHONE_1]", "[ADDRESS_1]", "[DATE_OF_BIRTH_1]", "[PASSPORT_1]", "[SNILS_1]", "[TAX_ID_1]", "[PAYMENT_CARD_1]", "[IP_ADDRESS_1]"} {
++				if !strings.Contains(stdout.String(), want) {
++					t.Fatalf("stdout missing %q: %s", want, stdout.String())
++				}
++			}
++			if strings.Count(stdout.String(), "[EMAIL_1]") != 2 {
++				t.Fatalf("repeated email did not receive a stable placeholder: %s", stdout.String())
++			}
++
++			cacheDirectory := filepath.Join(home, "Library", "Application Support", "mac-infra", "browser-site-cache", "marketplace")
++			entries, err := os.ReadDir(cacheDirectory)
++			if err != nil || len(entries) != 1 {
++				t.Fatalf("cache entries=%v err=%v", entries, err)
++			}
++			cacheData, err := os.ReadFile(filepath.Join(cacheDirectory, entries[0].Name()))
++			if err != nil {
++				t.Fatal(err)
++			}
++			assertDepersonalized(t, cacheData, rawValues)
++			if !bytes.Contains(cacheData, []byte("[EMAIL_1]")) || !bytes.Contains(cacheData, []byte("Clock Integrity")) {
++				t.Fatalf("cache lost sanitized or ordinary values: %s", cacheData)
++			}
++
++			stdout.Reset()
++			stderr.Reset()
++			code = run([]string{"grep", "--adapter", adapter, "--format", "json", "--file", entries[0].Name(), "EMAIL_1"}, &stdout, &stderr)
++			if code != 0 || !strings.Contains(stdout.String(), "[EMAIL_1]") {
++				t.Fatalf("grep code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++			}
++			assertDepersonalized(t, stdout.Bytes(), rawValues)
++		})
++	}
++}
++
++func TestRunQProductionEntryPreservesNonPIIValuesInAmbiguousFields(t *testing.T) {
++	// This proves q, cache, and grep preserve ambiguous metadata unless its value contains PII, with a true-name positive control nearby.
++	fields := []string{"id", "name", "addressType", "author", "fullName"}
++	query := `list(take=1) { id name addressType author fullName }`
++	for _, format := range []string{"json", "compact"} {
++		t.Run(format, func(t *testing.T) {
++			home := t.TempDir()
++			t.Setenv("HOME", home)
++			bin := t.TempDir()
++			writeExecutable(t, filepath.Join(bin, "mac-chrome-session"), `printf '%s\n' '{"matched":1,"skip":0,"take":100,"returned":1,"items":[{"id":"p-1","name":"Desk lamp","addressType":"shipping","author":"OpenAI","fullName":"Иванов Иван Иванович"}]}'`)
++			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
++			adapter := writeAdapterWithFields(t, home, fields)
++			var stdout, stderr bytes.Buffer
++			code := run([]string{"q", "--adapter", adapter, "--format", format, query}, &stdout, &stderr)
++			if code != 0 {
++				t.Fatalf("q code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++			}
++			for _, want := range []string{"p-1", "Desk lamp", "shipping", "OpenAI", "[FULL_NAME_1]"} {
++				if !strings.Contains(stdout.String(), want) {
++					t.Fatalf("q stdout missing %q: %s", want, stdout.String())
++				}
++			}
++			if strings.Contains(stdout.String(), "Иванов Иван Иванович") {
++				t.Fatalf("q stdout retained adjacent PII: %s", stdout.String())
++			}
++
++			cacheDirectory := filepath.Join(home, "Library", "Application Support", "mac-infra", "browser-site-cache", "marketplace")
++			entries, err := os.ReadDir(cacheDirectory)
++			if err != nil || len(entries) != 1 {
++				t.Fatalf("cache entries=%v err=%v", entries, err)
++			}
++			cacheData, err := os.ReadFile(filepath.Join(cacheDirectory, entries[0].Name()))
++			if err != nil {
++				t.Fatal(err)
++			}
++			for _, want := range []string{"Desk lamp", "shipping", "OpenAI", "[FULL_NAME_1]"} {
++				if !bytes.Contains(cacheData, []byte(want)) {
++					t.Fatalf("cache missing %q: %s", want, cacheData)
++				}
++			}
++			if bytes.Contains(cacheData, []byte("Иванов Иван Иванович")) {
++				t.Fatalf("cache retained adjacent PII: %s", cacheData)
++			}
++
++			stdout.Reset()
++			stderr.Reset()
++			code = run([]string{"grep", "--adapter", adapter, "--format", format, "--file", entries[0].Name(), "OpenAI"}, &stdout, &stderr)
++			if code != 0 || !strings.Contains(stdout.String(), "OpenAI") || !strings.Contains(stdout.String(), "Desk lamp") || !strings.Contains(stdout.String(), "shipping") || !strings.Contains(stdout.String(), "[FULL_NAME_1]") {
++				t.Fatalf("grep code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++			}
++			if strings.Contains(stdout.String(), "Иванов Иван Иванович") {
++				t.Fatalf("grep stdout retained adjacent PII: %s", stdout.String())
++			}
++		})
++	}
++}
++
++func TestRunQProductionEntryRefusesMalformedRecordWithoutOutputOrCache(t *testing.T) {
++	// This proves a projected non-text record fails closed at q before stdout or cache side effects.
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++	bin := t.TempDir()
++	writeExecutable(t, filepath.Join(bin, "mac-chrome-session"), `printf '%s\n' '{"matched":1,"skip":0,"take":100,"returned":1,"items":[{"id":"p-1","title":{"email":"raw@example.com"}}]}'`)
++	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
++	adapter := writeAdapter(t, home)
++	var stdout, stderr bytes.Buffer
++	code := run([]string{"q", "--adapter", adapter, "--format", "json", `list(take=1) { id title }`}, &stdout, &stderr)
++	if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "TRANSPORT_RESPONSE_INVALID") || strings.Contains(stderr.String(), "raw@example.com") {
++		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++	}
++	cacheRoot := filepath.Join(home, "Library", "Application Support", "mac-infra", "browser-site-cache")
++	if entries, err := os.ReadDir(cacheRoot); err == nil && len(entries) != 0 {
++		t.Fatalf("malformed record reached cache: %v", entries)
++	}
++}
++
++func TestRunGrepProductionEntryRefusesCacheContainingRawPII(t *testing.T) {
++	// This proves grep validates depersonalization instead of treating secret-only validation as sufficient.
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++	adapter := writeAdapter(t, home)
++	directory := filepath.Join(home, "Library", "Application Support", "mac-infra", "browser-site-cache", "marketplace")
++	if err := os.MkdirAll(directory, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(directory, "query-raw-pii.jsonl"), []byte(`{"id":"p-1","title":"alexey.petrov@example.com"}`+"\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	var stdout, stderr bytes.Buffer
++	code := run([]string{"grep", "--adapter", adapter, "--format", "json", "--file", "query-raw-pii.jsonl", "example"}, &stdout, &stderr)
++	if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "SENSITIVE_RESPONSE_REFUSED") || strings.Contains(stderr.String(), "alexey.petrov@example.com") {
++		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
++	}
++}
++
+ func TestRunMProductionEntryRefusesAndPreviewsWithoutDispatchThenRequiresConfirm(t *testing.T) {
+ 	home := t.TempDir()
+ 	t.Setenv("HOME", home)
+@@ -843,6 +993,41 @@ func writeAdapterWith(t *testing.T, directory, paginationKind string, maxPages i
+ 	return path
+ }
+ 
++func writeAdapterWithFields(t *testing.T, directory string, fields []string) string {
++	t.Helper()
++	path := writeAdapter(t, directory)
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var adapter map[string]any
++	if err := json.Unmarshal(data, &adapter); err != nil {
++		t.Fatal(err)
++	}
++	definitions := make(map[string]any, len(fields))
++	for _, field := range fields {
++		definitions[field] = map[string]any{"source": "text"}
++	}
++	adapter["template"].(map[string]any)["fields"] = definitions
++	data, err = json.Marshal(adapter)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, data, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
++
++func assertDepersonalized(t *testing.T, data []byte, rawValues []string) {
++	t.Helper()
++	for _, raw := range rawValues {
++		if bytes.Contains(data, []byte(raw)) {
++			t.Fatalf("personal data %q escaped: %s", raw, data)
++		}
++	}
++}
++
+ func writeExecutable(t *testing.T, path, body string) {
+ 	t.Helper()
+ 	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body+"\n"), 0o700); err != nil {
+diff --git a/internal/browserfacade/cache.go b/internal/browserfacade/cache.go
+index 0361096..c21e8b0 100644
+--- a/internal/browserfacade/cache.go
++++ b/internal/browserfacade/cache.go
+@@ -9,11 +9,14 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"io/fs"
++	"maps"
+ 	"os"
+ 	"path/filepath"
+ 	"regexp"
+ 	"sort"
+ 	"strings"
++
++	"github.com/relux-works/mac-infra/internal/docsanitize"
+ )
+ 
+ type Cache struct {
+@@ -336,5 +339,12 @@ func validateCacheRecord(record map[string]string) error {
+ 			return coded("SENSITIVE_RESPONSE_REFUSED", "cache contained unsanitized material")
+ 		}
+ 	}
++	sanitized, _, err := docsanitize.SanitizeRecords([]map[string]string{record})
++	if err != nil {
++		return coded("SENSITIVE_RESPONSE_UNKNOWN", "cache record could not be safely depersonalized")
++	}
++	if len(sanitized) != 1 || !maps.Equal(sanitized[0], record) {
++		return coded("SENSITIVE_RESPONSE_REFUSED", "cache contained personal data")
++	}
+ 	return nil
+ }
+diff --git a/internal/browserfacade/facade.go b/internal/browserfacade/facade.go
+index 38c125a..7dc17d3 100644
+--- a/internal/browserfacade/facade.go
++++ b/internal/browserfacade/facade.go
+@@ -17,6 +17,7 @@ import (
+ 
+ 	"github.com/relux-works/mac-infra/internal/browserquery"
+ 	"github.com/relux-works/mac-infra/internal/browsersession"
++	"github.com/relux-works/mac-infra/internal/docsanitize"
+ )
+ 
+ const maximumScannedItems = 1000
+@@ -354,6 +355,10 @@ func (f Facade) list(ctx context.Context, adapter Adapter, statement Statement)
+ 	start := min(skip, len(collected))
+ 	end := min(start+take, len(collected))
+ 	items := append([]map[string]string(nil), collected[start:end]...)
++	items, _, err = docsanitize.SanitizeRecords(items)
++	if err != nil {
++		return ListResult{}, coded("SENSITIVE_RESPONSE_UNKNOWN", "browser records could not be safely depersonalized")
++	}
+ 	cacheFile, err := f.Cache.Write(adapter.Name, statementKey(statement), items)
+ 	if err != nil {
+ 		return ListResult{}, err
+diff --git a/internal/browserfacade/outbound.go b/internal/browserfacade/outbound.go
+index ee8ef06..2cddab0 100644
+--- a/internal/browserfacade/outbound.go
++++ b/internal/browserfacade/outbound.go
+@@ -10,6 +10,8 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"unicode/utf8"
++
++	"github.com/relux-works/mac-infra/internal/docsanitize"
+ )
+ 
+ // OutboundState is the single normalized decision vocabulary for anything
+@@ -84,6 +86,9 @@ func scanOutbound(raw string, depth int) OutboundDecision {
+ 	if depth > maximumNormalizationDepth || len(raw) > maximumOutboundBytes || !utf8.ValidString(raw) || hasAmbiguousControl(raw) {
+ 		return OutboundDecision{State: OutboundUnknown}
+ 	}
++	if docsanitize.IsPlaceholder(raw) {
++		return OutboundDecision{State: OutboundClean, Value: raw}
++	}
+ 	redacted, remainder, urlState := sanitizeOutboundURLs(raw, depth)
+ 	if urlState == OutboundRefused || urlState == OutboundUnknown {
+ 		return OutboundDecision{State: urlState}
+diff --git a/internal/browserfacade/outbound_test.go b/internal/browserfacade/outbound_test.go
+index 2f87333..5355b5a 100644
+--- a/internal/browserfacade/outbound_test.go
++++ b/internal/browserfacade/outbound_test.go
+@@ -199,6 +199,19 @@ func TestNormalizationHelpersBoundEscapesAndSensitiveNames(t *testing.T) {
+ 	}
+ }
+ 
++func TestEnforceOutboundAdmitsOnlyCanonicalDocumentSanitizerPlaceholders(t *testing.T) {
++	// This proves the composed boundary admits its own safe token without widening malformed bracket-shaped input.
++	decision, err := EnforceOutbound("[EMAIL_1]")
++	if err != nil || decision.State != OutboundClean || decision.Value != "[EMAIL_1]" {
++		t.Fatalf("canonical placeholder decision=%#v err=%v", decision, err)
++	}
++	for _, value := range []string{"[EMAIL]", "[email_1]", "[EMAIL_1] trailing"} {
++		if _, err := EnforceOutbound(value); err == nil {
++			t.Fatalf("noncanonical placeholder admitted: %q", value)
++		}
++	}
++}
++
+ func codeOrInternal(code string) string {
+ 	if code == "" {
+ 		return "INTERNAL_ERROR"
+diff --git a/internal/docsanitize/sanitize.go b/internal/docsanitize/sanitize.go
+index d68fa3d..2fc7082 100644
+--- a/internal/docsanitize/sanitize.go
++++ b/internal/docsanitize/sanitize.go
+@@ -10,6 +10,7 @@ import (
+ 	"strings"
+ 	"time"
+ 	"unicode"
++	"unicode/utf8"
+ )
+ 
+ var (
+@@ -83,22 +84,64 @@ func Process(ctx context.Context, pathName string, options Options) (Result, err
+ 
+ func SanitizeText(text, inputFormat string, customValues []string) (string, map[string]CategoryStats, []string) {
+ 	redactor := newRedactor()
++	text, structured := sanitizeTextWithRedactor(text, inputFormat, customValues, redactor)
++	warnings := make([]string, 0, 2)
++	if strings.EqualFold(inputFormat, "json") && !structured {
++		warnings = append(warnings, "JSON parsing failed; content was sanitized as plain text")
++	}
++	warnings = append(warnings, "heuristic redaction can miss uncommon identifiers or context-only personal data; review sanitized output before external disclosure")
++	return text, redactor.statsSnapshot(), warnings
++}
++
++// SanitizeRecords depersonalizes string records with one shared placeholder
++// namespace while preserving record order, field names, and non-PII values.
++func SanitizeRecords(records []map[string]string) ([]map[string]string, map[string]CategoryStats, error) {
++	redactor := newRedactor()
++	result := make([]map[string]string, len(records))
++	for recordIndex, record := range records {
++		sanitized := make(map[string]string, len(record))
++		for field, value := range record {
++			if !utf8.ValidString(field) || !utf8.ValidString(value) {
++				return nil, nil, fmt.Errorf("record %d contains invalid UTF-8", recordIndex)
++			}
++			if category := classifySensitiveHeader(field); category != "" {
++				sanitized[field] = redactor.replace(category, value)
++				continue
++			}
++			sanitized[field] = redactCommonPatterns(value, redactor)
++		}
++		result[recordIndex] = sanitized
++	}
++	return result, redactor.statsSnapshot(), nil
++}
++
++// IsPlaceholder reports whether value is an exact placeholder emitted by this package.
++func IsPlaceholder(value string) bool {
++	return placeholderPattern.MatchString(value)
++}
++
++func sanitizeTextWithRedactor(text, inputFormat string, customValues []string, redactor *redactor) (string, bool) {
++	structuredOK := true
+ 	text = strings.ReplaceAll(text, "\r\n", "\n")
+ 	text = strings.ReplaceAll(text, "\r", "\n")
+ 	text = strings.ReplaceAll(text, "\u2028", "\n")
+ 	text = strings.ReplaceAll(text, "\u2029", "\n")
+ 	text = redactCustomValues(text, customValues, redactor)
+-	warnings := make([]string, 0)
+ 	if strings.EqualFold(inputFormat, "json") {
+-		structured, ok := redactJSON(text, redactor)
++		redacted, ok := redactJSON(text, redactor)
+ 		if ok {
+-			text = structured
++			text = redacted
+ 		} else {
+-			warnings = append(warnings, "JSON parsing failed; content was sanitized as plain text")
++			structuredOK = false
+ 		}
+ 	}
+ 	text = redactTSVTables(text, redactor)
+ 	text = redactMarkdownTables(text, redactor)
++	text = redactCommonPatterns(text, redactor)
++	return text, structuredOK
++}
++
++func redactCommonPatterns(text string, redactor *redactor) string {
+ 	for _, field := range fieldPatterns {
+ 		text = replaceCapture(text, field.pattern, 2, field.category, redactor, nil)
+ 	}
+@@ -115,8 +158,7 @@ func SanitizeText(text, inputFormat string, customValues []string) (string, map[
+ 	text = replaceCapture(text, cellName, 2, "full_name", redactor, nil)
+ 	text = replaceCapture(text, initialLineName, 1, "full_name", redactor, nil)
+ 	text = replaceCapture(text, initialCellName, 2, "full_name", redactor, nil)
+-	warnings = append(warnings, "heuristic redaction can miss uncommon identifiers or context-only personal data; review sanitized output before external disclosure")
+-	return text, redactor.statsSnapshot(), warnings
++	return text
+ }
+ 
+ type redactor struct {
+@@ -387,6 +429,7 @@ func classifyColumns(fields []string) map[int]string {
+ }
+ 
+ func classifySensitiveHeader(value string) string {
++	value = splitCamelCase(value)
+ 	normalized := strings.ToLower(strings.TrimSpace(value))
+ 	normalized = strings.NewReplacer("_", " ", "-", " ", ".", " ", "/", " ", "(", " ", ")", " ").Replace(normalized)
+ 	normalized = strings.Join(strings.Fields(normalized), " ")
+@@ -402,9 +445,6 @@ func classifySensitiveHeader(value string) string {
+ 	if strings.Contains(normalized, "телефон") || strings.Contains(normalized, "мобильн") || normalized == "phone" || normalized == "mobile" || normalized == "phone number" {
+ 		return "phone"
+ 	}
+-	if strings.Contains(normalized, "адрес") || strings.Contains(normalized, "address") {
+-		return "address"
+-	}
+ 	if strings.Contains(normalized, "дата рождения") || strings.Contains(normalized, "date of birth") || normalized == "dob" || normalized == "birth date" {
+ 		return "date_of_birth"
+ 	}
+@@ -417,7 +457,16 @@ func classifySensitiveHeader(value string) string {
+ 	if normalized == "инн" || normalized == "tax id" || normalized == "tin" || strings.Contains(normalized, "taxpayer id") {
+ 		return "tax_id"
+ 	}
+-	if normalized == "фио" || normalized == "фио полностью" || strings.Contains(normalized, "фамилия") || normalized == "name" || normalized == "full name" || normalized == "first name" || normalized == "last name" || normalized == "middle name" || normalized == "author" || normalized == "author name" || normalized == "автор" || normalized == "имя автора" || normalized == "фио автора" {
++	if normalized == "card" || strings.Contains(normalized, "payment card") || strings.Contains(normalized, "card number") {
++		return "payment_card"
++	}
++	if normalized == "ip" || strings.Contains(normalized, "ip address") {
++		return "ip_address"
++	}
++	if normalized == "адрес" || normalized == "адрес места жительства" || normalized == "почтовый адрес" || normalized == "address" || normalized == "home address" || normalized == "postal address" {
++		return "address"
++	}
++	if normalized == "фио" || normalized == "фио полностью" || strings.Contains(normalized, "фамилия") || normalized == "full name" || normalized == "first name" || normalized == "last name" || normalized == "middle name" || normalized == "author name" || normalized == "имя автора" || normalized == "фио автора" {
+ 		return "full_name"
+ 	}
+ 	if strings.Contains(normalized, "password") || strings.Contains(normalized, "пароль") || strings.Contains(normalized, "api key") || strings.Contains(normalized, "access token") || strings.Contains(normalized, "refresh token") || normalized == "secret" || normalized == "authorization" {
+@@ -426,6 +475,19 @@ func classifySensitiveHeader(value string) string {
+ 	return ""
+ }
+ 
++func splitCamelCase(value string) string {
++	var result strings.Builder
++	var previous rune
++	for index, character := range value {
++		if index > 0 && unicode.IsUpper(character) && (unicode.IsLower(previous) || unicode.IsDigit(previous)) {
++			result.WriteByte(' ')
++		}
++		result.WriteRune(character)
++		previous = character
++	}
++	return result.String()
++}
++
+ func replacePattern(text string, pattern *regexp.Regexp, category string, redactor *redactor, validator func(string) bool) string {
+ 	return pattern.ReplaceAllStringFunc(text, func(match string) string {
+ 		if validator != nil && !validator(match) {
+diff --git a/internal/docsanitize/sanitize_test.go b/internal/docsanitize/sanitize_test.go
+index b2944f2..c63c804 100644
+--- a/internal/docsanitize/sanitize_test.go
++++ b/internal/docsanitize/sanitize_test.go
+@@ -57,6 +57,79 @@ func TestSanitizeTextRedactsCommonPersonalData(t *testing.T) {
+ 	}
+ }
+ 
++func TestSanitizeRecordsDepersonalizesStructuredFieldsWithStablePlaceholders(t *testing.T) {
++	// This proves structured records share placeholders across rows while ordinary fields remain byte-for-byte unchanged.
++	records := []map[string]string{
++		{
++			"id":          "p-1",
++			"title":       "Clock Integrity",
++			"price":       "$20",
++			"fullName":    "Иванов Иван Иванович",
++			"email":       "alexey.petrov@example.com",
++			"phone":       "+7 (999) 123-45-67",
++			"homeAddress": "г. Москва, ул. Тестовая, д. 1",
++			"dateOfBirth": "01.02.1990",
++			"passport":    "45 10 123456",
++			"snils":       "112-233-445 95",
++			"taxId":       "123456789012",
++			"paymentCard": "4111 1111 1111 1111",
++			"ipAddress":   "192.168.10.22",
++		},
++		{"id": "p-2", "notes": "Contact alexey.petrov@example.com", "title": "Line one\r\nLine two\u2028"},
++	}
++
++	output, stats, err := SanitizeRecords(records)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, sensitive := range []string{"Иванов Иван Иванович", "alexey.petrov@example.com", "+7 (999) 123-45-67", "г. Москва", "01.02.1990", "45 10 123456", "112-233-445 95", "123456789012", "4111 1111 1111 1111", "192.168.10.22"} {
++		data, _ := json.Marshal(output)
++		if strings.Contains(string(data), sensitive) {
++			t.Fatalf("structured output retained %q: %s", sensitive, data)
++		}
++	}
++	if output[0]["id"] != "p-1" || output[0]["title"] != "Clock Integrity" || output[0]["price"] != "$20" || output[1]["title"] != "Line one\r\nLine two\u2028" {
++		t.Fatalf("ordinary fields changed: %#v", output)
++	}
++	if output[0]["email"] != "[EMAIL_1]" || output[1]["notes"] != "Contact [EMAIL_1]" {
++		t.Fatalf("placeholder stability lost: %#v", output)
++	}
++	for _, category := range []string{"full_name", "email", "phone", "address", "date_of_birth", "passport", "snils", "tax_id", "payment_card", "ip_address"} {
++		if stats[category].Occurrences == 0 {
++			t.Fatalf("missing %s stats: %#v", category, stats)
++		}
++	}
++}
++
++func TestSanitizeRecordsPreservesAmbiguousFieldsWithoutValueLevelPII(t *testing.T) {
++	// This proves generic product/organization fields need value-level PII evidence while an adjacent true full name is still redacted.
++	records := []map[string]string{{
++		"name":        "Desk lamp",
++		"addressType": "shipping",
++		"author":      "OpenAI",
++		"fullName":    "Иванов Иван Иванович",
++	}}
++
++	output, _, err := SanitizeRecords(records)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if output[0]["name"] != "Desk lamp" || output[0]["addressType"] != "shipping" || output[0]["author"] != "OpenAI" {
++		t.Fatalf("ambiguous non-PII fields changed: %#v", output[0])
++	}
++	if output[0]["fullName"] != "[FULL_NAME_1]" {
++		t.Fatalf("adjacent true PII was not redacted: %#v", output[0])
++	}
++}
++
++func TestSanitizeRecordsRefusesInvalidUTF8WithoutPartialResult(t *testing.T) {
++	// This proves lossy structured input is rejected rather than normalized into a plausible partial record.
++	output, stats, err := SanitizeRecords([]map[string]string{{"id": "safe"}, {"title": string([]byte{0xff})}})
++	if err == nil || output != nil || stats != nil {
++		t.Fatalf("output=%#v stats=%#v err=%v", output, stats, err)
++	}
++}
++
+ func TestSanitizeTextUsesSensitiveTSVColumns(t *testing.T) {
+ 	input := strings.Join([]string{
+ 		"ФИО\tТелефон\tЧто сделал автор",
