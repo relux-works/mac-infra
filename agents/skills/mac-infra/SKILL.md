@@ -7,10 +7,20 @@ description: >
   video/display smoothness loss, WindowServer/GPU stutter, Docker/VM slideshow
   symptoms, broad CPU, memory, thermal, and process load, authenticated Safari
   and Google Chrome browser-session inspection/harvesting, privacy-safe document
-  intake, PII redaction, and related maintenance tasks.
+  intake, PII redaction, fseventsd memory/CPU bloat from slow FSEvents
+  consumers or high file-event volume, and related maintenance tasks.
 triggers:
   - mac load
   - load profile
+  - fseventsd
+  - fsevents
+  - FSEvents bloat
+  - fseventsd memory
+  - fseventsd CPU
+  - mac slow
+  - mac sluggish
+  - мак тормозит
+  - мак подтормаживает
   - CPU profile
   - memory profile
   - disk profile
@@ -351,8 +361,85 @@ mac-load-profile anyconnect
 mac-load-profile anyconnect --logs
 ```
 
+- For fseventsd memory or CPU bloat, see the FSEvents Bloat Workflow below:
+
+```bash
+mac-load-profile fsevents
+```
+
 - `mac-load-profile` is read-only. It must not stop, restart, kill, or mutate
   processes.
+
+## FSEvents Bloat Workflow
+
+Use this when the Mac is sluggish and `fseventsd` shows up with a large RSS
+(gigabytes) or sustained CPU in `mac-load-profile snapshot`. fseventsd buffers
+events for slow consumers and never releases that memory on its own; it also
+burns CPU in proportion to file-event volume. Both were observed together in a
+real incident: Colima's `mountInotify` forwarder watched the whole `$HOME` for
+a week while git-heavy `go test` loops produced ~130k file operations per
+second, and fseventsd grew to 40 GB RSS at 100% CPU.
+
+- Start with the read-only diagnostic. It needs no sudo:
+
+```bash
+mac-load-profile fsevents
+mac-load-profile fsevents --json
+```
+
+It reports fseventsd pid/RSS/CPU against thresholds (warn 2 GB, critical
+4 GB, CPU 50%), known FSEvents consumers and event generators from a pattern
+allowlist (Colima `--inotify` daemon, Spotlight, Time Machine, iCloud Drive,
+git fsmonitor, watchman, third-party sync agents, running `go test`), every
+`~/.colima/*/colima.yaml` with `mountInotify` and `mounts`, and the size of
+`go-build*` leftovers under the temp dir. fseventsd clients cannot be
+enumerated without root, so the consumer list is a heuristic, not a client
+table.
+
+- Fix the input first. For Colima, set `mountInotify: false` unless a container
+  really needs host file events; if it does, list only those directories under
+  `mounts:` (an empty `mounts: []` means the whole `$HOME`), then
+  `colima restart`. Remove `go-build*` leftovers from finished or killed test
+  runs yourself; mac-infra never deletes them.
+
+- Restart fseventsd through the root daemon only when RSS is at or above the
+  threshold. The CLI refuses below it; `--force` overrides:
+
+```bash
+mac-infra-core fseventsd-restart
+mac-infra-core fseventsd-restart --force
+```
+
+The daemon action is fixed to `/bin/launchctl kickstart -k
+system/com.apple.fseventsd` and reports before/after pid and RSS. It needs
+the installed daemon to be updated from a build that includes the action:
+run `mac-infra-core install` after `scripts/setup.sh`.
+
+- Keep a watchdog so the next bloat is caught at 4 GB, not 40:
+
+```bash
+mac-infra-core fseventsd-watchdog enable
+mac-infra-core fseventsd-watchdog enable --threshold-gb 3 --interval 5m
+mac-infra-core fseventsd-watchdog enable --auto-restart
+mac-infra-core fseventsd-watchdog status
+mac-infra-core fseventsd-watchdog disable
+```
+
+It installs the current-user LaunchAgent
+`works.relux.mac-infra-fseventsd-watchdog`, which runs `mac-infra-core
+_fseventsd-check` every 10 minutes by default. Over the threshold it posts a
+macOS notification (re-notifies at most once per six intervals while still
+over). `--auto-restart` is opt-in and calls the same guarded daemon action;
+without it the watchdog only notifies. Settings live in
+`~/Library/Application Support/mac-infra/fseventsd-watchdog.json`, not in
+the plist. `disable` boots the agent out and removes the plist but keeps the
+state file for `status`.
+
+- Never renice, `taskpolicy -b`, suspend, or otherwise throttle fseventsd.
+  It drains a kernel ring buffer; a starved daemon drops events and every
+  FSEvents client (Spotlight, Time Machine, Finder, iCloud) responds with a
+  full volume rescan, which costs far more than the CPU you tried to save.
+  Reduce the event volume or the consumer count instead.
 
 ## Video Smoothness Workflow
 

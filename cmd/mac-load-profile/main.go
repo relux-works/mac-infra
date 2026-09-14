@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/relux-works/mac-infra/internal/anyconnect"
+	"github.com/relux-works/mac-infra/internal/fsevents"
 	"github.com/relux-works/mac-infra/internal/loadprofile"
 )
 
@@ -44,6 +46,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runTunnel(args[1:], stdout, stderr)
 	case "anyconnect":
 		return runAnyConnect(args[1:], stdout, stderr)
+	case "fsevents":
+		return runFSEvents(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "mac-load-profile %s %s %s\n", Version, Commit, BuildDate)
 		return 0
@@ -288,6 +292,51 @@ func runAnyConnect(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runFSEvents(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("fsevents", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	defaults := fsevents.DefaultThresholds()
+	rssWarnGB := fs.Float64("rss-warn-gb", float64(defaults.RSSWarnBytes)/(1024*1024*1024), "fseventsd RSS warning threshold in GB")
+	rssCriticalGB := fs.Float64("rss-critical-gb", float64(defaults.RSSCriticalBytes)/(1024*1024*1024), "fseventsd RSS critical threshold in GB")
+	cpuWarn := fs.Float64("cpu-warn", defaults.CPUWarnPercent, "fseventsd CPU warning threshold in percent")
+	tempDir := fs.String("temp-dir", os.TempDir(), "directory scanned for go-build* leftovers")
+	asJSON := fs.Bool("json", false, "print the diagnostic as JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *rssWarnGB <= 0 || *rssCriticalGB <= 0 || *rssCriticalGB < *rssWarnGB {
+		fmt.Fprintln(stderr, "fsevents: thresholds must be positive and rss-critical-gb must be >= rss-warn-gb")
+		return 2
+	}
+
+	processes, err := collectProcesses()
+	if err != nil {
+		fmt.Fprintf(stderr, "fsevents profile failed: %v\n", err)
+		return 1
+	}
+	processes = withoutProfilerProcess(processes)
+
+	thresholds := fsevents.Thresholds{
+		RSSWarnBytes:       int64(*rssWarnGB * 1024 * 1024 * 1024),
+		RSSCriticalBytes:   int64(*rssCriticalGB * 1024 * 1024 * 1024),
+		CPUWarnPercent:     *cpuWarn,
+		TempBuildWarnBytes: defaults.TempBuildWarnBytes,
+	}
+	home, _ := os.UserHomeDir()
+	diagnostic := fsevents.Analyze(processes, fsevents.ScanColimaProfiles(home), fsevents.ScanTempBuild(*tempDir), thresholds)
+	if *asJSON {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(diagnostic); err != nil {
+			fmt.Fprintf(stderr, "fsevents profile failed: encode: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	fsevents.PrintDiagnostic(stdout, diagnostic)
+	return 0
+}
+
 func collectProcesses() ([]loadprofile.Process, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -433,5 +482,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  mac-load-profile inspect [--children=true] [--sample SECONDS] PID_OR_QUERY")
 	fmt.Fprintln(w, "  mac-load-profile tunnel [--hot-cpu PERCENT] [--sample SECONDS]")
 	fmt.Fprintln(w, "  mac-load-profile anyconnect [--logs]")
+	fmt.Fprintln(w, "  mac-load-profile fsevents [--json] [--rss-warn-gb N] [--rss-critical-gb N] [--cpu-warn PERCENT] [--temp-dir DIR]")
 	fmt.Fprintln(w, "  mac-load-profile version")
 }

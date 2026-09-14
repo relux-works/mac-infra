@@ -8,12 +8,16 @@ const (
 	ActionCleanupAnyConnect      Action = "cleanup_anyconnect"
 	ActionSleepPreventionEnable  Action = "sleep_prevention_enable"
 	ActionSleepPreventionDisable Action = "sleep_prevention_disable"
+	ActionRestartFSEvents        Action = "restart_fsevents"
 )
 
 type Request struct {
 	Action          Action `json:"action"`
 	IncludeUSBAudio bool   `json:"include_usb_audio,omitempty"`
 	Force           bool   `json:"force,omitempty"`
+	// RSSThresholdBytes guards restart_fsevents: below it the daemon refuses
+	// unless Force is set. Zero selects the package default.
+	RSSThresholdBytes int64 `json:"rss_threshold_bytes,omitempty"`
 }
 
 type Response struct {

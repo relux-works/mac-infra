@@ -246,6 +246,13 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 			response.OK = false
 			response.Error = err.Error()
 		}
+	case ActionRestartFSEvents:
+		results, err := restartFSEvents(request.Force, request.RSSThresholdBytes)
+		response.Commands = results
+		if err != nil {
+			response.OK = false
+			response.Error = err.Error()
+		}
 	default:
 		response.OK = false
 		response.Error = fmt.Sprintf("unsupported mac-infra-core action %q", request.Action)

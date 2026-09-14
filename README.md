@@ -8,7 +8,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | --- | --- | --- | --- |
 | `mac-audio-reset` | Diagnose and reset CoreAudio glitches without rebooting the Mac | `mac-audio-reset diagnose`, `mac-audio-reset reset --dry-run`, `mac-audio-reset reset` | none; diagnostic output only |
 | `mac-audio-sweep` | Generate and play local frequency sweeps without streaming-platform compression or silent sample-rate mismatch | `mac-audio-sweep device`, `mac-audio-sweep tui`, `mac-audio-sweep tui --rerender`, `mac-audio-sweep generate --out .temp/mac-audio-sweep/sweep.wav` | cached TUI WAVs in `.temp/mac-audio-sweep/cache/*.wav`; one-shot/generated WAVs under `.temp/mac-audio-sweep/` unless `--out` points elsewhere |
-| `mac-load-profile` | Capture read-only CPU, memory, process, thermal, pressure, disk, and network diagnostics | `mac-load-profile capture`, `mac-load-profile snapshot`, `mac-load-profile inspect sing-box`, `mac-load-profile tunnel`, `mac-load-profile anyconnect` | `.temp/mac-load-profile/capture-*`, optional `sample-*.txt` |
+| `mac-load-profile` | Capture read-only CPU, memory, process, thermal, pressure, disk, and network diagnostics | `mac-load-profile capture`, `mac-load-profile snapshot`, `mac-load-profile inspect sing-box`, `mac-load-profile tunnel`, `mac-load-profile anyconnect`, `mac-load-profile fsevents` | `.temp/mac-load-profile/capture-*`, optional `sample-*.txt` |
 | `mac-video-profile` | Diagnose macOS video/display smoothness loss, WindowServer/GPU pressure, and Docker/VM rendering load | `mac-video-profile snapshot`, `mac-video-profile capture --logs` | `.temp/mac-video-profile/capture-*` |
 | `mac-disk-profile` | Profile disk usage and explain heavy paths without deleting files | `mac-disk-profile scan PATH`, `mac-disk-profile top PATH`, `mac-disk-profile explain PATH` | optional JSON artifact via `--json PATH` |
 | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
@@ -16,7 +16,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-chrome-session` | Guarded exact Chrome tab access, explicit exact-tab handoff, trusted form input and native file upload, sealed authenticated same-origin downloads and Slack reads, bounded extraction, and finite named Chrome/Safari heartbeats without focus churn | `mac-chrome-session list`, guarded `run-js`/`fetch-file`/`slack-read`/`extract`, explicit `focus`, `trusted-input`, or `upload` with exact IDs/origin plus `--human-authorized`; upload/trusted input and protected fetch requests arrive through `--request-stdin`; `heartbeat start\|restart\|status\|stop\|list`, exact `close` | atomic private `run-js --out` and `fetch-file --out` artifacts; protected resource URLs, trusted values, and upload source paths stay out of argv and normal output; upload uses a short-lived private staging directory and reports only guarded origin, accepted basenames, and count; other private outputs and heartbeat state use the paths described below |
 | `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected and sanitized `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no cookies, browser storage, authorization material, or cursor/session state |
 | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
-| `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display LaunchAgent under `~/Library/LaunchAgents/`; idle-lock restore snapshot under `~/Library/Application Support/mac-infra/` |
+| `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
 | `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
 | `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
@@ -216,6 +216,31 @@ mac-load-profile tunnel
 ```
 
 `capture` writes a broad read-only artifact bundle under `.temp/mac-load-profile/capture-*`. It includes process, CPU, memory, pressure, thermal, disk, network, power assertion, route, and OS/hardware evidence. It does not stop, restart, kill, or mutate processes. Use `--logs` only when recent system pressure logs are needed.
+
+## FSEvents Bloat Workflow
+
+Use this when `fseventsd` shows gigabytes of RSS or sustained CPU. It buffers
+events for slow consumers (Colima `mountInotify`, sync agents) and never frees
+that memory on its own; CPU tracks file-event volume (git-heavy test loops).
+
+```bash
+mac-load-profile fsevents
+mac-infra-core fseventsd-restart
+mac-infra-core fseventsd-watchdog enable
+mac-infra-core fseventsd-watchdog enable --auto-restart
+mac-infra-core fseventsd-watchdog status
+```
+
+`fsevents` is read-only and needs no sudo: it reports fseventsd against RSS/CPU
+thresholds, lists known consumers from a pattern allowlist, parses
+`~/.colima/*/colima.yaml` for `mountInotify`/`mounts`, and sizes `go-build*`
+leftovers. `fseventsd-restart` is an allowlisted root-daemon action
+(`launchctl kickstart -k system/com.apple.fseventsd`) that refuses below the
+4 GB threshold unless `--force` is given; update the installed daemon with
+`mac-infra-core install` first. The watchdog is a current-user LaunchAgent that
+checks every 10 minutes, notifies over the threshold, and restarts only with
+the opt-in `--auto-restart`. Do not renice or throttle fseventsd: dropped
+events make every FSEvents client rescan the volume.
 
 ## Video Smoothness Workflow
 

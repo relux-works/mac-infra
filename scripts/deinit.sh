@@ -12,7 +12,7 @@ Usage: ./scripts/deinit.sh
 
 Removes user-level mac-infra binary symlinks and global skill copies.
 Managed browser heartbeats are stopped before their executable is removed.
-The current-user display-sleep-prevention LaunchAgent is disabled when possible.
+The current-user display-sleep-prevention and fseventsd-watchdog LaunchAgents are disabled when possible.
 Run 'mac-infra-core uninstall' separately if the privileged daemon is installed.
 EOF
 }
@@ -53,6 +53,9 @@ if [[ -x "$BIN_DIR/mac-infra-core" ]]; then
   }
   "$BIN_DIR/mac-infra-core" display-sleep-prevention disable || {
     echo "WARNING: could not disable display-sleep-prevention before removing the CLI" >&2
+  }
+  "$BIN_DIR/mac-infra-core" fseventsd-watchdog disable || {
+    echo "WARNING: could not disable fseventsd-watchdog before removing the CLI" >&2
   }
 fi
 

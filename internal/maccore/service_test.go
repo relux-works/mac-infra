@@ -232,6 +232,14 @@ func withFakeCoreCommand(t *testing.T, logPath string) {
 	})
 }
 
+func bytesReadOrEmpty(path string) []byte {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
 func readCommandLog(t *testing.T, path string) string {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -285,6 +293,30 @@ func TestCoreCommandHelperProcess(t *testing.T) {
 		if strings.Contains(command, "/bin/launchctl bootout ") && os.Getenv("MAC_INFRA_TEST_LAUNCHCTL_BOOTOUT") == "missing" {
 			fmt.Fprintln(os.Stderr, "service not found")
 			os.Exit(3)
+		}
+	case "/bin/ps":
+		if os.Getenv("MAC_INFRA_TEST_PS_FAIL") == "1" {
+			fmt.Fprintln(os.Stderr, "ps unavailable")
+			os.Exit(9)
+		}
+		// Sequenced outputs let a test observe before/after restart states.
+		outputs := strings.Split(os.Getenv("MAC_INFRA_TEST_PS_OUTPUTS"), "|")
+		counterPath := os.Getenv("MAC_INFRA_TEST_PS_COUNTER")
+		index := 0
+		if counterPath != "" {
+			if raw, err := os.ReadFile(counterPath); err == nil {
+				index = len(raw)
+			}
+			_ = os.WriteFile(counterPath, append(bytesReadOrEmpty(counterPath), '.'), 0o600)
+		}
+		if index >= len(outputs) {
+			index = len(outputs) - 1
+		}
+		fmt.Fprintln(os.Stdout, strings.ReplaceAll(outputs[index], ";", "\n"))
+	case "/usr/bin/osascript":
+		if os.Getenv("MAC_INFRA_TEST_OSASCRIPT_FAIL") == "1" {
+			fmt.Fprintln(os.Stderr, "osascript unavailable")
+			os.Exit(9)
 		}
 	case "/usr/bin/pmset":
 		if os.Getenv("MAC_INFRA_TEST_PMSET_FAIL_COMMAND") == command {

@@ -29,6 +29,14 @@ var (
 	disableDisplaySleepPrevention = maccore.DisableDisplaySleepPrevention
 	enableIdleLockPrevention      = maccore.EnableIdleLockPrevention
 	disableIdleLockPrevention     = maccore.DisableIdleLockPrevention
+	inspectFSEventsDaemon         = maccore.InspectFSEventsDaemon
+	restartFSEvents               = maccore.RestartFSEvents
+	inspectFSEventsWatchdog       = maccore.InspectFSEventsWatchdog
+	enableFSEventsWatchdog        = maccore.EnableFSEventsWatchdog
+	disableFSEventsWatchdog       = maccore.DisableFSEventsWatchdog
+	runFSEventsWatchdogCheck      = maccore.RunFSEventsWatchdogCheck
+	defaultFSEventsWatchdogConfig = maccore.DefaultFSEventsWatchdogConfig
+	coreAvailable                 = maccore.Available
 )
 
 func main() {
@@ -58,6 +66,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDisplaySleepPrevention(args[1:], stdout, stderr)
 	case "idle-lock-prevention":
 		return runIdleLockPrevention(args[1:], stdout, stderr)
+	case "fseventsd-restart":
+		return runFSEventsRestart(args[1:], stdout, stderr)
+	case "fseventsd-watchdog":
+		return runFSEventsWatchdog(args[1:], stdout, stderr)
+	case "_fseventsd-check":
+		return runFSEventsCheck(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "mac-infra-core %s %s %s\n", Version, Commit, BuildDate)
 		return 0
@@ -432,6 +446,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  mac-infra-core sleep-prevention enable|disable|status")
 	fmt.Fprintln(w, "  mac-infra-core display-sleep-prevention enable|disable|status")
 	fmt.Fprintln(w, "  mac-infra-core idle-lock-prevention enable|disable|status")
+	fmt.Fprintln(w, "  mac-infra-core fseventsd-restart [--force] [--threshold-gb N]")
+	fmt.Fprintln(w, "  mac-infra-core fseventsd-watchdog enable [--threshold-gb N] [--interval DURATION] [--auto-restart]")
+	fmt.Fprintln(w, "  mac-infra-core fseventsd-watchdog disable|status")
 	fmt.Fprintln(w, "  mac-infra-core version")
 }
 

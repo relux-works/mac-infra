@@ -32,6 +32,21 @@ func TestDeinitStopsManagedHeartbeatsBeforeRemovingCLI(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build mac-chrome-session: %v\n%s", err, output)
 	}
+	// The fseventsd watchdog LaunchAgent must be booted out and its plist
+	// removed before the mac-infra-core binary disappears.
+	coreCLI := filepath.Join(binDir, "mac-infra-core")
+	buildCore := exec.Command("go", "build", "-o", coreCLI, "./cmd/mac-infra-core")
+	buildCore.Dir = projectRoot
+	if output, err := buildCore.CombinedOutput(); err != nil {
+		t.Fatalf("build mac-infra-core: %v\n%s", err, output)
+	}
+	watchdogPlist := filepath.Join(home, "Library", "LaunchAgents", "works.relux.mac-infra-fseventsd-watchdog.plist")
+	if err := os.MkdirAll(filepath.Dir(watchdogPlist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(watchdogPlist, []byte("plist"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	stateDir := filepath.Join(home, browsersession.DefaultStateDir)
 	pinned := filepath.Join(stateDir, "bin", "mac-browser-session-test")
 	stableLauncher := filepath.Join(stateDir, "bin", browsersession.HeartbeatLauncherName)
@@ -84,7 +99,7 @@ func TestDeinitStopsManagedHeartbeatsBeforeRemovingCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deinit failed: %v\n%s", err, output)
 	}
-	for _, path := range []string{plist, state, logPath, pinned, stableLauncher, cli} {
+	for _, path := range []string{plist, state, logPath, pinned, stableLauncher, cli, coreCLI, watchdogPlist} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("managed artifact survived deinit: %s (err=%v)\n%s", path, err, output)
 		}
