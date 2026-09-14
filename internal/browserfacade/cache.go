@@ -9,11 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/relux-works/mac-infra/internal/docsanitize"
 )
 
 type Cache struct {
@@ -335,6 +338,13 @@ func validateCacheRecord(record map[string]string) error {
 		if err != nil || decision.State != OutboundClean || decision.Value != value {
 			return coded("SENSITIVE_RESPONSE_REFUSED", "cache contained unsanitized material")
 		}
+	}
+	sanitized, _, err := docsanitize.SanitizeRecords([]map[string]string{record})
+	if err != nil {
+		return coded("SENSITIVE_RESPONSE_UNKNOWN", "cache record could not be safely depersonalized")
+	}
+	if len(sanitized) != 1 || !maps.Equal(sanitized[0], record) {
+		return coded("SENSITIVE_RESPONSE_REFUSED", "cache contained personal data")
 	}
 	return nil
 }

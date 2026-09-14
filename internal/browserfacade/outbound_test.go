@@ -199,6 +199,19 @@ func TestNormalizationHelpersBoundEscapesAndSensitiveNames(t *testing.T) {
 	}
 }
 
+func TestEnforceOutboundAdmitsOnlyCanonicalDocumentSanitizerPlaceholders(t *testing.T) {
+	// This proves the composed boundary admits its own safe token without widening malformed bracket-shaped input.
+	decision, err := EnforceOutbound("[EMAIL_1]")
+	if err != nil || decision.State != OutboundClean || decision.Value != "[EMAIL_1]" {
+		t.Fatalf("canonical placeholder decision=%#v err=%v", decision, err)
+	}
+	for _, value := range []string{"[EMAIL]", "[email_1]", "[EMAIL_1] trailing"} {
+		if _, err := EnforceOutbound(value); err == nil {
+			t.Fatalf("noncanonical placeholder admitted: %q", value)
+		}
+	}
+}
+
 func codeOrInternal(code string) string {
 	if code == "" {
 		return "INTERNAL_ERROR"

@@ -91,6 +91,17 @@ targets, origins, or transport state. Semicolon-separated batches are parsed
 without shell evaluation. Compact list output is CSV-style with one header,
 followed by bounded metadata.
 
+After the independent secret boundary accepts the complete browser response,
+`list` applies the shared `internal/docsanitize` structured-record sanitizer to
+the complete projected result before cache persistence or public rendering.
+Recognized full names, email addresses, phone numbers, addresses, birth dates,
+passport/SNILS/tax identifiers, payment cards, and IP addresses become stable
+category placeholders within that result. Field names, record order, and
+non-PII values are preserved; ambiguous metadata fields such as product `name`,
+`addressType`, and application or organization `author` require value-level PII
+evidence before their values change. Malformed, lossy, or otherwise unsafely
+sanitizable records fail closed with no partial stdout or cache write.
+
 ## Cache-Scoped Search (`grep`)
 
 Successful `list` results are written as projected, sanitized `0600` JSONL
@@ -112,8 +123,10 @@ descriptor-rooted site directory; every facade-owned path component is checked
 before opening that root, and symlinked components are refused. An explicitly
 named final symlink returns `CACHE_SCOPE_REFUSED`; it is not skipped into an
 empty result. Files are capped at 4 MiB / 1,000 records, context at 5 lines, and
-matches at 100. A malformed or unsanitized cache is a refusal, not an empty
-search result.
+matches at 100. A malformed, secret-bearing, or non-depersonalized cache is a
+refusal, not an empty search result. `grep` never repairs cache records during a
+read and therefore returns only the canonical PII placeholders persisted by a
+successful `list` call.
 
 ## Guarded Mutations (`m`)
 

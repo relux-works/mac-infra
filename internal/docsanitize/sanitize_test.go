@@ -57,6 +57,79 @@ func TestSanitizeTextRedactsCommonPersonalData(t *testing.T) {
 	}
 }
 
+func TestSanitizeRecordsDepersonalizesStructuredFieldsWithStablePlaceholders(t *testing.T) {
+	// This proves structured records share placeholders across rows while ordinary fields remain byte-for-byte unchanged.
+	records := []map[string]string{
+		{
+			"id":          "p-1",
+			"title":       "Clock Integrity",
+			"price":       "$20",
+			"fullName":    "Иванов Иван Иванович",
+			"email":       "alexey.petrov@example.com",
+			"phone":       "+7 (999) 123-45-67",
+			"homeAddress": "г. Москва, ул. Тестовая, д. 1",
+			"dateOfBirth": "01.02.1990",
+			"passport":    "45 10 123456",
+			"snils":       "112-233-445 95",
+			"taxId":       "123456789012",
+			"paymentCard": "4111 1111 1111 1111",
+			"ipAddress":   "192.168.10.22",
+		},
+		{"id": "p-2", "notes": "Contact alexey.petrov@example.com", "title": "Line one\r\nLine two\u2028"},
+	}
+
+	output, stats, err := SanitizeRecords(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sensitive := range []string{"Иванов Иван Иванович", "alexey.petrov@example.com", "+7 (999) 123-45-67", "г. Москва", "01.02.1990", "45 10 123456", "112-233-445 95", "123456789012", "4111 1111 1111 1111", "192.168.10.22"} {
+		data, _ := json.Marshal(output)
+		if strings.Contains(string(data), sensitive) {
+			t.Fatalf("structured output retained %q: %s", sensitive, data)
+		}
+	}
+	if output[0]["id"] != "p-1" || output[0]["title"] != "Clock Integrity" || output[0]["price"] != "$20" || output[1]["title"] != "Line one\r\nLine two\u2028" {
+		t.Fatalf("ordinary fields changed: %#v", output)
+	}
+	if output[0]["email"] != "[EMAIL_1]" || output[1]["notes"] != "Contact [EMAIL_1]" {
+		t.Fatalf("placeholder stability lost: %#v", output)
+	}
+	for _, category := range []string{"full_name", "email", "phone", "address", "date_of_birth", "passport", "snils", "tax_id", "payment_card", "ip_address"} {
+		if stats[category].Occurrences == 0 {
+			t.Fatalf("missing %s stats: %#v", category, stats)
+		}
+	}
+}
+
+func TestSanitizeRecordsPreservesAmbiguousFieldsWithoutValueLevelPII(t *testing.T) {
+	// This proves generic product/organization fields need value-level PII evidence while an adjacent true full name is still redacted.
+	records := []map[string]string{{
+		"name":        "Desk lamp",
+		"addressType": "shipping",
+		"author":      "OpenAI",
+		"fullName":    "Иванов Иван Иванович",
+	}}
+
+	output, _, err := SanitizeRecords(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output[0]["name"] != "Desk lamp" || output[0]["addressType"] != "shipping" || output[0]["author"] != "OpenAI" {
+		t.Fatalf("ambiguous non-PII fields changed: %#v", output[0])
+	}
+	if output[0]["fullName"] != "[FULL_NAME_1]" {
+		t.Fatalf("adjacent true PII was not redacted: %#v", output[0])
+	}
+}
+
+func TestSanitizeRecordsRefusesInvalidUTF8WithoutPartialResult(t *testing.T) {
+	// This proves lossy structured input is rejected rather than normalized into a plausible partial record.
+	output, stats, err := SanitizeRecords([]map[string]string{{"id": "safe"}, {"title": string([]byte{0xff})}})
+	if err == nil || output != nil || stats != nil {
+		t.Fatalf("output=%#v stats=%#v err=%v", output, stats, err)
+	}
+}
+
 func TestSanitizeTextUsesSensitiveTSVColumns(t *testing.T) {
 	input := strings.Join([]string{
 		"ФИО\tТелефон\tЧто сделал автор",

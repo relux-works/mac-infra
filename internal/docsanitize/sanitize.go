@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -83,22 +84,64 @@ func Process(ctx context.Context, pathName string, options Options) (Result, err
 
 func SanitizeText(text, inputFormat string, customValues []string) (string, map[string]CategoryStats, []string) {
 	redactor := newRedactor()
+	text, structured := sanitizeTextWithRedactor(text, inputFormat, customValues, redactor)
+	warnings := make([]string, 0, 2)
+	if strings.EqualFold(inputFormat, "json") && !structured {
+		warnings = append(warnings, "JSON parsing failed; content was sanitized as plain text")
+	}
+	warnings = append(warnings, "heuristic redaction can miss uncommon identifiers or context-only personal data; review sanitized output before external disclosure")
+	return text, redactor.statsSnapshot(), warnings
+}
+
+// SanitizeRecords depersonalizes string records with one shared placeholder
+// namespace while preserving record order, field names, and non-PII values.
+func SanitizeRecords(records []map[string]string) ([]map[string]string, map[string]CategoryStats, error) {
+	redactor := newRedactor()
+	result := make([]map[string]string, len(records))
+	for recordIndex, record := range records {
+		sanitized := make(map[string]string, len(record))
+		for field, value := range record {
+			if !utf8.ValidString(field) || !utf8.ValidString(value) {
+				return nil, nil, fmt.Errorf("record %d contains invalid UTF-8", recordIndex)
+			}
+			if category := classifySensitiveHeader(field); category != "" {
+				sanitized[field] = redactor.replace(category, value)
+				continue
+			}
+			sanitized[field] = redactCommonPatterns(value, redactor)
+		}
+		result[recordIndex] = sanitized
+	}
+	return result, redactor.statsSnapshot(), nil
+}
+
+// IsPlaceholder reports whether value is an exact placeholder emitted by this package.
+func IsPlaceholder(value string) bool {
+	return placeholderPattern.MatchString(value)
+}
+
+func sanitizeTextWithRedactor(text, inputFormat string, customValues []string, redactor *redactor) (string, bool) {
+	structuredOK := true
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	text = strings.ReplaceAll(text, "\u2028", "\n")
 	text = strings.ReplaceAll(text, "\u2029", "\n")
 	text = redactCustomValues(text, customValues, redactor)
-	warnings := make([]string, 0)
 	if strings.EqualFold(inputFormat, "json") {
-		structured, ok := redactJSON(text, redactor)
+		redacted, ok := redactJSON(text, redactor)
 		if ok {
-			text = structured
+			text = redacted
 		} else {
-			warnings = append(warnings, "JSON parsing failed; content was sanitized as plain text")
+			structuredOK = false
 		}
 	}
 	text = redactTSVTables(text, redactor)
 	text = redactMarkdownTables(text, redactor)
+	text = redactCommonPatterns(text, redactor)
+	return text, structuredOK
+}
+
+func redactCommonPatterns(text string, redactor *redactor) string {
 	for _, field := range fieldPatterns {
 		text = replaceCapture(text, field.pattern, 2, field.category, redactor, nil)
 	}
@@ -115,8 +158,7 @@ func SanitizeText(text, inputFormat string, customValues []string) (string, map[
 	text = replaceCapture(text, cellName, 2, "full_name", redactor, nil)
 	text = replaceCapture(text, initialLineName, 1, "full_name", redactor, nil)
 	text = replaceCapture(text, initialCellName, 2, "full_name", redactor, nil)
-	warnings = append(warnings, "heuristic redaction can miss uncommon identifiers or context-only personal data; review sanitized output before external disclosure")
-	return text, redactor.statsSnapshot(), warnings
+	return text
 }
 
 type redactor struct {
@@ -387,6 +429,7 @@ func classifyColumns(fields []string) map[int]string {
 }
 
 func classifySensitiveHeader(value string) string {
+	value = splitCamelCase(value)
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	normalized = strings.NewReplacer("_", " ", "-", " ", ".", " ", "/", " ", "(", " ", ")", " ").Replace(normalized)
 	normalized = strings.Join(strings.Fields(normalized), " ")
@@ -402,9 +445,6 @@ func classifySensitiveHeader(value string) string {
 	if strings.Contains(normalized, "телефон") || strings.Contains(normalized, "мобильн") || normalized == "phone" || normalized == "mobile" || normalized == "phone number" {
 		return "phone"
 	}
-	if strings.Contains(normalized, "адрес") || strings.Contains(normalized, "address") {
-		return "address"
-	}
 	if strings.Contains(normalized, "дата рождения") || strings.Contains(normalized, "date of birth") || normalized == "dob" || normalized == "birth date" {
 		return "date_of_birth"
 	}
@@ -417,13 +457,35 @@ func classifySensitiveHeader(value string) string {
 	if normalized == "инн" || normalized == "tax id" || normalized == "tin" || strings.Contains(normalized, "taxpayer id") {
 		return "tax_id"
 	}
-	if normalized == "фио" || normalized == "фио полностью" || strings.Contains(normalized, "фамилия") || normalized == "name" || normalized == "full name" || normalized == "first name" || normalized == "last name" || normalized == "middle name" || normalized == "author" || normalized == "author name" || normalized == "автор" || normalized == "имя автора" || normalized == "фио автора" {
+	if normalized == "card" || strings.Contains(normalized, "payment card") || strings.Contains(normalized, "card number") {
+		return "payment_card"
+	}
+	if normalized == "ip" || strings.Contains(normalized, "ip address") {
+		return "ip_address"
+	}
+	if normalized == "адрес" || normalized == "адрес места жительства" || normalized == "почтовый адрес" || normalized == "address" || normalized == "home address" || normalized == "postal address" {
+		return "address"
+	}
+	if normalized == "фио" || normalized == "фио полностью" || strings.Contains(normalized, "фамилия") || normalized == "full name" || normalized == "first name" || normalized == "last name" || normalized == "middle name" || normalized == "author name" || normalized == "имя автора" || normalized == "фио автора" {
 		return "full_name"
 	}
 	if strings.Contains(normalized, "password") || strings.Contains(normalized, "пароль") || strings.Contains(normalized, "api key") || strings.Contains(normalized, "access token") || strings.Contains(normalized, "refresh token") || normalized == "secret" || normalized == "authorization" {
 		return "secret"
 	}
 	return ""
+}
+
+func splitCamelCase(value string) string {
+	var result strings.Builder
+	var previous rune
+	for index, character := range value {
+		if index > 0 && unicode.IsUpper(character) && (unicode.IsLower(previous) || unicode.IsDigit(previous)) {
+			result.WriteByte(' ')
+		}
+		result.WriteRune(character)
+		previous = character
+	}
+	return result.String()
 }
 
 func replacePattern(text string, pattern *regexp.Regexp, category string, redactor *redactor, validator func(string) bool) string {

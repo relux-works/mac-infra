@@ -17,6 +17,7 @@ import (
 
 	"github.com/relux-works/mac-infra/internal/browserquery"
 	"github.com/relux-works/mac-infra/internal/browsersession"
+	"github.com/relux-works/mac-infra/internal/docsanitize"
 )
 
 const maximumScannedItems = 1000
@@ -354,6 +355,10 @@ func (f Facade) list(ctx context.Context, adapter Adapter, statement Statement) 
 	start := min(skip, len(collected))
 	end := min(start+take, len(collected))
 	items := append([]map[string]string(nil), collected[start:end]...)
+	items, _, err = docsanitize.SanitizeRecords(items)
+	if err != nil {
+		return ListResult{}, coded("SENSITIVE_RESPONSE_UNKNOWN", "browser records could not be safely depersonalized")
+	}
 	cacheFile, err := f.Cache.Write(adapter.Name, statementKey(statement), items)
 	if err != nil {
 		return ListResult{}, err

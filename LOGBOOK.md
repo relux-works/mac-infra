@@ -3,6 +3,19 @@
 > Institutional memory. Concise, factual, high-signal.
 > Newest entries first. One block per insight.
 
+## 2026-09-15
+
+### 1726 — Ambiguous Browser Fields Require Value Evidence
+- ROOT CAUSE: `internal/docsanitize/sanitize.go` classified generic `name`/`author` and every field containing `address` as PII, corrupting product and organization metadata before facade render/cache.
+- FIX: Whole-field classification now covers only unambiguous personal-data headers; generic metadata relies on value-level patterns.
+- REGRESSION: `TestRunQProductionEntryPreservesNonPIIValuesInAmbiguousFields` covers JSON/compact stdout, cache, and grep with an adjacent true-name control.
+
+### 1701 — Browser Records Compose PII And Secret Boundaries
+- DECISION: `internal/browserfacade/facade.go` keeps secret refusal ahead of one complete-result `internal/docsanitize.SanitizeRecords` pass, then persists and renders only depersonalized records.
+- FIX: `internal/docsanitize/sanitize.go` now owns structured field classification, camel-case normalization, stable cross-record placeholders, and invalid-UTF-8 refusal; `internal/browserfacade/cache.go` refuses cache records whose depersonalization is not idempotent.
+- SAFETY: Canonical document placeholders are explicitly admitted by `internal/browserfacade/outbound.go`; malformed bracket-shaped values, secret-shaped values, malformed records, and raw-PII cache remain fail-closed.
+- EVIDENCE: `TestRunQProductionEntryDepersonalizesListStdoutCacheAndGrep`, `TestRunQProductionEntryRefusesMalformedRecordWithoutOutputOrCache`, and `TestRunGrepProductionEntryRefusesCacheContainingRawPII` drive the public CLI boundary; focused packages pass uncached.
+
 ## 2026-08-26
 
 ### 2213 — Task-board Restart Double-Prefixes Local Board Paths

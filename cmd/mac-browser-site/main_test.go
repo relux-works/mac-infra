@@ -34,6 +34,156 @@ printf '%s\n' '{"matched":1,"skip":0,"take":100,"returned":1,"items":[{"id":"p-1
 	}
 }
 
+func TestRunQProductionEntryDepersonalizesListStdoutCacheAndGrep(t *testing.T) {
+	// This proves the public q entry depersonalizes every required PII class before both rendering and persistence, and grep sees only that cache.
+	fields := []string{"id", "title", "price", "full_name", "email", "phone", "address", "date_of_birth", "passport", "snils", "tax_id", "payment_card", "ip_address"}
+	query := `list(take=2) { id title price full_name email phone address date_of_birth passport snils tax_id payment_card ip_address }`
+	rawValues := []string{"Иванов Иван Иванович", "alexey.petrov@example.com", "+7 (999) 123-45-67", "г. Москва, ул. Тестовая, д. 1", "01.02.1990", "45 10 123456", "112-233-445 95", "123456789012", "4111 1111 1111 1111", "192.168.10.22"}
+	for _, format := range []string{"json", "compact"} {
+		t.Run(format, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "mac-chrome-session"), `
+printf '%s\n' '{"matched":2,"skip":0,"take":100,"returned":2,"items":[{"id":"p-1","title":"Clock Integrity","price":"$20","full_name":"Иванов Иван Иванович","email":"alexey.petrov@example.com","phone":"+7 (999) 123-45-67","address":"г. Москва, ул. Тестовая, д. 1","date_of_birth":"01.02.1990","passport":"45 10 123456","snils":"112-233-445 95","tax_id":"123456789012","payment_card":"4111 1111 1111 1111","ip_address":"192.168.10.22"},{"id":"p-2","title":"Clock Integrity","price":"$20","full_name":"Иванов Иван Иванович","email":"alexey.petrov@example.com","phone":"+7 (999) 123-45-67","address":"г. Москва, ул. Тестовая, д. 1","date_of_birth":"01.02.1990","passport":"45 10 123456","snils":"112-233-445 95","tax_id":"123456789012","payment_card":"4111 1111 1111 1111","ip_address":"192.168.10.22"}]}'
+`)
+			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+			adapter := writeAdapterWithFields(t, home, fields)
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"q", "--adapter", adapter, "--format", format, query}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			assertDepersonalized(t, stdout.Bytes(), rawValues)
+			for _, want := range []string{"p-1", "p-2", "Clock Integrity", "$20", "[FULL_NAME_1]", "[EMAIL_1]", "[PHONE_1]", "[ADDRESS_1]", "[DATE_OF_BIRTH_1]", "[PASSPORT_1]", "[SNILS_1]", "[TAX_ID_1]", "[PAYMENT_CARD_1]", "[IP_ADDRESS_1]"} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("stdout missing %q: %s", want, stdout.String())
+				}
+			}
+			if strings.Count(stdout.String(), "[EMAIL_1]") != 2 {
+				t.Fatalf("repeated email did not receive a stable placeholder: %s", stdout.String())
+			}
+
+			cacheDirectory := filepath.Join(home, "Library", "Application Support", "mac-infra", "browser-site-cache", "marketplace")
+			entries, err := os.ReadDir(cacheDirectory)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("cache entries=%v err=%v", entries, err)
+			}
+			cacheData, err := os.ReadFile(filepath.Join(cacheDirectory, entries[0].Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertDepersonalized(t, cacheData, rawValues)
+			if !bytes.Contains(cacheData, []byte("[EMAIL_1]")) || !bytes.Contains(cacheData, []byte("Clock Integrity")) {
+				t.Fatalf("cache lost sanitized or ordinary values: %s", cacheData)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			code = run([]string{"grep", "--adapter", adapter, "--format", "json", "--file", entries[0].Name(), "EMAIL_1"}, &stdout, &stderr)
+			if code != 0 || !strings.Contains(stdout.String(), "[EMAIL_1]") {
+				t.Fatalf("grep code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			assertDepersonalized(t, stdout.Bytes(), rawValues)
+		})
+	}
+}
+
+func TestRunQProductionEntryPreservesNonPIIValuesInAmbiguousFields(t *testing.T) {
+	// This proves q, cache, and grep preserve ambiguous metadata unless its value contains PII, with a true-name positive control nearby.
+	fields := []string{"id", "name", "addressType", "author", "fullName"}
+	query := `list(take=1) { id name addressType author fullName }`
+	for _, format := range []string{"json", "compact"} {
+		t.Run(format, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "mac-chrome-session"), `printf '%s\n' '{"matched":1,"skip":0,"take":100,"returned":1,"items":[{"id":"p-1","name":"Desk lamp","addressType":"shipping","author":"OpenAI","fullName":"Иванов Иван Иванович"}]}'`)
+			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+			adapter := writeAdapterWithFields(t, home, fields)
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"q", "--adapter", adapter, "--format", format, query}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("q code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			for _, want := range []string{"p-1", "Desk lamp", "shipping", "OpenAI", "[FULL_NAME_1]"} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("q stdout missing %q: %s", want, stdout.String())
+				}
+			}
+			if strings.Contains(stdout.String(), "Иванов Иван Иванович") {
+				t.Fatalf("q stdout retained adjacent PII: %s", stdout.String())
+			}
+
+			cacheDirectory := filepath.Join(home, "Library", "Application Support", "mac-infra", "browser-site-cache", "marketplace")
+			entries, err := os.ReadDir(cacheDirectory)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("cache entries=%v err=%v", entries, err)
+			}
+			cacheData, err := os.ReadFile(filepath.Join(cacheDirectory, entries[0].Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"Desk lamp", "shipping", "OpenAI", "[FULL_NAME_1]"} {
+				if !bytes.Contains(cacheData, []byte(want)) {
+					t.Fatalf("cache missing %q: %s", want, cacheData)
+				}
+			}
+			if bytes.Contains(cacheData, []byte("Иванов Иван Иванович")) {
+				t.Fatalf("cache retained adjacent PII: %s", cacheData)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			code = run([]string{"grep", "--adapter", adapter, "--format", format, "--file", entries[0].Name(), "OpenAI"}, &stdout, &stderr)
+			if code != 0 || !strings.Contains(stdout.String(), "OpenAI") || !strings.Contains(stdout.String(), "Desk lamp") || !strings.Contains(stdout.String(), "shipping") || !strings.Contains(stdout.String(), "[FULL_NAME_1]") {
+				t.Fatalf("grep code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "Иванов Иван Иванович") {
+				t.Fatalf("grep stdout retained adjacent PII: %s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunQProductionEntryRefusesMalformedRecordWithoutOutputOrCache(t *testing.T) {
+	// This proves a projected non-text record fails closed at q before stdout or cache side effects.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "mac-chrome-session"), `printf '%s\n' '{"matched":1,"skip":0,"take":100,"returned":1,"items":[{"id":"p-1","title":{"email":"raw@example.com"}}]}'`)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	adapter := writeAdapter(t, home)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"q", "--adapter", adapter, "--format", "json", `list(take=1) { id title }`}, &stdout, &stderr)
+	if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "TRANSPORT_RESPONSE_INVALID") || strings.Contains(stderr.String(), "raw@example.com") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	cacheRoot := filepath.Join(home, "Library", "Application Support", "mac-infra", "browser-site-cache")
+	if entries, err := os.ReadDir(cacheRoot); err == nil && len(entries) != 0 {
+		t.Fatalf("malformed record reached cache: %v", entries)
+	}
+}
+
+func TestRunGrepProductionEntryRefusesCacheContainingRawPII(t *testing.T) {
+	// This proves grep validates depersonalization instead of treating secret-only validation as sufficient.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	adapter := writeAdapter(t, home)
+	directory := filepath.Join(home, "Library", "Application Support", "mac-infra", "browser-site-cache", "marketplace")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "query-raw-pii.jsonl"), []byte(`{"id":"p-1","title":"alexey.petrov@example.com"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"grep", "--adapter", adapter, "--format", "json", "--file", "query-raw-pii.jsonl", "example"}, &stdout, &stderr)
+	if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "SENSITIVE_RESPONSE_REFUSED") || strings.Contains(stderr.String(), "alexey.petrov@example.com") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestRunMProductionEntryRefusesAndPreviewsWithoutDispatchThenRequiresConfirm(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -841,6 +991,41 @@ func writeAdapterWith(t *testing.T, directory, paginationKind string, maxPages i
 		t.Fatal(err)
 	}
 	return path
+}
+
+func writeAdapterWithFields(t *testing.T, directory string, fields []string) string {
+	t.Helper()
+	path := writeAdapter(t, directory)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adapter map[string]any
+	if err := json.Unmarshal(data, &adapter); err != nil {
+		t.Fatal(err)
+	}
+	definitions := make(map[string]any, len(fields))
+	for _, field := range fields {
+		definitions[field] = map[string]any{"source": "text"}
+	}
+	adapter["template"].(map[string]any)["fields"] = definitions
+	data, err = json.Marshal(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func assertDepersonalized(t *testing.T, data []byte, rawValues []string) {
+	t.Helper()
+	for _, raw := range rawValues {
+		if bytes.Contains(data, []byte(raw)) {
+			t.Fatalf("personal data %q escaped: %s", raw, data)
+		}
+	}
 }
 
 func writeExecutable(t *testing.T, path, body string) {

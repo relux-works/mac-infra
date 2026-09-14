@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/relux-works/mac-infra/internal/docsanitize"
 )
 
 // OutboundState is the single normalized decision vocabulary for anything
@@ -83,6 +85,9 @@ func enforceOutboundValue(value any) error {
 func scanOutbound(raw string, depth int) OutboundDecision {
 	if depth > maximumNormalizationDepth || len(raw) > maximumOutboundBytes || !utf8.ValidString(raw) || hasAmbiguousControl(raw) {
 		return OutboundDecision{State: OutboundUnknown}
+	}
+	if docsanitize.IsPlaceholder(raw) {
+		return OutboundDecision{State: OutboundClean, Value: raw}
 	}
 	redacted, remainder, urlState := sanitizeOutboundURLs(raw, depth)
 	if urlState == OutboundRefused || urlState == OutboundUnknown {

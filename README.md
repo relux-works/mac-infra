@@ -14,7 +14,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-cleanup` | Plan allowlisted cleanup candidates and clean unsupported CoreSimulator runtimes only when explicitly requested | `mac-cleanup scan`, `mac-cleanup target PATH`, `mac-cleanup xcode`, `mac-cleanup xcode-runtimes`, `mac-cleanup permissions`, optional `--json PATH` | optional Plan JSON/report files under `.temp/mac-cleanup/` |
 | `mac-safari-session` | Guarded, window-exact authenticated Safari page access and finite named keepalives without exporting browser secrets | `mac-safari-session open-bg URL`, guarded `run-js`/`snapshot`/`fetch-file`, `heartbeat start\|restart\|status\|list\|stop`, explicit `focus --window-id ID` | private temporary JS under `.temp/mac-safari-session/`; optional `0600` artifacts; heartbeat state/logs and one stable launcher under `~/Library/Application Support/mac-infra/browser-session/` |
 | `mac-chrome-session` | Guarded exact Chrome tab access, explicit exact-tab handoff, trusted form input and native file upload, sealed authenticated same-origin downloads and Slack reads, bounded extraction, and finite named Chrome/Safari heartbeats without focus churn | `mac-chrome-session list`, guarded `run-js`/`fetch-file`/`slack-read`/`extract`, explicit `focus`, `trusted-input`, or `upload` with exact IDs/origin plus `--human-authorized`; upload/trusted input and protected fetch requests arrive through `--request-stdin`; `heartbeat start\|restart\|status\|stop\|list`, exact `close` | atomic private `run-js --out` and `fetch-file --out` artifacts; protected resource URLs, trusted values, and upload source paths stay out of argv and normal output; upload uses a short-lived private staging directory and reports only guarded origin, accepted basenames, and count; other private outputs and heartbeat state use the paths described below |
-| `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected and sanitized `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no cookies, browser storage, authorization material, or cursor/session state |
+| `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected, PII-depersonalized, secret-checked `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no raw recognized personal data, cookies, browser storage, authorization material, or cursor/session state |
 | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
 | `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
 | `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
@@ -697,6 +697,19 @@ re-emits source JSONL bytes: it rejects duplicate keys and renders only a
 canonical re-encoding of the exact validated record. See the
 [site facade reference](agents/skills/mac-infra/references/browser-site-facade.md)
 for the adapter schema and pagination semantics.
+
+Successful `list` calls depersonalize the complete projected result through
+`internal/docsanitize` before cache persistence or public rendering. Recognized
+names, email addresses, phone numbers, addresses, birth dates, passport/SNILS/tax
+identifiers, payment cards, and IP addresses become stable category placeholders
+within that result; field names, record order, and ordinary values stay intact.
+Ambiguous public fields such as product `name`, `addressType`, and application or
+organization `author` are changed only when their values contain recognizable PII.
+`grep` accepts only cache records that are already depersonalized and refuses raw
+PII or malformed records instead of repairing them during a read. The independent
+secret scanner still runs first and refuses the entire operation without partial
+stdout or cache bytes; an unsafe or lossy depersonalization result likewise fails
+closed.
 
 ### Named persistent heartbeats
 
