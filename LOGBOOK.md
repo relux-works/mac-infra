@@ -5,6 +5,16 @@
 
 ## 2026-08-26
 
+### 2213 — Task-board Restart Double-Prefixes Local Board Paths
+- REGRESSION: Cancelling `RUN-260825-ae4432` left element routing pending because the stored `.task-board/.../progress.md` path was resolved again against `.task-board`.
+- REGRESSION: Restart then failed while preparing `RUN-260825-6a33b4` for the same double-prefix reason under `.task-board/.resources/BUG-260825-1wsh7n/`.
+- STATUS: Story worktree changes remain intact and the queued scheduler advanced to `RUN-260825-0b6a97`; restart recovery for `BUG-260825-1wsh7n` remains pending.
+
+### 2106 — Prompt-Mode Orchestrator Goal Rebind
+- ANOMALY: `RUN-260825-94161e` was assigned orchestration without a launch goal; in-run `spawn goal upsert` created `GOAL-260825-69e6cd` revision 1 with `session_manager_pending_unbound`.
+- DECISION: Do not launch nested specialists from the unbound parent; yield to the tracked rebound successor required by the goal-provider binding contract.
+- STATUS: `BUG-260825-2s6iw4` remains actionable; no producer launch or repository mutation occurred from this orchestrator checkpoint.
+
 ### 1058 — Production Entry Owns Chooser Read Evidence
 - ANOMALY: The 1021 evidence claim was too broad: its executable harness called `MacChromeWaitForSingleSheet` and `MacChromeWaitForNoSheets` directly, so a permissive wait selected only by `macChromeAXUploadFiles` survived while the named test stayed green.
 - FIX: `TestChromeAXUploadProductionPathRefusesUnreadableSheetSequences` now compiles the production Objective-C source with only OS-facing AppKit, Accessibility, sleep, and keyboard dependencies intercepted, then calls the real `macChromeAXUploadFiles` entry for unreadable appearance and closure sequences without touching Chrome or posting real keys.

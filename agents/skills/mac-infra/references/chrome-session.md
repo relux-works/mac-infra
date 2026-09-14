@@ -159,6 +159,60 @@ mac-chrome-session extract \
 restricted to non-URL metadata (`aria-label`, `class`, `datetime`, `role`, and
 `title`). Store personal output privately and sanitize it before inspection.
 
+## Resolve A JS-Driven Download To A Fetchable Resource
+
+`fetch-file` needs a resource path. An authenticated site often does not give
+you one: the visible download control is a framework click handler on an
+element with an empty or missing `href`, so there is no link to read.
+
+Do not click it as a workaround. A page-initiated download leaves this tool's
+contract and enters Chrome's own download flow. When the profile is set to ask
+where to save each file, that opens a native save panel no silent command can
+answer; the payload sits in the download directory as a
+`.com.google.Chrome.XXXXXX` temporary file, and every later download in that
+profile is blocked until a human dismisses the panel. Reading that temporary
+file is not a supported extraction path: the name is not the document's, the
+write may still be in flight, and a second download silently returns the first
+file's bytes.
+
+Resolve the real resource instead. Two bounded discovery paths, in order:
+
+1. The metadata the view is already bound to. The record behind the page
+   normally names its own attachments. Re-read that same-origin API record and
+   project only the identifying fields:
+
+```bash
+mac-chrome-session run-js \
+  --window-id 123456 \
+  --tab-id 123457 \
+  --origin https://api.example.com \
+  --script '(function(){
+     var x=new XMLHttpRequest();
+     x.open("GET","/api/v1/records/"+RECORD_ID,false);
+     x.withCredentials=true; x.send(null);
+     var m=(x.responseText||"").match(/"attachmentId":(\d+)/);
+     return JSON.stringify({found:!!m,id:m?m[1]:null});
+   })()'
+```
+
+2. `performance.getEntriesByType("resource")`, when the metadata shape is not
+   known yet. Same-origin timing entries name the URLs the document actually
+   loaded, which reveals the API prefix the download uses. This reads no
+   cookies, storage, or headers, but entry names carry query strings: filter to
+   the prefix you want, and strip query values before anything is printed or
+   written as evidence.
+
+Then hand the reconstructed path to `fetch-file` on private stdin, as in
+**Sealed Authenticated File Downloads** above. Repeat per file with a distinct
+`--out`; no save panel appears and Chrome is never focused.
+
+The origin guard still binds to the tab, not to the site. A portal commonly
+renders the view on one host and serves its API from another
+(`https://lk.example.com` bound to `https://www.example.com/api/...`). Pin
+`fetch-file` to a tab that is already on the API origin. Never relax
+`--origin`, navigate the authenticated view away, or reach for browser
+credentials to close that gap.
+
 ## Promote A Cross-Origin Embedded App To A Top-Level Target
 
 An authenticated host page may embed the useful application in a cross-origin
@@ -478,7 +532,9 @@ parameter-name denylist cannot fail closed, and the identifier is as often the
 parameter name as the value. Consequence for callers: you cannot recover a
 download URL from `list` output. Read the link from page context and hand it to
 `fetch-file --request-stdin` in the same turn, where it stays out of argv and
-out of stdout. Keep page results bounded. Apple Events output can still contain personal page content,
+out of stdout. When the page exposes no link at all, resolve the resource
+through **Resolve A JS-Driven Download To A Fetchable Resource** rather than
+clicking the control. Keep page results bounded. Apple Events output can still contain personal page content,
 so write raw evidence only to a task-scoped private file (`umask 077`), sanitize
 it with `mac-document-sanitize`, and inspect only the returned sanitized path.
 
