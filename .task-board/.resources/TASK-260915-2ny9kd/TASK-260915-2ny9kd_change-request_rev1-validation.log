@@ -1,0 +1,40 @@
+$ go test -count=1 ./...
+?   	github.com/relux-works/mac-infra/cmd/mac-audio-reset	[no test files]
+ok  	github.com/relux-works/mac-infra/cmd/mac-audio-sweep	0.760s
+ok  	github.com/relux-works/mac-infra/cmd/mac-browser-site	102.852s
+ok  	github.com/relux-works/mac-infra/cmd/mac-chrome-session	62.233s
+ok  	github.com/relux-works/mac-infra/cmd/mac-cleanup	8.945s
+ok  	github.com/relux-works/mac-infra/cmd/mac-disk-profile	1.604s
+ok  	github.com/relux-works/mac-infra/cmd/mac-document-sanitize	1.368s
+ok  	github.com/relux-works/mac-infra/cmd/mac-infra-core	0.950s
+ok  	github.com/relux-works/mac-infra/cmd/mac-keyvault	4.715s
+?   	github.com/relux-works/mac-infra/cmd/mac-load-profile	[no test files]
+ok  	github.com/relux-works/mac-infra/cmd/mac-safari-session	15.024s
+?   	github.com/relux-works/mac-infra/cmd/mac-video-profile	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/anyconnect	3.049s
+?   	github.com/relux-works/mac-infra/internal/audiodevice	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/audioreset	2.915s
+ok  	github.com/relux-works/mac-infra/internal/audiosweep	3.452s
+ok  	github.com/relux-works/mac-infra/internal/browserfacade	9.195s
+ok  	github.com/relux-works/mac-infra/internal/browserquery	3.520s
+ok  	github.com/relux-works/mac-infra/internal/browsersession	16.454s
+ok  	github.com/relux-works/mac-infra/internal/chromectl	131.684s
+ok  	github.com/relux-works/mac-infra/internal/cleanup	3.338s
+ok  	github.com/relux-works/mac-infra/internal/diskprofile	3.354s
+ok  	github.com/relux-works/mac-infra/internal/docsanitize	3.199s
+ok  	github.com/relux-works/mac-infra/internal/fsevents	2.400s
+ok  	github.com/relux-works/mac-infra/internal/keyvault	4.941s
+?   	github.com/relux-works/mac-infra/internal/keyvault/recordtest	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/keyvault/signerclient	7.434s
+ok  	github.com/relux-works/mac-infra/internal/loadprofile	2.961s
+ok  	github.com/relux-works/mac-infra/internal/maccore	4.220s
+ok  	github.com/relux-works/mac-infra/internal/safarictl	11.981s
+ok  	github.com/relux-works/mac-infra/internal/simcleanup	2.440s
+ok  	github.com/relux-works/mac-infra/internal/videoprofile	2.787s
+ok  	github.com/relux-works/mac-infra/scripts	8.123s
+[exit 0]
+$ go vet ./...
+[exit 0]
+$ go build ./...
+[exit 0]
+coverage_unit=exact_command_shard required=3 green=3 failed=0 missing=0 test_case_coverage=unknown

@@ -1,0 +1,7 @@
+$ go run ./.temp/TASK-260915-2ny9kd-nested-duplicate-probe
+describe_error=<nil> is_protocol=false origin_user="tester" format_public="spki-der" operation_name="ecdsa-sha256-sign" meta_owner=probe
+exit status 1
+malicious_probe_exit=1 (1 means the probe observed unexpected acceptance)
+$ go test -count=1 -run ^TestClientRefusesResultNotBoundToRequestOrHello$ ./internal/keyvault/signerclient/
+ok  	github.com/relux-works/mac-infra/internal/keyvault/signerclient	1.681s
+existing_result_corpus_exit=0

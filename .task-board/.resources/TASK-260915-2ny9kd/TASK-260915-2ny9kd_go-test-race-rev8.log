@@ -1,0 +1,6 @@
+# github.com/relux-works/mac-infra/internal/keyvault.test
+ld: warning: '/private/var/folders/31/0y3t5xv92xvbkc2r6hhfk_jw0000gn/T/go-link-689642995/000013.o' has malformed LC_DYSYMTAB, expected 98 undefined symbols to start at index 1626, found 95 undefined symbols starting at index 1626
+ok  	github.com/relux-works/mac-infra/internal/keyvault	4.721s
+?   	github.com/relux-works/mac-infra/internal/keyvault/recordtest	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/keyvault/signerclient	51.912s
+?   	github.com/relux-works/mac-infra/internal/keyvault/signertest	[no test files]

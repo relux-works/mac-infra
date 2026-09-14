@@ -1,0 +1,2548 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index d399a08..b6499d3 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -3,6 +3,15 @@
+ > Institutional memory. Concise, factual, high-signal.
+ > Newest entries first. One block per insight.
+ 
++## 2026-09-15
++
++### 1342 — mac-keyvault Store Is Login Keychain + Legacy SecAccess
++- FINDING: On an ad-hoc signed CLI, `kSecAttrAccessControl` (even plain `kSecAccessControlPrivateKeyUsage`) routes a permanent key into the Data Protection keychain and fails with -34018 exactly like the Secure Enclave and `kSecAccessControlUserPresence` shapes; only `kSecAttrAccess` from `SecAccessCreate` with a `SecTrustedApplicationCreateFromPath(NULL)` list persists in the login keychain.
++- FINDING: The legacy key schema returns no creation date, so `internal/keyvault` stores `store=`/`created=` in `kSecAttrApplicationTag` and reports `unknown` when the tag or public half is unreadable.
++- DECISION: `internal/keyvault` is a C cgo bridge (no Swift helper); `--enclave`/`--user-presence` make the real Security call and refuse with the OSStatus; no keychain fallback.
++- ANOMALY: Raw public-key bytes crossing the bridge inside a byte-delimited record broke `list` as soon as a generated point contained `0x1e`; the bridge now hex-encodes the point and `TestParseListRecords` pins it.
++- SCOPE: `TASK-260915-2mf19o` (`cmd/mac-keyvault`, `internal/keyvault`, setup/deinit, README, SKILL); no sign/verify yet.
++
+ ## 2026-08-26
+ 
+ ### 2213 — Task-board Restart Double-Prefixes Local Board Paths
+diff --git a/README.md b/README.md
+index ef46881..bdcfb7b 100644
+--- a/README.md
++++ b/README.md
+@@ -17,10 +17,11 @@ macOS operations tooling and agent skills for local workstation maintenance.
+ | `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected and sanitized `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no cookies, browser storage, authorization material, or cursor/session state |
+ | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
+ | `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
++| `mac-keyvault` | Create, list, export, rotate, and delete non-extractable P-256 key pairs under `works.relux.mac-keyvault.` in the login keychain; `--enclave` refuses explicitly on an unprovisioned binary | `mac-keyvault [--json] init LABEL [--enclave] [--user-presence]`, `list`, `pub LABEL --out spki.der\|spki.pem`, `rotate LABEL`, `delete LABEL --confirm` | keychain items only; `pub --out` writes a `0600` SPKI DER/PEM file |
+ | `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
+ | `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
+ | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
+-| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
++| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-keyvault`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
+ | `scripts/deinit.sh` | Remove user-level installation without stranding managed jobs | `./scripts/deinit.sh` | stops all `works.relux.mac-infra-browser-heartbeat.*` LaunchAgents and removes the stable launcher plus legacy pinned copies before removing binary symlinks and the runtime skill copy |
+ | `/usr/bin/codesign` | Give the shared heartbeat launcher a complete stable designated identity so macOS Automation consent can retain it across rebuilds | invoked by `scripts/setup.sh`; verify with `codesign --verify --strict "$HOME/Library/Application Support/mac-infra/browser-session/bin/mac-browser-heartbeat-launcher"` | signs `bin/mac-chrome-session`; setup atomically installs those signed bytes at the single managed launcher path |
+ 
+@@ -288,6 +289,24 @@ mac-cleanup permissions
+ 
+ `mac-cleanup xcode-runtimes` is a narrow exception for stale simulator runtimes: it cross-checks `xcrun simctl runtime list --json` with `xcrun simctl list runtimes`, reports only `unavailable` and `deletable` runtimes, and is dry-run by default. Pass `--delete` to remove those runtimes via `xcrun simctl runtime delete <identifier>`.
+ 
++## Key Vault Workflow
++
++`mac-keyvault` keeps P-256 key pairs in the current user's login keychain as permanent, non-extractable items (`kSecAttrIsPermanent`, `kSecAttrIsExtractable=false`) whose private-key ACL is a legacy `SecAccess` trusted-application list containing only the calling binary. Every label lives under `works.relux.mac-keyvault.`; a short name is placed under that prefix automatically and the tool never creates, lists, or deletes anything outside it.
++
++```bash
++mac-keyvault init signer                      # works.relux.mac-keyvault.signer in the login keychain
++mac-keyvault --json list                      # label, store, created, base64url(SHA-256(SPKI DER))
++mac-keyvault pub signer --out .temp/signer.pem  # .pem -> PEM, anything else -> SPKI DER
++mac-keyvault rotate signer                    # creates works.relux.mac-keyvault.signer.v2, keeps the old key
++mac-keyvault delete signer --confirm          # refused without --confirm
++```
++
++Exit codes: `0` ok, `1` operational failure (Security.framework OSStatus, unknown label, I/O), `2` usage, `3` refused by a policy gate (`duplicate_label`, `confirmation_required`, `foreign_label`, `invalid_label`, `enclave_unavailable`, `user_presence_unavailable`). `--json` wraps every answer in `{ok, command, result|error}`; refusals carry `os_status` when Security.framework produced them.
++
++Store decision (recorded on `EPIC-260915-1g0e1c_secure-enclave-probe.md` and re-verified while building the tool): an ad-hoc signed CLI gets `-34018 errSecMissingEntitlement` for a permanent Secure Enclave key, for any `kSecAttrAccessControl`-based ACL (it routes the item into the Data Protection keychain), and for `kSecAccessControlUserPresence`. `--enclave` and `--user-presence` therefore try the real Security call and refuse with that status and reason; there is no silent keychain fallback. Persisting Secure Enclave keys needs a signed helper with a provisioning profile and is a separate follow-up. The legacy key schema has no creation-date attribute, so the creation time and store are stored in the item's application tag; a key whose tag or public half cannot be read is listed with `unknown` values instead of a guessed one.
++
++The private-key ACL is bound to the exact binary that created the item; a rebuilt `mac-keyvault` still lists, exports, rotates, and deletes keys without a prompt, but private-key use from a different binary is subject to the keychain's own authorization prompt. Tests use only `works.relux.mac-keyvault.test.` labels and delete them in cleanup; a guard wrapper fails the suite before any other label reaches the keychain.
++
+ ## Guarded Browser Session Workflows
+ 
+ Both browser tools operate through Apple Events without focusing a browser in
+diff --git a/agents/skills/mac-infra/SKILL.md b/agents/skills/mac-infra/SKILL.md
+index 62978be..ded559d 100644
+--- a/agents/skills/mac-infra/SKILL.md
++++ b/agents/skills/mac-infra/SKILL.md
+@@ -8,7 +8,8 @@ description: >
+   symptoms, broad CPU, memory, thermal, and process load, authenticated Safari
+   and Google Chrome browser-session inspection/harvesting, privacy-safe document
+   intake, PII redaction, fseventsd memory/CPU bloat from slow FSEvents
+-  consumers or high file-event volume, and related maintenance tasks.
++  consumers or high file-event volume, non-extractable P-256 key pairs in the
++  login keychain via mac-keyvault, and related maintenance tasks.
+ triggers:
+   - mac load
+   - load profile
+@@ -28,6 +29,12 @@ triggers:
+   - disk space
+   - storage profile
+   - cleanup plan
++  - keyvault
++  - key vault
++  - keychain key
++  - secure enclave
++  - P-256 key
++  - signing key
+   - mac cleanup
+   - cleanup mac
+   - high CPU
+@@ -479,6 +486,23 @@ mac-disk-profile explain "$HOME/Library/Developer"
+ - Prefer `scan` when a persisted JSON artifact is useful for later analysis.
+ - Use `explain` for one suspicious path after `scan` or `top` identifies it.
+ 
++## Key Vault Workflow
++
++- Use `mac-keyvault` when an agent needs a persistent, non-extractable P-256 key pair on this Mac:
++
++```bash
++mac-keyvault --json init NAME            # creates works.relux.mac-keyvault.NAME in the login keychain
++mac-keyvault --json list                 # label, store, created, base64url(SHA-256(SPKI DER))
++mac-keyvault pub NAME --out .temp/NAME.pem
++mac-keyvault --json rotate NAME          # NAME.v2, old key kept
++mac-keyvault --json delete NAME --confirm
++```
++
++- Labels are always placed under `works.relux.mac-keyvault.`; the tool refuses to touch any other label (`foreign_label`, exit 3) before calling Security.framework.
++- `delete` without `--confirm` and `init` of an existing label are refused with exit 3; read `error.code` in `--json` mode.
++- `--enclave` and `--user-presence` refuse with `os_status: -34018` on this ad-hoc signed binary: the Secure Enclave and the Data Protection keychain need a provisioning profile. Do not retry in a loop and do not fall back silently; report the refusal.
++- Tests and probes must use `works.relux.mac-keyvault.test.` labels and delete them afterwards.
++
+ ## Cleanup Planning Workflow
+ 
+ - Start with read-only planning only:
+diff --git a/cmd/mac-keyvault/main.go b/cmd/mac-keyvault/main.go
+new file mode 100644
+index 0000000..1885032
+--- /dev/null
++++ b/cmd/mac-keyvault/main.go
+@@ -0,0 +1,404 @@
++// mac-keyvault manages non-extractable P-256 key pairs in the login keychain.
++//
++// Exit codes: 0 success, 1 operational failure (Security.framework error,
++// unknown label, I/O), 2 usage error, 3 policy refusal (duplicate label,
++// missing --confirm, label outside the tool namespace, Secure Enclave or
++// user-presence unavailable).
++package main
++
++import (
++	"encoding/json"
++	"errors"
++	"flag"
++	"fmt"
++	"io"
++	"os"
++	"strings"
++	"time"
++
++	"github.com/relux-works/mac-infra/internal/keyvault"
++)
++
++var (
++	Version   = "dev"
++	Commit    = "unknown"
++	BuildDate = "unknown"
++)
++
++const (
++	exitOK      = 0
++	exitFailure = 1
++	exitUsage   = 2
++	exitRefused = 3
++)
++
++// newBackend is the production store; tests swap it for a recording store.
++var newBackend = func() keyvault.Backend { return keyvault.NewSecurityStore() }
++
++func main() {
++	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
++}
++
++type keyView struct {
++	Label       string `json:"label"`
++	Store       string `json:"store"`
++	Created     string `json:"created,omitempty"`
++	Fingerprint string `json:"fingerprint,omitempty"`
++}
++
++func viewOf(key keyvault.Key) keyView {
++	view := keyView{Label: key.Label, Store: string(key.Store), Fingerprint: key.Fingerprint()}
++	if !key.Created.IsZero() {
++		view.Created = key.Created.UTC().Format(time.RFC3339)
++	}
++	return view
++}
++
++// response is the JSON envelope every command emits in --json mode.
++type response struct {
++	OK      bool           `json:"ok"`
++	Command string         `json:"command"`
++	Result  any            `json:"result,omitempty"`
++	Error   *responseError `json:"error,omitempty"`
++}
++
++type responseError struct {
++	Code    string `json:"code"`
++	Message string `json:"message"`
++	Status  int    `json:"os_status,omitempty"`
++}
++
++type output struct {
++	command string
++	json    bool
++	stdout  io.Writer
++	stderr  io.Writer
++}
++
++func (o output) success(result any, text func(io.Writer)) int {
++	if o.json {
++		encodeJSON(o.stdout, response{OK: true, Command: o.command, Result: result})
++		return exitOK
++	}
++	text(o.stdout)
++	return exitOK
++}
++
++func (o output) fail(err error) int {
++	code, respErr := classify(err)
++	if o.json {
++		encodeJSON(o.stdout, response{OK: false, Command: o.command, Error: respErr})
++	} else {
++		fmt.Fprintf(o.stderr, "%s failed: %s\n", o.command, respErr.Message)
++	}
++	return code
++}
++
++func classify(err error) (int, *responseError) {
++	var refusal *keyvault.Refusal
++	if errors.As(err, &refusal) {
++		return exitRefused, &responseError{Code: refusal.Code, Message: refusal.Message, Status: refusal.Status}
++	}
++	if errors.Is(err, keyvault.ErrNotFound) {
++		return exitFailure, &responseError{Code: "not_found", Message: err.Error()}
++	}
++	var status *keyvault.StatusError
++	if errors.As(err, &status) {
++		return exitFailure, &responseError{Code: "security_error", Message: err.Error(), Status: status.Status}
++	}
++	return exitFailure, &responseError{Code: "failure", Message: err.Error()}
++}
++
++func encodeJSON(w io.Writer, v any) {
++	enc := json.NewEncoder(w)
++	enc.SetIndent("", "  ")
++	_ = enc.Encode(v)
++}
++
++func run(args []string, stdout, stderr io.Writer) int {
++	jsonMode := false
++	for len(args) > 0 && args[0] == "--json" {
++		jsonMode = true
++		args = args[1:]
++	}
++	if len(args) == 0 {
++		printUsage(stdout)
++		return exitUsage
++	}
++	command, rest := args[0], args[1:]
++	switch command {
++	case "init":
++		return runInit(rest, jsonMode, stdout, stderr)
++	case "list":
++		return runList(rest, jsonMode, stdout, stderr)
++	case "pub":
++		return runPub(rest, jsonMode, stdout, stderr)
++	case "rotate":
++		return runRotate(rest, jsonMode, stdout, stderr)
++	case "delete":
++		return runDelete(rest, jsonMode, stdout, stderr)
++	case "version":
++		fmt.Fprintf(stdout, "mac-keyvault %s %s %s\n", Version, Commit, BuildDate)
++		return exitOK
++	case "help", "--help", "-h":
++		printUsage(stdout)
++		return exitOK
++	default:
++		fmt.Fprintf(stderr, "unknown command %q\n", command)
++		printUsage(stderr)
++		return exitUsage
++	}
++}
++
++func newFlagSet(name string, jsonMode *bool, stderr io.Writer) *flag.FlagSet {
++	fs := flag.NewFlagSet(name, flag.ContinueOnError)
++	fs.SetOutput(stderr)
++	fs.BoolVar(jsonMode, "json", *jsonMode, "emit a JSON envelope on stdout")
++	return fs
++}
++
++// parseInterspersed lets flags follow the positional label
++// (mac-keyvault delete LABEL --confirm), which flag.FlagSet alone does not.
++func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
++	var positional []string
++	for {
++		if err := fs.Parse(args); err != nil {
++			return nil, err
++		}
++		rest := fs.Args()
++		if len(rest) == 0 {
++			return positional, nil
++		}
++		positional = append(positional, rest[0])
++		args = rest[1:]
++	}
++}
++
++func singleLabel(fs *flag.FlagSet, positional []string, stderr io.Writer) (string, bool) {
++	if len(positional) != 1 {
++		fmt.Fprintf(stderr, "%s requires exactly one label\n", fs.Name())
++		return "", false
++	}
++	return positional[0], true
++}
++
++func runInit(args []string, jsonMode bool, stdout, stderr io.Writer) int {
++	fs := newFlagSet("init", &jsonMode, stderr)
++	enclave := fs.Bool("enclave", false, "store the pair in the Secure Enclave; refuses with -34018 on an unprovisioned binary")
++	keychain := fs.Bool("keychain", false, "store the pair in the login keychain (default)")
++	userPresence := fs.Bool("user-presence", false, "require biometry or passcode for private-key use; refuses with -34018 on an unprovisioned binary")
++	positional, err := parseInterspersed(fs, args)
++	if err != nil {
++		return exitUsage
++	}
++	out := output{command: "init", json: jsonMode, stdout: stdout, stderr: stderr}
++	if *enclave && *keychain {
++		fmt.Fprintln(stderr, "init accepts either --enclave or --keychain, not both")
++		return exitUsage
++	}
++	input, ok := singleLabel(fs, positional, stderr)
++	if !ok {
++		return exitUsage
++	}
++	label, err := keyvault.ResolveLabel(input)
++	if err != nil {
++		return out.fail(err)
++	}
++	store := keyvault.StoreKeychain
++	if *enclave {
++		store = keyvault.StoreEnclave
++	}
++	key, err := keyvault.NewManager(newBackend()).Init(label, store, *userPresence)
++	if err != nil {
++		return out.fail(err)
++	}
++	view := viewOf(key)
++	return out.success(view, func(w io.Writer) {
++		fmt.Fprintf(w, "created %s store=%s created=%s fingerprint=%s\n", view.Label, view.Store, view.Created, view.Fingerprint)
++	})
++}
++
++func runList(args []string, jsonMode bool, stdout, stderr io.Writer) int {
++	fs := newFlagSet("list", &jsonMode, stderr)
++	positional, err := parseInterspersed(fs, args)
++	if err != nil {
++		return exitUsage
++	}
++	out := output{command: "list", json: jsonMode, stdout: stdout, stderr: stderr}
++	if len(positional) != 0 {
++		fmt.Fprintln(stderr, "list takes no arguments")
++		return exitUsage
++	}
++	keys, err := keyvault.NewManager(newBackend()).List()
++	if err != nil {
++		return out.fail(err)
++	}
++	views := make([]keyView, 0, len(keys))
++	for _, key := range keys {
++		views = append(views, viewOf(key))
++	}
++	return out.success(views, func(w io.Writer) {
++		if len(views) == 0 {
++			fmt.Fprintln(w, "no keys under "+keyvault.LabelPrefix)
++			return
++		}
++		for _, view := range views {
++			created, fingerprint := view.Created, view.Fingerprint
++			if created == "" {
++				created = "unknown"
++			}
++			if fingerprint == "" {
++				fingerprint = "unknown"
++			}
++			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", view.Label, view.Store, created, fingerprint)
++		}
++	})
++}
++
++func runPub(args []string, jsonMode bool, stdout, stderr io.Writer) int {
++	fs := newFlagSet("pub", &jsonMode, stderr)
++	outPath := fs.String("out", "", "write the public key to PATH (.pem for PEM, anything else for SPKI DER)")
++	format := fs.String("format", "", "der or pem; default is inferred from --out, or pem on stdout")
++	positional, err := parseInterspersed(fs, args)
++	if err != nil {
++		return exitUsage
++	}
++	out := output{command: "pub", json: jsonMode, stdout: stdout, stderr: stderr}
++	input, ok := singleLabel(fs, positional, stderr)
++	if !ok {
++		return exitUsage
++	}
++	encoding, err := resolveFormat(*format, *outPath)
++	if err != nil {
++		fmt.Fprintln(stderr, err)
++		return exitUsage
++	}
++	label, err := keyvault.ResolveLabel(input)
++	if err != nil {
++		return out.fail(err)
++	}
++	key, err := keyvault.NewManager(newBackend()).Public(label)
++	if err != nil {
++		return out.fail(err)
++	}
++	if len(key.SPKI) == 0 {
++		return out.fail(fmt.Errorf("public key of %s is unreadable; fingerprint unknown", label))
++	}
++	payload := key.SPKI
++	if encoding == "pem" {
++		payload = keyvault.EncodePEM(key.SPKI)
++	}
++	result := struct {
++		keyView
++		Format string `json:"format"`
++		Out    string `json:"out,omitempty"`
++		PEM    string `json:"pem,omitempty"`
++	}{keyView: viewOf(key), Format: encoding, Out: *outPath}
++	if *outPath != "" {
++		if err := os.WriteFile(*outPath, payload, 0o600); err != nil {
++			return out.fail(err)
++		}
++		return out.success(result, func(w io.Writer) {
++			fmt.Fprintf(w, "wrote %s %s to %s fingerprint=%s\n", label, encoding, *outPath, result.Fingerprint)
++		})
++	}
++	if encoding == "der" && !jsonMode {
++		_, err := stdout.Write(payload)
++		if err != nil {
++			return out.fail(err)
++		}
++		return exitOK
++	}
++	result.PEM = string(keyvault.EncodePEM(key.SPKI))
++	return out.success(result, func(w io.Writer) { _, _ = w.Write(payload) })
++}
++
++func resolveFormat(format, outPath string) (string, error) {
++	switch strings.ToLower(format) {
++	case "der", "pem":
++		return strings.ToLower(format), nil
++	case "":
++		if strings.HasSuffix(strings.ToLower(outPath), ".pem") {
++			return "pem", nil
++		}
++		if outPath != "" {
++			return "der", nil
++		}
++		return "pem", nil
++	default:
++		return "", fmt.Errorf("--format must be der or pem, got %q", format)
++	}
++}
++
++func runRotate(args []string, jsonMode bool, stdout, stderr io.Writer) int {
++	fs := newFlagSet("rotate", &jsonMode, stderr)
++	positional, err := parseInterspersed(fs, args)
++	if err != nil {
++		return exitUsage
++	}
++	out := output{command: "rotate", json: jsonMode, stdout: stdout, stderr: stderr}
++	input, ok := singleLabel(fs, positional, stderr)
++	if !ok {
++		return exitUsage
++	}
++	label, err := keyvault.ResolveLabel(input)
++	if err != nil {
++		return out.fail(err)
++	}
++	rotated, err := keyvault.NewManager(newBackend()).Rotate(label)
++	if err != nil {
++		return out.fail(err)
++	}
++	result := struct {
++		Old keyView `json:"old"`
++		New keyView `json:"new"`
++	}{Old: viewOf(rotated.Old), New: viewOf(rotated.New)}
++	return out.success(result, func(w io.Writer) {
++		fmt.Fprintf(w, "rotated %s -> %s fingerprint=%s (old key kept until deleted)\n", result.Old.Label, result.New.Label, result.New.Fingerprint)
++	})
++}
++
++func runDelete(args []string, jsonMode bool, stdout, stderr io.Writer) int {
++	fs := newFlagSet("delete", &jsonMode, stderr)
++	confirm := fs.Bool("confirm", false, "acknowledge that the private key is destroyed irreversibly")
++	positional, err := parseInterspersed(fs, args)
++	if err != nil {
++		return exitUsage
++	}
++	out := output{command: "delete", json: jsonMode, stdout: stdout, stderr: stderr}
++	input, ok := singleLabel(fs, positional, stderr)
++	if !ok {
++		return exitUsage
++	}
++	label, err := keyvault.ResolveLabel(input)
++	if err != nil {
++		return out.fail(err)
++	}
++	if err := keyvault.NewManager(newBackend()).Delete(label, *confirm); err != nil {
++		return out.fail(err)
++	}
++	result := struct {
++		Label   string `json:"label"`
++		Deleted bool   `json:"deleted"`
++	}{Label: label, Deleted: true}
++	return out.success(result, func(w io.Writer) { fmt.Fprintf(w, "deleted %s\n", label) })
++}
++
++func printUsage(w io.Writer) {
++	fmt.Fprintf(w, `mac-keyvault manages non-extractable P-256 key pairs under %s in the login keychain.
++
++Usage:
++  mac-keyvault [--json] init <label> [--keychain|--enclave] [--user-presence]
++  mac-keyvault [--json] list
++  mac-keyvault [--json] pub <label> [--out spki.der|spki.pem] [--format der|pem]
++  mac-keyvault [--json] rotate <label>
++  mac-keyvault [--json] delete <label> --confirm
++  mac-keyvault version
++
++Labels are placed under the prefix automatically; a full label is accepted as is.
++--enclave and --user-presence refuse with OSStatus -34018 when the binary has no
++provisioning profile; there is no silent keychain fallback.
++
++Exit codes: 0 ok, 1 failure, 2 usage, 3 refused by a policy gate.
++`, keyvault.LabelPrefix)
++}
+diff --git a/cmd/mac-keyvault/main_test.go b/cmd/mac-keyvault/main_test.go
+new file mode 100644
+index 0000000..976d522
+--- /dev/null
++++ b/cmd/mac-keyvault/main_test.go
+@@ -0,0 +1,558 @@
++package main
++
++import (
++	"bytes"
++	"crypto/x509"
++	"encoding/json"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/relux-works/mac-infra/internal/keyvault"
++)
++
++const testPrefix = keyvault.TestLabelPrefix
++
++// memStore is an in-memory Backend that records every call, so CLI tests can
++// prove which labels reached the store and which refusals happened first.
++type memStore struct {
++	keys    map[string]keyvault.Key
++	creates []keyvault.CreateOptions
++	deletes []string
++	createE error
++}
++
++func newMemStore(labels ...string) *memStore {
++	s := &memStore{keys: map[string]keyvault.Key{}}
++	for i, label := range labels {
++		s.keys[label] = keyvault.Key{Label: label, Store: keyvault.StoreKeychain, Created: time.Date(2026, 9, 15, 8, i, 0, 0, time.UTC), SPKI: generatorSPKI(byte(i))}
++	}
++	return s
++}
++
++func (s *memStore) Create(opts keyvault.CreateOptions) (keyvault.Key, error) {
++	s.creates = append(s.creates, opts)
++	if s.createE != nil {
++		return keyvault.Key{}, s.createE
++	}
++	key := keyvault.Key{Label: opts.Label, Store: opts.Store, Created: opts.Created, SPKI: generatorSPKI(byte(len(s.creates) + 100))}
++	s.keys[opts.Label] = key
++	return key, nil
++}
++
++func (s *memStore) List() ([]keyvault.Key, error) {
++	out := make([]keyvault.Key, 0, len(s.keys))
++	for _, key := range s.keys {
++		out = append(out, key)
++	}
++	return out, nil
++}
++
++func (s *memStore) Delete(label string) error {
++	s.deletes = append(s.deletes, label)
++	if _, ok := s.keys[label]; !ok {
++		return keyvault.ErrNotFound
++	}
++	delete(s.keys, label)
++	return nil
++}
++
++// generatorSPKI is a valid P-256 SPKI (the generator point) with one byte of
++// the DER header varied so fingerprints differ per key.
++func generatorSPKI(salt byte) []byte {
++	block, _ := pem.Decode([]byte(`-----BEGIN PUBLIC KEY-----
++MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncDfYEt
++6zOg9KE5RdiYwpZP40Lj/v4fp7juftIhGzOaI8+9gMJ8+/e/g+3IbJOJnw==
++-----END PUBLIC KEY-----`))
++	out := append([]byte(nil), block.Bytes...)
++	out[len(out)-1] ^= salt
++	return out
++}
++
++func useStore(t *testing.T, store keyvault.Backend) {
++	t.Helper()
++	previous := newBackend
++	newBackend = func() keyvault.Backend { return store }
++	t.Cleanup(func() { newBackend = previous })
++}
++
++func runJSON(t *testing.T, args ...string) (int, response, string) {
++	t.Helper()
++	var stdout, stderr bytes.Buffer
++	code := run(append([]string{"--json"}, args...), &stdout, &stderr)
++	var resp response
++	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
++		t.Fatalf("stdout is not a JSON envelope (%v): %s / stderr: %s", err, stdout.String(), stderr.String())
++	}
++	if stderr.Len() != 0 {
++		t.Fatalf("json mode wrote to stderr: %s", stderr.String())
++	}
++	return code, resp, stdout.String()
++}
++
++func resultMap(t *testing.T, resp response) map[string]any {
++	t.Helper()
++	m, ok := resp.Result.(map[string]any)
++	if !ok {
++		t.Fatalf("result is %T, want object: %+v", resp.Result, resp.Result)
++	}
++	return m
++}
++
++// Every command answers --json with the {ok, command, result|error}
++// envelope and the documented exit code; the same refusals in text mode go to
++// stderr with the same exit code and nothing on stdout.
++func TestRunJSONEnvelopeAndExitCodes(t *testing.T) {
++	existing := testPrefix + "cli"
++	for name, tc := range map[string]struct {
++		args     []string
++		code     int
++		ok       bool
++		command  string
++		errCode  string
++		osStatus float64
++	}{
++		"init new":                     {args: []string{"init", "test.cli-new"}, code: exitOK, ok: true, command: "init"},
++		"init duplicate":               {args: []string{"init", "test.cli"}, code: exitRefused, command: "init", errCode: keyvault.CodeDuplicateLabel},
++		"init invalid label":           {args: []string{"init", "bad label"}, code: exitRefused, command: "init", errCode: keyvault.CodeInvalidLabel},
++		"list":                         {args: []string{"list"}, code: exitOK, ok: true, command: "list"},
++		"pub existing":                 {args: []string{"pub", existing}, code: exitOK, ok: true, command: "pub"},
++		"pub missing":                  {args: []string{"pub", "test.cli-missing"}, code: exitFailure, command: "pub", errCode: "not_found"},
++		"rotate existing":              {args: []string{"rotate", "test.cli"}, code: exitOK, ok: true, command: "rotate"},
++		"rotate missing":               {args: []string{"rotate", "test.cli-missing"}, code: exitFailure, command: "rotate", errCode: "not_found"},
++		"delete unconfirmed":           {args: []string{"delete", "test.cli"}, code: exitRefused, command: "delete", errCode: keyvault.CodeConfirmationRequired},
++		"delete unconfirmed flag late": {args: []string{"delete", "test.cli", "--confirm=false"}, code: exitRefused, command: "delete", errCode: keyvault.CodeConfirmationRequired},
++		"delete confirmed":             {args: []string{"delete", "test.cli", "--confirm"}, code: exitOK, ok: true, command: "delete"},
++		"delete confirmed flag first":  {args: []string{"delete", "--confirm", "test.cli"}, code: exitOK, ok: true, command: "delete"},
++		"delete missing":               {args: []string{"delete", "--confirm", "test.cli-missing"}, code: exitFailure, command: "delete", errCode: "not_found"},
++	} {
++		t.Run(name, func(t *testing.T) {
++			useStore(t, newMemStore(existing))
++			code, resp, raw := runJSON(t, tc.args...)
++			if code != tc.code || resp.OK != tc.ok || resp.Command != tc.command {
++				t.Fatalf("code=%d ok=%v command=%s; want %d %v %s: %s", code, resp.OK, resp.Command, tc.code, tc.ok, tc.command, raw)
++			}
++			if tc.errCode != "" {
++				if resp.Error == nil || resp.Error.Code != tc.errCode {
++					t.Fatalf("error = %+v, want %s", resp.Error, tc.errCode)
++				}
++			} else if resp.Error != nil {
++				t.Fatalf("unexpected error %+v", resp.Error)
++			}
++			// Same command in text mode: refusals go to stderr only.
++			var stdout, stderr bytes.Buffer
++			useStore(t, newMemStore(existing))
++			if textCode := run(tc.args, &stdout, &stderr); textCode != tc.code {
++				t.Fatalf("text mode code = %d, want %d (stderr %s)", textCode, tc.code, stderr.String())
++			}
++			if tc.code != exitOK && (stdout.Len() != 0 || !strings.Contains(stderr.String(), tc.command+" failed:")) {
++				t.Fatalf("text refusal stdout=%q stderr=%q", stdout.String(), stderr.String())
++			}
++		})
++	}
++}
++
++// Usage errors exit 2 before any store call: missing label, extra args, both
++// store flags, unknown command, bad format.
++func TestRunUsageErrorsDoNotReachStore(t *testing.T) {
++	for name, args := range map[string][]string{
++		"no args":            nil,
++		"unknown command":    {"frobnicate"},
++		"init no label":      {"init"},
++		"init two labels":    {"init", "a", "b"},
++		"init both stores":   {"init", "a", "--enclave", "--keychain"},
++		"list with arg":      {"list", "a"},
++		"pub bad format":     {"pub", "a", "--format", "jwk"},
++		"delete no label":    {"delete", "--confirm"},
++		"rotate two labels":  {"rotate", "a", "b"},
++		"unknown flag":       {"delete", "a", "--force"},
++		"json unknown":       {"--json", "nope"},
++		"init unknown flag":  {"init", "a", "--biometry"},
++		"pub missing label":  {"pub"},
++		"delete extra label": {"delete", "a", "b", "--confirm"},
++	} {
++		t.Run(name, func(t *testing.T) {
++			store := newMemStore(testPrefix + "a")
++			useStore(t, store)
++			var stdout, stderr bytes.Buffer
++			if code := run(args, &stdout, &stderr); code != exitUsage {
++				t.Fatalf("code = %d, want %d; stdout=%s stderr=%s", code, exitUsage, stdout.String(), stderr.String())
++			}
++			if len(store.creates) != 0 || len(store.deletes) != 0 {
++				t.Fatalf("usage error reached the store: creates=%v deletes=%v", store.creates, store.deletes)
++			}
++		})
++	}
++}
++
++// init resolves the label under the prefix, records the store and creation
++// time, and the JSON result carries label, store, created and fingerprint.
++func TestRunInitResolvesLabelAndReportsKey(t *testing.T) {
++	store := newMemStore()
++	useStore(t, store)
++	code, resp, _ := runJSON(t, "init", "test.cli-init")
++	if code != exitOK {
++		t.Fatalf("code = %d", code)
++	}
++	result := resultMap(t, resp)
++	if result["label"] != testPrefix+"cli-init" || result["store"] != "keychain" || result["fingerprint"] == "" {
++		t.Fatalf("result = %v", result)
++	}
++	if _, err := time.Parse(time.RFC3339, result["created"].(string)); err != nil {
++		t.Fatalf("created = %v", result["created"])
++	}
++	if len(store.creates) != 1 || store.creates[0].Label != testPrefix+"cli-init" || store.creates[0].UserPresence {
++		t.Fatalf("creates = %+v", store.creates)
++	}
++	// A prefixed label is taken as is, not double-prefixed.
++	code, resp, _ = runJSON(t, "init", testPrefix+"cli-full")
++	if code != exitOK || resultMap(t, resp)["label"] != testPrefix+"cli-full" {
++		t.Fatalf("full label: %d %+v", code, resp)
++	}
++}
++
++// --enclave and --user-presence map a -34018 from the store to the
++// documented refusal with os_status, exit 3, and exactly one create attempt
++// of the requested shape — no keychain fallback.
++func TestRunInitEnclaveRefusalIsExplicit(t *testing.T) {
++	for name, tc := range map[string]struct {
++		flag    string
++		code    string
++		store   keyvault.StoreKind
++		present bool
++	}{
++		"enclave":       {flag: "--enclave", code: keyvault.CodeEnclaveUnavailable, store: keyvault.StoreEnclave},
++		"user-presence": {flag: "--user-presence", code: keyvault.CodeUserPresenceUnavail, store: keyvault.StoreKeychain, present: true},
++	} {
++		t.Run(name, func(t *testing.T) {
++			store := newMemStore()
++			store.createE = &keyvault.StatusError{Op: "create", Status: -34018}
++			useStore(t, store)
++			code, resp, raw := runJSON(t, "init", "test.cli-se", tc.flag)
++			if code != exitRefused || resp.Error == nil || resp.Error.Code != tc.code || resp.Error.Status != -34018 {
++				t.Fatalf("code=%d resp=%s", code, raw)
++			}
++			if !strings.Contains(resp.Error.Message, "provisioning profile") && !strings.Contains(resp.Error.Message, "unprovisioned binary") {
++				t.Fatalf("message lacks the documented reason: %s", resp.Error.Message)
++			}
++			if len(store.creates) != 1 || store.creates[0].Store != tc.store || store.creates[0].UserPresence != tc.present {
++				t.Fatalf("creates = %+v", store.creates)
++			}
++			if len(store.keys) != 0 {
++				t.Fatalf("a key exists after the refusal: %v", store.keys)
++			}
++		})
++	}
++}
++
++// delete without --confirm and delete of a label that would leave the
++// namespace never reach the store; the CLI cannot even address a foreign
++// item because every input is placed under the prefix.
++func TestRunDeleteGatesBeforeStore(t *testing.T) {
++	own := testPrefix + "cli-del"
++	for name, tc := range map[string]struct {
++		args  []string
++		code  int
++		err   string
++		label string
++	}{
++		"unconfirmed":         {args: []string{"delete", own}, code: exitRefused, err: keyvault.CodeConfirmationRequired},
++		"foreign confirmed":   {args: []string{"delete", "com.apple.security.key", "--confirm"}, code: exitFailure, err: "not_found", label: keyvault.LabelPrefix + "com.apple.security.key"},
++		"lookalike confirmed": {args: []string{"delete", "works.relux.mac-keyvaultX.key", "--confirm"}, code: exitFailure, err: "not_found", label: keyvault.LabelPrefix + "works.relux.mac-keyvaultX.key"},
++		"bare prefix":         {args: []string{"delete", keyvault.LabelPrefix, "--confirm"}, code: exitRefused, err: keyvault.CodeInvalidLabel},
++		"traversal":           {args: []string{"delete", "../" + own, "--confirm"}, code: exitRefused, err: keyvault.CodeInvalidLabel},
++	} {
++		t.Run(name, func(t *testing.T) {
++			store := newMemStore(own, "com.apple.security.key")
++			useStore(t, store)
++			code, resp, raw := runJSON(t, tc.args...)
++			if code != tc.code || resp.Error == nil || resp.Error.Code != tc.err {
++				t.Fatalf("code=%d resp=%s", code, raw)
++			}
++			if tc.label != "" && !strings.Contains(resp.Error.Message, tc.label) {
++				t.Fatalf("resolved label not reported: %s", resp.Error.Message)
++			}
++			for _, deleted := range store.deletes {
++				if !strings.HasPrefix(deleted, keyvault.LabelPrefix) {
++					t.Fatalf("a foreign label reached the store: %s", deleted)
++				}
++			}
++			if _, ok := store.keys["com.apple.security.key"]; !ok {
++				t.Fatal("foreign key deleted")
++			}
++			if _, ok := store.keys[own]; !ok {
++				t.Fatal("own key deleted by a refused command")
++			}
++		})
++	}
++}
++
++// pub writes SPKI DER or PEM depending on --out / --format, both parse as the
++// same P-256 key, and JSON mode reports format, out, and fingerprint.
++func TestRunPubWritesDERAndPEM(t *testing.T) {
++	label := testPrefix + "cli-pub"
++	store := newMemStore(label)
++	useStore(t, store)
++	dir := t.TempDir()
++	derPath := filepath.Join(dir, "spki.der")
++	pemPath := filepath.Join(dir, "spki.pem")
++	forcedPEM := filepath.Join(dir, "spki.bin")
++
++	var stdout, stderr bytes.Buffer
++	if code := run([]string{"pub", label, "--out", derPath}, &stdout, &stderr); code != exitOK {
++		t.Fatalf("der: %d %s", code, stderr.String())
++	}
++	if code := run([]string{"pub", label, "--out", pemPath}, &stdout, &stderr); code != exitOK {
++		t.Fatalf("pem: %d %s", code, stderr.String())
++	}
++	code, resp, raw := runJSON(t, "pub", label, "--out", forcedPEM, "--format", "pem")
++	if code != exitOK {
++		t.Fatalf("forced pem: %s", raw)
++	}
++	result := resultMap(t, resp)
++	if result["format"] != "pem" || result["out"] != forcedPEM || result["fingerprint"] != store.keys[label].Fingerprint() {
++		t.Fatalf("result = %v", result)
++	}
++
++	der, err := os.ReadFile(derPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !bytes.Equal(der, store.keys[label].SPKI) {
++		t.Fatalf("der artifact differs from SPKI")
++	}
++	for _, path := range []string{pemPath, forcedPEM} {
++		data, err := os.ReadFile(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		block, _ := pem.Decode(data)
++		if block == nil || block.Type != "PUBLIC KEY" || !bytes.Equal(block.Bytes, der) {
++			t.Fatalf("%s is not the SPKI PEM: %s", path, data)
++		}
++		info, err := os.Stat(path)
++		if err != nil || info.Mode().Perm() != 0o600 {
++			t.Fatalf("%s mode = %v", path, info.Mode())
++		}
++	}
++	// stdout default is PEM; --format der streams raw DER.
++	stdout.Reset()
++	if code := run([]string{"pub", label}, &stdout, &stderr); code != exitOK || !strings.HasPrefix(stdout.String(), "-----BEGIN PUBLIC KEY-----") {
++		t.Fatalf("stdout pem: %d %q", code, stdout.String())
++	}
++	stdout.Reset()
++	if code := run([]string{"pub", label, "--format", "der"}, &stdout, &stderr); code != exitOK || !bytes.Equal(stdout.Bytes(), der) {
++		t.Fatalf("stdout der: %d %x", code, stdout.Bytes())
++	}
++	// JSON without --out embeds the PEM.
++	_, resp, _ = runJSON(t, "pub", label)
++	if pemText, _ := resultMap(t, resp)["pem"].(string); !strings.HasPrefix(pemText, "-----BEGIN PUBLIC KEY-----") {
++		t.Fatalf("json pem = %q", pemText)
++	}
++}
++
++// list prints label, store, created, and fingerprint per key in both modes,
++// sorted by label, and shows "unknown" for a key whose metadata is missing.
++func TestRunListShowsAllColumns(t *testing.T) {
++	store := newMemStore(testPrefix+"cli-list-b", testPrefix+"cli-list-a")
++	store.keys[testPrefix+"cli-list-c"] = keyvault.Key{Label: testPrefix + "cli-list-c", Store: keyvault.StoreUnknown}
++	useStore(t, store)
++	var stdout, stderr bytes.Buffer
++	if code := run([]string{"list"}, &stdout, &stderr); code != exitOK {
++		t.Fatalf("code = %d", code)
++	}
++	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
++	if len(lines) != 3 {
++		t.Fatalf("lines = %q", lines)
++	}
++	fields := strings.Split(lines[0], "\t")
++	if len(fields) != 4 || fields[0] != testPrefix+"cli-list-a" || fields[1] != "keychain" || fields[2] != "2026-09-15T08:01:00Z" || fields[3] != store.keys[testPrefix+"cli-list-a"].Fingerprint() {
++		t.Fatalf("first line = %q", lines[0])
++	}
++	if !strings.HasSuffix(lines[2], "\tunknown\tunknown\tunknown") {
++		t.Fatalf("unknown metadata line = %q", lines[2])
++	}
++	_, resp, _ := runJSON(t, "list")
++	items, ok := resp.Result.([]any)
++	if !ok || len(items) != 3 {
++		t.Fatalf("json result = %+v", resp.Result)
++	}
++	first := items[0].(map[string]any)
++	for _, field := range []string{"label", "store", "created", "fingerprint"} {
++		if _, ok := first[field]; !ok {
++			t.Fatalf("json item lacks %s: %v", field, first)
++		}
++	}
++}
++
++// rotate reports old and new labels, creates <label>.v<N>, and keeps the old
++// key in the store.
++func TestRunRotateKeepsOldKey(t *testing.T) {
++	label := testPrefix + "cli-rot"
++	store := newMemStore(label)
++	useStore(t, store)
++	code, resp, raw := runJSON(t, "rotate", "test.cli-rot")
++	if code != exitOK {
++		t.Fatalf("%s", raw)
++	}
++	result := resultMap(t, resp)
++	oldView, newView := result["old"].(map[string]any), result["new"].(map[string]any)
++	if oldView["label"] != label || newView["label"] != label+".v2" || newView["fingerprint"] == oldView["fingerprint"] {
++		t.Fatalf("result = %v", result)
++	}
++	if _, ok := store.keys[label]; !ok || len(store.deletes) != 0 {
++		t.Fatalf("old key gone: keys=%v deletes=%v", store.keys, store.deletes)
++	}
++	if _, ok := store.keys[label+".v2"]; !ok {
++		t.Fatal("new versioned key missing")
++	}
++}
++
++// Unknown Security statuses surface as security_error with the OSStatus and
++// exit 1, never as a refusal.
++func TestRunSecurityErrorIsExitOne(t *testing.T) {
++	store := newMemStore()
++	store.createE = &keyvault.StatusError{Op: "create", Status: -25293}
++	useStore(t, store)
++	code, resp, raw := runJSON(t, "init", "test.cli-err")
++	if code != exitFailure || resp.Error == nil || resp.Error.Code != "security_error" || resp.Error.Status != -25293 {
++		t.Fatalf("code=%d %s", code, raw)
++	}
++}
++
++func TestVersionAndHelp(t *testing.T) {
++	var stdout, stderr bytes.Buffer
++	if code := run([]string{"version"}, &stdout, &stderr); code != exitOK || !strings.HasPrefix(stdout.String(), "mac-keyvault ") {
++		t.Fatalf("%d %q", code, stdout.String())
++	}
++	stdout.Reset()
++	if code := run([]string{"help"}, &stdout, &stderr); code != exitOK || !strings.Contains(stdout.String(), keyvault.LabelPrefix) {
++		t.Fatalf("%d %q", code, stdout.String())
++	}
++}
++
++// guardedBackend fails any Create/Delete outside the test prefix before it
++// reaches the real keychain and remembers labels for cleanup.
++type guardedBackend struct {
++	t       *testing.T
++	inner   keyvault.Backend
++	touched []string
++}
++
++func (g *guardedBackend) guard(label string) error {
++	if !strings.HasPrefix(label, testPrefix) {
++		g.t.Errorf("test guard: %q is outside %s", label, testPrefix)
++		return fmt.Errorf("test guard refused %q", label)
++	}
++	g.touched = append(g.touched, label)
++	return nil
++}
++
++func (g *guardedBackend) Create(opts keyvault.CreateOptions) (keyvault.Key, error) {
++	if err := g.guard(opts.Label); err != nil {
++		return keyvault.Key{}, err
++	}
++	return g.inner.Create(opts)
++}
++
++func (g *guardedBackend) List() ([]keyvault.Key, error) { return g.inner.List() }
++
++func (g *guardedBackend) Delete(label string) error {
++	if err := g.guard(label); err != nil {
++		return err
++	}
++	return g.inner.Delete(label)
++}
++
++// End-to-end against the login keychain on this Mac through the production
++// SecurityStore: init, list, pub, rotate, delete, the explicit --enclave
++// refusal with -34018, and the duplicate refusal. All labels are test
++// prefixed and removed in cleanup.
++func TestRunAgainstLoginKeychain(t *testing.T) {
++	if os.Getenv("MAC_KEYVAULT_SKIP_KEYCHAIN") != "" {
++		t.Skip("MAC_KEYVAULT_SKIP_KEYCHAIN set")
++	}
++	guard := &guardedBackend{t: t, inner: keyvault.NewSecurityStore()}
++	useStore(t, guard)
++	t.Cleanup(func() {
++		for _, label := range guard.touched {
++			if err := guard.inner.Delete(label); err != nil && !errors.Is(err, keyvault.ErrNotFound) {
++				t.Errorf("cleanup %s: %v", label, err)
++			}
++		}
++	})
++	short := fmt.Sprintf("test.cli-e2e-%d", os.Getpid())
++	label := keyvault.LabelPrefix + short
++
++	code, resp, raw := runJSON(t, "init", short)
++	if code != exitOK {
++		t.Fatalf("init: %s", raw)
++	}
++	fingerprint := resultMap(t, resp)["fingerprint"].(string)
++
++	if code, resp, raw = runJSON(t, "init", short); code != exitRefused || resp.Error.Code != keyvault.CodeDuplicateLabel {
++		t.Fatalf("duplicate: %s", raw)
++	}
++	if code, resp, raw = runJSON(t, "init", short+"-se", "--enclave"); code != exitRefused || resp.Error.Code != keyvault.CodeEnclaveUnavailable || resp.Error.Status != -34018 {
++		t.Fatalf("enclave: %s", raw)
++	}
++	if err := guard.inner.Delete(label + "-se"); !errors.Is(err, keyvault.ErrNotFound) {
++		t.Fatalf("enclave refusal left a keychain key behind: %v", err)
++	}
++
++	_, resp, raw = runJSON(t, "list")
++	found := false
++	for _, item := range resp.Result.([]any) {
++		view := item.(map[string]any)
++		if view["label"] == label {
++			found = view["store"] == "keychain" && view["fingerprint"] == fingerprint && view["created"] != ""
++		}
++	}
++	if !found {
++		t.Fatalf("list lacks the created key with all columns: %s", raw)
++	}
++
++	derPath := filepath.Join(t.TempDir(), "spki.der")
++	if code, _, raw = runJSON(t, "pub", short, "--out", derPath); code != exitOK {
++		t.Fatalf("pub: %s", raw)
++	}
++	der, err := os.ReadFile(derPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := x509.ParsePKIXPublicKey(der); err != nil {
++		t.Fatalf("pub wrote an unparsable SPKI: %v", err)
++	}
++
++	if code, resp, raw = runJSON(t, "rotate", short); code != exitOK {
++		t.Fatalf("rotate: %s", raw)
++	}
++	if resultMap(t, resp)["new"].(map[string]any)["label"] != label+".v2" {
++		t.Fatalf("rotate: %s", raw)
++	}
++	if code, _, raw = runJSON(t, "pub", short); code != exitOK {
++		t.Fatalf("old key gone after rotate: %s", raw)
++	}
++
++	if code, resp, raw = runJSON(t, "delete", short); code != exitRefused || resp.Error.Code != keyvault.CodeConfirmationRequired {
++		t.Fatalf("delete unconfirmed: %s", raw)
++	}
++	for _, l := range []string{short, short + ".v2"} {
++		if code, _, raw = runJSON(t, "delete", l, "--confirm"); code != exitOK {
++			t.Fatalf("delete %s: %s", l, raw)
++		}
++	}
++	if code, resp, raw = runJSON(t, "delete", short, "--confirm"); code != exitFailure || resp.Error.Code != "not_found" {
++		t.Fatalf("delete twice: %s", raw)
++	}
++	for _, touched := range guard.touched {
++		if !strings.HasPrefix(touched, testPrefix) {
++			t.Fatalf("non-test label touched: %s", touched)
++		}
++	}
++}
+diff --git a/internal/keyvault/keyvault.go b/internal/keyvault/keyvault.go
+new file mode 100644
+index 0000000..3e7cede
+--- /dev/null
++++ b/internal/keyvault/keyvault.go
+@@ -0,0 +1,323 @@
++// Package keyvault manages non-extractable P-256 key pairs in the login
++// keychain for mac-keyvault. Policy gates (label prefix, duplicate labels,
++// delete confirmation, explicit Secure Enclave refusal) live in Manager so
++// they run before any Security.framework call.
++package keyvault
++
++import (
++	"crypto/ecdh"
++	"crypto/sha256"
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"regexp"
++	"sort"
++	"strconv"
++	"strings"
++	"time"
++)
++
++// LabelPrefix is the only namespace mac-keyvault creates, lists, or deletes.
++const LabelPrefix = "works.relux.mac-keyvault."
++
++// TestLabelPrefix is the namespace the test suites are allowed to touch.
++const TestLabelPrefix = LabelPrefix + "test."
++
++// errSecMissingEntitlement is Security.framework's answer when the calling
++// binary lacks the provisioning profile the Data Protection keychain and the
++// Secure Enclave require.
++const errSecMissingEntitlement = -34018
++
++const errSecItemNotFound = -25300
++
++// StoreKind names where a key pair lives.
++type StoreKind string
++
++const (
++	StoreKeychain StoreKind = "keychain"
++	StoreEnclave  StoreKind = "enclave"
++	StoreUnknown  StoreKind = "unknown"
++)
++
++// Key is one managed key pair. SPKI is the DER SubjectPublicKeyInfo; it is
++// empty when the public half could not be read.
++type Key struct {
++	Label   string
++	Store   StoreKind
++	Created time.Time
++	SPKI    []byte
++}
++
++// Fingerprint is base64url(SHA-256(DER(SPKI))) without padding, or "" when
++// the SPKI is unknown.
++func (k Key) Fingerprint() string {
++	if len(k.SPKI) == 0 {
++		return ""
++	}
++	sum := sha256.Sum256(k.SPKI)
++	return base64.RawURLEncoding.EncodeToString(sum[:])
++}
++
++// CreateOptions describes a key pair to generate.
++type CreateOptions struct {
++	Label        string
++	Store        StoreKind
++	UserPresence bool
++	Created      time.Time
++}
++
++// Backend is the key store the Manager gates. The production implementation
++// is SecurityStore.
++type Backend interface {
++	Create(opts CreateOptions) (Key, error)
++	// List returns every key whose label carries LabelPrefix.
++	List() ([]Key, error)
++	// Delete removes the pair under label or returns ErrNotFound.
++	Delete(label string) error
++}
++
++// ErrNotFound reports a label with no key pair behind it.
++var ErrNotFound = errors.New("key not found")
++
++// StatusError carries a raw Security.framework OSStatus.
++type StatusError struct {
++	Op     string
++	Status int
++}
++
++func (e *StatusError) Error() string {
++	return fmt.Sprintf("Security.framework %s failed: OSStatus %d", e.Op, e.Status)
++}
++
++// Refusal is a policy gate rejection raised before or instead of a store call.
++type Refusal struct {
++	Code    string
++	Message string
++	Status  int // underlying OSStatus when a Security call produced the refusal
++}
++
++func (e *Refusal) Error() string {
++	if e.Status != 0 {
++		return fmt.Sprintf("%s: %s (OSStatus %d)", e.Code, e.Message, e.Status)
++	}
++	return fmt.Sprintf("%s: %s", e.Code, e.Message)
++}
++
++// Refusal codes.
++const (
++	CodeInvalidLabel         = "invalid_label"
++	CodeForeignLabel         = "foreign_label"
++	CodeDuplicateLabel       = "duplicate_label"
++	CodeConfirmationRequired = "confirmation_required"
++	CodeEnclaveUnavailable   = "enclave_unavailable"
++	CodeUserPresenceUnavail  = "user_presence_unavailable"
++	CodeUnsupportedStore     = "unsupported_store"
++)
++
++var labelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
++
++// ResolveLabel maps CLI input to a full label: input already carrying
++// LabelPrefix is used as is, anything else is placed under the prefix. The
++// result is always inside the tool's namespace.
++func ResolveLabel(input string) (string, error) {
++	input = strings.TrimSpace(input)
++	name := strings.TrimPrefix(input, LabelPrefix)
++	if name == "" || !labelPattern.MatchString(name) || strings.Contains(name, "..") {
++		return "", &Refusal{Code: CodeInvalidLabel, Message: fmt.Sprintf("label %q must match %s and must not contain \"..\"", input, labelPattern)}
++	}
++	return LabelPrefix + name, nil
++}
++
++// RequireOwnLabel refuses any label outside LabelPrefix. It is the guard every
++// mutating Manager path runs before touching the store.
++func RequireOwnLabel(label string) error {
++	if !strings.HasPrefix(label, LabelPrefix) || len(label) == len(LabelPrefix) {
++		return &Refusal{Code: CodeForeignLabel, Message: fmt.Sprintf("label %q is outside the %s namespace; refusing to touch it", label, LabelPrefix)}
++	}
++	return nil
++}
++
++// Manager applies the policy gates around a Backend.
++type Manager struct {
++	backend Backend
++	now     func() time.Time
++}
++
++// NewManager wires the gates around backend.
++func NewManager(backend Backend) *Manager {
++	return &Manager{backend: backend, now: time.Now}
++}
++
++// SetClock overrides the creation timestamp source.
++func (m *Manager) SetClock(now func() time.Time) {
++	m.now = now
++}
++
++func (m *Manager) lookup(label string) (Key, bool, error) {
++	keys, err := m.backend.List()
++	if err != nil {
++		return Key{}, false, err
++	}
++	for _, key := range keys {
++		if key.Label == label {
++			return key, true, nil
++		}
++	}
++	return Key{}, false, nil
++}
++
++// Init creates a new pair under label. A duplicate label is refused before
++// the store is asked to create anything; a Secure Enclave or user-presence
++// request that Security.framework rejects with -34018 is refused with the
++// documented reason instead of falling back to the plain keychain.
++func (m *Manager) Init(label string, store StoreKind, userPresence bool) (Key, error) {
++	if err := RequireOwnLabel(label); err != nil {
++		return Key{}, err
++	}
++	switch store {
++	case StoreKeychain, StoreEnclave:
++	default:
++		return Key{}, &Refusal{Code: CodeUnsupportedStore, Message: fmt.Sprintf("store %q is not supported; use keychain or enclave", store)}
++	}
++	if _, exists, err := m.lookup(label); err != nil {
++		return Key{}, err
++	} else if exists {
++		return Key{}, &Refusal{Code: CodeDuplicateLabel, Message: fmt.Sprintf("label %q already exists; rotate it or delete it first", label)}
++	}
++	key, err := m.backend.Create(CreateOptions{Label: label, Store: store, UserPresence: userPresence, Created: m.now().UTC().Truncate(time.Second)})
++	if err != nil {
++		var status *StatusError
++		if errors.As(err, &status) && status.Status == errSecMissingEntitlement {
++			if store == StoreEnclave {
++				return Key{}, &Refusal{Code: CodeEnclaveUnavailable, Status: status.Status, Message: "Secure Enclave refused the permanent key: the binary is not signed with a provisioning profile (errSecMissingEntitlement); no keychain fallback was made, rerun without --enclave to use the login keychain"}
++			}
++			return Key{}, &Refusal{Code: CodeUserPresenceUnavail, Status: status.Status, Message: "user-presence ACL needs the Data Protection keychain, which refused this unprovisioned binary (errSecMissingEntitlement); no key was created, rerun without --user-presence"}
++		}
++		return Key{}, err
++	}
++	return key, nil
++}
++
++// List returns the managed keys sorted by label.
++func (m *Manager) List() ([]Key, error) {
++	keys, err := m.backend.List()
++	if err != nil {
++		return nil, err
++	}
++	filtered := keys[:0:0]
++	for _, key := range keys {
++		if RequireOwnLabel(key.Label) == nil {
++			filtered = append(filtered, key)
++		}
++	}
++	sort.Slice(filtered, func(i, j int) bool { return filtered[i].Label < filtered[j].Label })
++	return filtered, nil
++}
++
++// Public returns the key behind label or ErrNotFound.
++func (m *Manager) Public(label string) (Key, error) {
++	if err := RequireOwnLabel(label); err != nil {
++		return Key{}, err
++	}
++	key, ok, err := m.lookup(label)
++	if err != nil {
++		return Key{}, err
++	}
++	if !ok {
++		return Key{}, fmt.Errorf("%w: %s", ErrNotFound, label)
++	}
++	return key, nil
++}
++
++// RotateResult reports the retained old pair and the new versioned pair.
++type RotateResult struct {
++	Old Key
++	New Key
++}
++
++var versionSuffix = regexp.MustCompile(`\.v([0-9]+)$`)
++
++// BaseLabel strips a .v<N> rotation suffix.
++func BaseLabel(label string) string {
++	return versionSuffix.ReplaceAllString(label, "")
++}
++
++// Rotate creates <base>.v<N+1> in the same store as the newest existing
++// version and keeps every older version until it is deleted explicitly.
++func (m *Manager) Rotate(label string) (RotateResult, error) {
++	if err := RequireOwnLabel(label); err != nil {
++		return RotateResult{}, err
++	}
++	keys, err := m.List()
++	if err != nil {
++		return RotateResult{}, err
++	}
++	base := BaseLabel(label)
++	newest, version := Key{}, 0
++	found := false
++	for _, key := range keys {
++		if key.Label == base {
++			if !found {
++				newest = key
++				found = true
++			}
++			continue
++		}
++		match := versionSuffix.FindStringSubmatch(strings.TrimPrefix(key.Label, base))
++		if match == nil || !strings.HasPrefix(key.Label, base+".v") {
++			continue
++		}
++		n, _ := strconv.Atoi(match[1])
++		if n > version {
++			version, newest, found = n, key, true
++		}
++	}
++	if !found {
++		return RotateResult{}, fmt.Errorf("%w: %s", ErrNotFound, base)
++	}
++	store := newest.Store
++	if store == StoreUnknown {
++		store = StoreKeychain
++	}
++	next := fmt.Sprintf("%s.v%d", base, max(version, 1)+1)
++	created, err := m.Init(next, store, false)
++	if err != nil {
++		return RotateResult{}, err
++	}
++	return RotateResult{Old: newest, New: created}, nil
++}
++
++// Delete removes the pair under label. It refuses without confirmation and
++// refuses any label outside LabelPrefix; both refusals happen before the
++// backend is called.
++func (m *Manager) Delete(label string, confirmed bool) error {
++	if err := RequireOwnLabel(label); err != nil {
++		return err
++	}
++	if !confirmed {
++		return &Refusal{Code: CodeConfirmationRequired, Message: fmt.Sprintf("deleting %q is irreversible; pass --confirm", label)}
++	}
++	if err := m.backend.Delete(label); err != nil {
++		if errors.Is(err, ErrNotFound) {
++			return fmt.Errorf("%w: %s", ErrNotFound, label)
++		}
++		return err
++	}
++	return nil
++}
++
++// spkiFromPoint converts an uncompressed X9.63 P-256 point into DER SPKI.
++func spkiFromPoint(point []byte) ([]byte, error) {
++	pub, err := ecdh.P256().NewPublicKey(point)
++	if err != nil {
++		return nil, fmt.Errorf("public key point: %w", err)
++	}
++	return x509.MarshalPKIXPublicKey(pub)
++}
++
++// EncodePEM wraps DER SPKI as a PUBLIC KEY PEM block.
++func EncodePEM(spki []byte) []byte {
++	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: spki})
++}
+diff --git a/internal/keyvault/keyvault_test.go b/internal/keyvault/keyvault_test.go
+new file mode 100644
+index 0000000..ca9c136
+--- /dev/null
++++ b/internal/keyvault/keyvault_test.go
+@@ -0,0 +1,388 @@
++package keyvault
++
++import (
++	"errors"
++	"strings"
++	"testing"
++	"time"
++)
++
++// fakeStore records every call so tests can prove which labels reached the
++// store and which refusals happened before any store call.
++type fakeStore struct {
++	keys    map[string]Key
++	creates []CreateOptions
++	deletes []string
++	lists   int
++	createE error
++}
++
++func newFakeStore(labels ...string) *fakeStore {
++	s := &fakeStore{keys: map[string]Key{}}
++	for _, label := range labels {
++		s.keys[label] = Key{Label: label, Store: StoreKeychain, Created: time.Unix(1_700_000_000, 0).UTC(), SPKI: []byte{0x30, 0x59}}
++	}
++	return s
++}
++
++func (s *fakeStore) Create(opts CreateOptions) (Key, error) {
++	s.creates = append(s.creates, opts)
++	if s.createE != nil {
++		return Key{}, s.createE
++	}
++	key := Key{Label: opts.Label, Store: opts.Store, Created: opts.Created, SPKI: []byte{0x30, 0x59, byte(len(s.creates))}}
++	s.keys[opts.Label] = key
++	return key, nil
++}
++
++func (s *fakeStore) List() ([]Key, error) {
++	s.lists++
++	var out []Key
++	for _, key := range s.keys {
++		out = append(out, key)
++	}
++	return out, nil
++}
++
++func (s *fakeStore) Delete(label string) error {
++	s.deletes = append(s.deletes, label)
++	if _, ok := s.keys[label]; !ok {
++		return ErrNotFound
++	}
++	delete(s.keys, label)
++	return nil
++}
++
++func refusalCode(t *testing.T, err error) string {
++	t.Helper()
++	var refusal *Refusal
++	if !errors.As(err, &refusal) {
++		t.Fatalf("expected a Refusal, got %v", err)
++	}
++	return refusal.Code
++}
++
++// ResolveLabel always lands inside LabelPrefix and refuses shapes that could
++// escape it or address another owner's item.
++func TestResolveLabel(t *testing.T) {
++	for name, tc := range map[string]struct {
++		input string
++		want  string
++		code  string
++	}{
++		"short name":              {input: "signer", want: LabelPrefix + "signer"},
++		"already prefixed":        {input: LabelPrefix + "signer", want: LabelPrefix + "signer"},
++		"dots and versions":       {input: "test.signer.v2", want: LabelPrefix + "test.signer.v2"},
++		"foreign reverse dns":     {input: "com.apple.security", want: LabelPrefix + "com.apple.security"},
++		"empty":                   {input: "", code: CodeInvalidLabel},
++		"bare prefix":             {input: LabelPrefix, code: CodeInvalidLabel},
++		"whitespace":              {input: "sig ner", code: CodeInvalidLabel},
++		"path traversal":          {input: "a/../b", code: CodeInvalidLabel},
++		"double dot":              {input: "a..b", code: CodeInvalidLabel},
++		"leading dot":             {input: ".hidden", code: CodeInvalidLabel},
++		"control byte":            {input: "a\x1fb", code: CodeInvalidLabel},
++		"prefix-lookalike prefix": {input: "works.relux.mac-keyvaultX.signer", want: LabelPrefix + "works.relux.mac-keyvaultX.signer"},
++	} {
++		t.Run(name, func(t *testing.T) {
++			got, err := ResolveLabel(tc.input)
++			if tc.code != "" {
++				if refusalCode(t, err) != tc.code {
++					t.Fatalf("code = %v, want %s", err, tc.code)
++				}
++				return
++			}
++			if err != nil || got != tc.want {
++				t.Fatalf("ResolveLabel(%q) = %q, %v; want %q", tc.input, got, err, tc.want)
++			}
++		})
++	}
++}
++
++// RequireOwnLabel admits only labels strictly inside LabelPrefix; the bare
++// prefix, lookalike prefixes, and other namespaces are refused.
++func TestRequireOwnLabel(t *testing.T) {
++	for _, label := range []string{LabelPrefix + "a", TestLabelPrefix + "x.v2"} {
++		if err := RequireOwnLabel(label); err != nil {
++			t.Fatalf("own label %q refused: %v", label, err)
++		}
++	}
++	for _, label := range []string{"", LabelPrefix, "works.relux.other.a", "works.relux.mac-keyvaultX.a", "com.apple.security.key", " " + LabelPrefix + "a"} {
++		if refusalCode(t, RequireOwnLabel(label)) != CodeForeignLabel {
++			t.Fatalf("foreign label %q was admitted", label)
++		}
++	}
++}
++
++// Init refuses a duplicate label before asking the store to create anything;
++// a fresh label reaches the store with the permanent, non-extractable shape.
++func TestManagerInitDuplicateRefusedBeforeCreate(t *testing.T) {
++	existing := TestLabelPrefix + "dup"
++	store := newFakeStore(existing)
++	manager := NewManager(store)
++	manager.SetClock(func() time.Time { return time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC) })
++
++	if code := refusalCode(t, mustErr(manager.Init(existing, StoreKeychain, false))); code != CodeDuplicateLabel {
++		t.Fatalf("code = %s, want %s", code, CodeDuplicateLabel)
++	}
++	if len(store.creates) != 0 {
++		t.Fatalf("duplicate label reached the store: %+v", store.creates)
++	}
++
++	key, err := manager.Init(TestLabelPrefix+"fresh", StoreKeychain, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(store.creates) != 1 || store.creates[0].Label != TestLabelPrefix+"fresh" || store.creates[0].Store != StoreKeychain {
++		t.Fatalf("create options = %+v", store.creates)
++	}
++	if !key.Created.Equal(time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)) || key.Fingerprint() == "" {
++		t.Fatalf("created key = %+v", key)
++	}
++}
++
++func mustErr(_ Key, err error) error { return err }
++
++// Init refuses labels outside the namespace and unknown stores without a
++// store call.
++func TestManagerInitRefusesForeignLabelAndUnknownStore(t *testing.T) {
++	store := newFakeStore()
++	manager := NewManager(store)
++	if code := refusalCode(t, mustErr(manager.Init("com.apple.foo", StoreKeychain, false))); code != CodeForeignLabel {
++		t.Fatalf("code = %s", code)
++	}
++	if code := refusalCode(t, mustErr(manager.Init(TestLabelPrefix+"x", StoreKind("tpm"), false))); code != CodeUnsupportedStore {
++		t.Fatalf("code = %s", code)
++	}
++	if len(store.creates) != 0 || store.lists != 0 {
++		t.Fatalf("store was called: creates=%d lists=%d", len(store.creates), store.lists)
++	}
++}
++
++// A -34018 from the store on an --enclave or --user-presence request becomes
++// an explicit refusal carrying the OSStatus; exactly one create attempt is
++// made and no keychain fallback create follows.
++func TestManagerInitMissingEntitlementIsExplicitRefusal(t *testing.T) {
++	for name, tc := range map[string]struct {
++		store        StoreKind
++		userPresence bool
++		code         string
++	}{
++		"enclave":       {store: StoreEnclave, code: CodeEnclaveUnavailable},
++		"user-presence": {store: StoreKeychain, userPresence: true, code: CodeUserPresenceUnavail},
++	} {
++		t.Run(name, func(t *testing.T) {
++			store := newFakeStore()
++			store.createE = &StatusError{Op: "create", Status: errSecMissingEntitlement}
++			_, err := NewManager(store).Init(TestLabelPrefix+"se", tc.store, tc.userPresence)
++			var refusal *Refusal
++			if !errors.As(err, &refusal) || refusal.Code != tc.code || refusal.Status != errSecMissingEntitlement {
++				t.Fatalf("err = %v, want %s with -34018", err, tc.code)
++			}
++			if !strings.Contains(refusal.Message, "provisioned binary") && !strings.Contains(refusal.Message, "provisioning profile") {
++				t.Fatalf("refusal lacks the documented reason: %s", refusal.Message)
++			}
++			if len(store.creates) != 1 || store.creates[0].Store != tc.store || store.creates[0].UserPresence != tc.userPresence {
++				t.Fatalf("store creates = %+v; want exactly the requested shape and no fallback", store.creates)
++			}
++			if len(store.keys) != 0 {
++				t.Fatalf("a key was created despite the refusal: %v", store.keys)
++			}
++		})
++	}
++}
++
++// Other Security errors pass through as StatusError, not as a refusal.
++func TestManagerInitOtherStatusErrorPassesThrough(t *testing.T) {
++	store := newFakeStore()
++	store.createE = &StatusError{Op: "create", Status: -25293}
++	_, err := NewManager(store).Init(TestLabelPrefix+"x", StoreKeychain, false)
++	var status *StatusError
++	if !errors.As(err, &status) || status.Status != -25293 {
++		t.Fatalf("err = %v", err)
++	}
++	var refusal *Refusal
++	if errors.As(err, &refusal) {
++		t.Fatalf("plain status error was reported as a refusal: %v", err)
++	}
++}
++
++// Delete refuses without confirmation and refuses foreign labels; neither
++// refusal reaches the store. A confirmed own label is deleted; a confirmed
++// missing label reports ErrNotFound.
++func TestManagerDeleteGates(t *testing.T) {
++	own := TestLabelPrefix + "victim"
++	for name, tc := range map[string]struct {
++		label     string
++		confirmed bool
++		code      string
++		notFound  bool
++		reaches   bool
++	}{
++		"own unconfirmed":         {label: own, code: CodeConfirmationRequired},
++		"foreign confirmed":       {label: "com.apple.security.key", confirmed: true, code: CodeForeignLabel},
++		"foreign unconfirmed":     {label: "com.apple.security.key", code: CodeForeignLabel},
++		"sibling namespace":       {label: "works.relux.other.key", confirmed: true, code: CodeForeignLabel},
++		"bare prefix confirmed":   {label: LabelPrefix, confirmed: true, code: CodeForeignLabel},
++		"prefix-only lookalike":   {label: "works.relux.mac-keyvaultX.key", confirmed: true, code: CodeForeignLabel},
++		"own confirmed":           {label: own, confirmed: true, reaches: true},
++		"own missing confirmed":   {label: TestLabelPrefix + "missing", confirmed: true, reaches: true, notFound: true},
++		"empty label confirmed":   {label: "", confirmed: true, code: CodeForeignLabel},
++		"own with leading spaces": {label: "  " + own, confirmed: true, code: CodeForeignLabel},
++	} {
++		t.Run(name, func(t *testing.T) {
++			store := newFakeStore(own)
++			err := NewManager(store).Delete(tc.label, tc.confirmed)
++			if tc.code != "" {
++				if refusalCode(t, err) != tc.code {
++					t.Fatalf("code = %v, want %s", err, tc.code)
++				}
++			} else if tc.notFound {
++				if !errors.Is(err, ErrNotFound) {
++					t.Fatalf("err = %v, want ErrNotFound", err)
++				}
++			} else if err != nil {
++				t.Fatal(err)
++			}
++			if tc.reaches != (len(store.deletes) == 1) {
++				t.Fatalf("store deletes = %v, reaches = %v", store.deletes, tc.reaches)
++			}
++			if _, stillThere := store.keys[own]; stillThere == (tc.reaches && !tc.notFound) {
++				t.Fatalf("own key present = %v after %s", stillThere, name)
++			}
++		})
++	}
++}
++
++// Rotate creates <base>.v<N+1>, keeps every existing version, and derives the
++// version from the newest existing one; a missing base is ErrNotFound and a
++// versioned input rotates its base.
++func TestManagerRotate(t *testing.T) {
++	base := TestLabelPrefix + "rot"
++	for name, tc := range map[string]struct {
++		existing []string
++		input    string
++		wantNew  string
++		wantOld  string
++		notFound bool
++	}{
++		"first rotation":      {existing: []string{base}, input: base, wantNew: base + ".v2", wantOld: base},
++		"second rotation":     {existing: []string{base, base + ".v2"}, input: base, wantNew: base + ".v3", wantOld: base + ".v2"},
++		"gap in versions":     {existing: []string{base, base + ".v5"}, input: base, wantNew: base + ".v6", wantOld: base + ".v5"},
++		"versioned input":     {existing: []string{base, base + ".v2"}, input: base + ".v2", wantNew: base + ".v3", wantOld: base + ".v2"},
++		"base deleted":        {existing: []string{base + ".v2"}, input: base, wantNew: base + ".v3", wantOld: base + ".v2"},
++		"unrelated sibling":   {existing: []string{base, base + "x.v9"}, input: base, wantNew: base + ".v2", wantOld: base},
++		"missing":             {existing: nil, input: base, notFound: true},
++		"only sibling exists": {existing: []string{base + "x"}, input: base, notFound: true},
++	} {
++		t.Run(name, func(t *testing.T) {
++			store := newFakeStore(tc.existing...)
++			result, err := NewManager(store).Rotate(tc.input)
++			if tc.notFound {
++				if !errors.Is(err, ErrNotFound) || len(store.creates) != 0 {
++					t.Fatalf("err = %v, creates = %v", err, store.creates)
++				}
++				return
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			if result.New.Label != tc.wantNew || result.Old.Label != tc.wantOld {
++				t.Fatalf("rotate = %s -> %s, want %s -> %s", result.Old.Label, result.New.Label, tc.wantOld, tc.wantNew)
++			}
++			for _, label := range tc.existing {
++				if _, ok := store.keys[label]; !ok {
++					t.Fatalf("rotate removed %s", label)
++				}
++			}
++			if len(store.deletes) != 0 {
++				t.Fatalf("rotate deleted %v", store.deletes)
++			}
++		})
++	}
++	if _, err := NewManager(newFakeStore()).Rotate("com.apple.key"); refusalCode(t, err) != CodeForeignLabel {
++		t.Fatal("foreign rotate admitted")
++	}
++}
++
++// List drops anything outside the namespace even if the store returns it and
++// sorts by label; Public finds exact labels only.
++func TestManagerListFiltersAndPublicLooksUpExact(t *testing.T) {
++	store := newFakeStore(TestLabelPrefix+"b", TestLabelPrefix+"a", "com.apple.leak", LabelPrefix)
++	manager := NewManager(store)
++	keys, err := manager.List()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(keys) != 2 || keys[0].Label != TestLabelPrefix+"a" || keys[1].Label != TestLabelPrefix+"b" {
++		t.Fatalf("list = %+v", keys)
++	}
++	if _, err := manager.Public(TestLabelPrefix + "a"); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := manager.Public(TestLabelPrefix + "a."); !errors.Is(err, ErrNotFound) {
++		t.Fatalf("err = %v", err)
++	}
++	if _, err := manager.Public("com.apple.leak"); refusalCode(t, err) != CodeForeignLabel {
++		t.Fatal("foreign public lookup admitted")
++	}
++}
++
++// Fingerprint is base64url(SHA-256(SPKI)) without padding and empty for an
++// unknown SPKI; EncodePEM wraps the DER as PUBLIC KEY.
++func TestFingerprintAndPEM(t *testing.T) {
++	point := append([]byte{0x04}, make([]byte, 64)...)
++	point[32] = 1 // not a valid point, expected to be refused
++	if _, err := spkiFromPoint(point); err == nil {
++		t.Fatal("off-curve point accepted")
++	}
++	// Generator point of P-256.
++	gx := "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
++	gy := "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
++	spki, err := spkiFromPoint(mustHex("04" + gx + gy))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(spki) != 91 || spki[0] != 0x30 {
++		t.Fatalf("spki = %x", spki)
++	}
++	key := Key{SPKI: spki}
++	fp := key.Fingerprint()
++	if len(fp) != 43 || strings.ContainsAny(fp, "+/=") {
++		t.Fatalf("fingerprint = %q", fp)
++	}
++	if (Key{}).Fingerprint() != "" {
++		t.Fatal("unknown SPKI produced a fingerprint")
++	}
++	pemText := string(EncodePEM(spki))
++	if !strings.HasPrefix(pemText, "-----BEGIN PUBLIC KEY-----\n") || !strings.HasSuffix(pemText, "-----END PUBLIC KEY-----\n") {
++		t.Fatalf("pem = %q", pemText)
++	}
++}
++
++func mustHex(s string) []byte {
++	out := make([]byte, len(s)/2)
++	for i := range out {
++		var b byte
++		for _, c := range s[2*i : 2*i+2] {
++			b <<= 4
++			switch {
++			case c >= '0' && c <= '9':
++				b |= byte(c - '0')
++			case c >= 'a' && c <= 'f':
++				b |= byte(c-'a') + 10
++			}
++		}
++		out[i] = b
++	}
++	return out
++}
++
++func TestBaseLabel(t *testing.T) {
++	for in, want := range map[string]string{
++		"a.v2": "a", "a.v10": "a", "a": "a", "a.v": "a.v", "a.vx": "a.vx", "a.v2.v3": "a.v2",
++	} {
++		if got := BaseLabel(in); got != want {
++			t.Fatalf("BaseLabel(%q) = %q, want %q", in, got, want)
++		}
++	}
++}
+diff --git a/internal/keyvault/security_darwin.c b/internal/keyvault/security_darwin.c
+new file mode 100644
+index 0000000..c04db55
+--- /dev/null
++++ b/internal/keyvault/security_darwin.c
+@@ -0,0 +1,243 @@
++// Security.framework bridge for mac-keyvault.
++//
++// Store decision (EPIC-260915-1g0e1c_secure-enclave-probe.md, re-verified in
++// TASK-260915-2mf19o): an ad-hoc signed CLI cannot persist keys in the Secure
++// Enclave or the Data Protection keychain (-34018 errSecMissingEntitlement).
++// kSecAttrAccessControl routes the item to the Data Protection keychain and
++// fails the same way, so the login (file-based) keychain with a legacy
++// SecAccess trusted-application list is the ACL mechanism this bridge uses:
++// the item lives in the current user's login keychain and its private-key
++// operations are trusted only for the calling binary.
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++
++#include <CoreFoundation/CoreFoundation.h>
++#include <Security/Security.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "security_darwin.h"
++
++static CFStringRef MacKeyVaultString(const char *value) {
++    return CFStringCreateWithCString(kCFAllocatorDefault, value, kCFStringEncodingUTF8);
++}
++
++static CFDataRef MacKeyVaultData(const char *value) {
++    return CFDataCreate(kCFAllocatorDefault, (const UInt8 *)value, (CFIndex)strlen(value));
++}
++
++static CFMutableDictionaryRef MacKeyVaultDictionary(void) {
++    return CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
++                                     &kCFTypeDictionaryValueCallBacks);
++}
++
++static int MacKeyVaultErrorCode(CFErrorRef error) {
++    if (error == NULL) return MacKeyVaultUnknownError;
++    CFIndex code = CFErrorGetCode(error);
++    return code == 0 ? MacKeyVaultUnknownError : (int)code;
++}
++
++// Copies the uncompressed X9.63 point of the public half into a malloc'd buffer.
++static int MacKeyVaultCopyPublicPoint(SecKeyRef privateKey, unsigned char **out, size_t *outLen) {
++    SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
++    if (publicKey == NULL) return MacKeyVaultPublicKeyUnavailable;
++    CFErrorRef error = NULL;
++    CFDataRef point = SecKeyCopyExternalRepresentation(publicKey, &error);
++    CFRelease(publicKey);
++    if (point == NULL) {
++        int code = MacKeyVaultErrorCode(error);
++        if (error != NULL) CFRelease(error);
++        return code;
++    }
++    size_t length = (size_t)CFDataGetLength(point);
++    unsigned char *buffer = malloc(length);
++    if (buffer == NULL) {
++        CFRelease(point);
++        return MacKeyVaultUnknownError;
++    }
++    memcpy(buffer, CFDataGetBytePtr(point), length);
++    CFRelease(point);
++    *out = buffer;
++    *outLen = length;
++    return 0;
++}
++
++// Builds the legacy SecAccess whose trusted-application list contains only the
++// calling binary (SecTrustedApplicationCreateFromPath(NULL) = current process).
++static OSStatus MacKeyVaultCreateAccess(SecAccessRef *out) {
++    SecTrustedApplicationRef self = NULL;
++    OSStatus status = SecTrustedApplicationCreateFromPath(NULL, &self);
++    if (status != errSecSuccess) return status;
++    CFArrayRef trusted = CFArrayCreate(kCFAllocatorDefault, (const void **)&self, 1, &kCFTypeArrayCallBacks);
++    CFRelease(self);
++    status = SecAccessCreate(CFSTR("mac-keyvault private key"), trusted, out);
++    CFRelease(trusted);
++    return status;
++}
++
++int MacKeyVaultCreate(const char *label, const char *tag, int enclave, int userPresence,
++                      unsigned char **outPub, size_t *outPubLen) {
++    CFStringRef labelString = MacKeyVaultString(label);
++    CFDataRef tagData = MacKeyVaultData(tag);
++    CFMutableDictionaryRef privateAttrs = MacKeyVaultDictionary();
++    CFDictionarySetValue(privateAttrs, kSecAttrIsPermanent, kCFBooleanTrue);
++    CFDictionarySetValue(privateAttrs, kSecAttrIsExtractable, kCFBooleanFalse);
++    CFDictionarySetValue(privateAttrs, kSecAttrLabel, labelString);
++    CFDictionarySetValue(privateAttrs, kSecAttrApplicationTag, tagData);
++
++    int result = 0;
++    SecAccessRef access = NULL;
++    SecAccessControlRef control = NULL;
++    if (enclave || userPresence) {
++        // Both shapes need the Data Protection keychain; an unprovisioned binary
++        // gets -34018 here and the caller surfaces that verbatim.
++        SecAccessControlCreateFlags flags = enclave ? kSecAccessControlPrivateKeyUsage : 0;
++        if (userPresence) flags |= kSecAccessControlUserPresence;
++        CFErrorRef error = NULL;
++        control = SecAccessControlCreateWithFlags(kCFAllocatorDefault, kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
++                                                  flags, &error);
++        if (control == NULL) {
++            result = MacKeyVaultErrorCode(error);
++            if (error != NULL) CFRelease(error);
++            goto cleanup;
++        }
++        CFDictionarySetValue(privateAttrs, kSecAttrAccessControl, control);
++    } else {
++        OSStatus status = MacKeyVaultCreateAccess(&access);
++        if (status != errSecSuccess) {
++            result = (int)status;
++            goto cleanup;
++        }
++        CFDictionarySetValue(privateAttrs, kSecAttrAccess, access);
++    }
++
++    CFMutableDictionaryRef attrs = MacKeyVaultDictionary();
++    CFDictionarySetValue(attrs, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
++    int bits = 256;
++    CFNumberRef bitsNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bits);
++    CFDictionarySetValue(attrs, kSecAttrKeySizeInBits, bitsNumber);
++    CFRelease(bitsNumber);
++    CFDictionarySetValue(attrs, kSecAttrLabel, labelString);
++    CFDictionarySetValue(attrs, kSecPrivateKeyAttrs, privateAttrs);
++    if (enclave) CFDictionarySetValue(attrs, kSecAttrTokenID, kSecAttrTokenIDSecureEnclave);
++
++    CFErrorRef error = NULL;
++    SecKeyRef key = SecKeyCreateRandomKey(attrs, &error);
++    CFRelease(attrs);
++    if (key == NULL) {
++        result = MacKeyVaultErrorCode(error);
++        if (error != NULL) CFRelease(error);
++        goto cleanup;
++    }
++    result = MacKeyVaultCopyPublicPoint(key, outPub, outPubLen);
++    CFRelease(key);
++
++cleanup:
++    if (access != NULL) CFRelease(access);
++    if (control != NULL) CFRelease(control);
++    CFRelease(privateAttrs);
++    CFRelease(tagData);
++    CFRelease(labelString);
++    return result;
++}
++
++static void MacKeyVaultAppendField(CFMutableDataRef out, const void *bytes, CFIndex length, char terminator) {
++    if (bytes != NULL && length > 0) CFDataAppendBytes(out, (const UInt8 *)bytes, length);
++    CFDataAppendBytes(out, (const UInt8 *)&terminator, 1);
++}
++
++static void MacKeyVaultAppendString(CFMutableDataRef out, CFStringRef value, char terminator) {
++    if (value == NULL) {
++        MacKeyVaultAppendField(out, NULL, 0, terminator);
++        return;
++    }
++    CFDataRef data = CFStringCreateExternalRepresentation(kCFAllocatorDefault, value, kCFStringEncodingUTF8, 0);
++    MacKeyVaultAppendField(out, data ? CFDataGetBytePtr(data) : NULL, data ? CFDataGetLength(data) : 0, terminator);
++    if (data != NULL) CFRelease(data);
++}
++
++// Only attributes are read for keys outside `prefix`; SecKeyCopyPublicKey and
++// every other per-key operation run only for labels that carry the prefix.
++int MacKeyVaultList(const char *prefix, char **out, size_t *outLen) {
++    CFMutableDictionaryRef query = MacKeyVaultDictionary();
++    CFDictionarySetValue(query, kSecClass, kSecClassKey);
++    CFDictionarySetValue(query, kSecAttrKeyClass, kSecAttrKeyClassPrivate);
++    CFDictionarySetValue(query, kSecReturnAttributes, kCFBooleanTrue);
++    CFDictionarySetValue(query, kSecReturnRef, kCFBooleanTrue);
++    CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitAll);
++    CFTypeRef matches = NULL;
++    OSStatus status = SecItemCopyMatching(query, &matches);
++    CFRelease(query);
++    if (status == errSecItemNotFound) {
++        *out = NULL;
++        *outLen = 0;
++        return 0;
++    }
++    if (status != errSecSuccess) return (int)status;
++    if (matches == NULL || CFGetTypeID(matches) != CFArrayGetTypeID()) {
++        if (matches != NULL) CFRelease(matches);
++        return MacKeyVaultUnknownError;
++    }
++
++    CFMutableDataRef buffer = CFDataCreateMutable(kCFAllocatorDefault, 0);
++    CFIndex count = CFArrayGetCount(matches);
++    size_t prefixLen = strlen(prefix);
++    int result = 0;
++    for (CFIndex i = 0; i < count && result == 0; i++) {
++        CFDictionaryRef item = CFArrayGetValueAtIndex(matches, i);
++        if (CFGetTypeID(item) != CFDictionaryGetTypeID()) continue;
++        CFStringRef label = CFDictionaryGetValue(item, kSecAttrLabel);
++        if (label == NULL || CFGetTypeID(label) != CFStringGetTypeID()) continue;
++        char labelBuffer[1024];
++        if (!CFStringGetCString(label, labelBuffer, sizeof(labelBuffer), kCFStringEncodingUTF8)) continue;
++        if (strncmp(labelBuffer, prefix, prefixLen) != 0) continue;
++
++        CFTypeRef tag = CFDictionaryGetValue(item, kSecAttrApplicationTag);
++        CFTypeRef ref = CFDictionaryGetValue(item, kSecValueRef);
++        if (ref == NULL || CFGetTypeID(ref) != SecKeyGetTypeID()) continue;
++        unsigned char *point = NULL;
++        size_t pointLen = 0;
++        int pointResult = MacKeyVaultCopyPublicPoint((SecKeyRef)ref, &point, &pointLen);
++        MacKeyVaultAppendString(buffer, label, MacKeyVaultFieldSeparator);
++        if (tag != NULL && CFGetTypeID(tag) == CFDataGetTypeID()) {
++            MacKeyVaultAppendField(buffer, CFDataGetBytePtr(tag), CFDataGetLength(tag), MacKeyVaultFieldSeparator);
++        } else {
++            MacKeyVaultAppendField(buffer, NULL, 0, MacKeyVaultFieldSeparator);
++        }
++        char statusText[16];
++        snprintf(statusText, sizeof(statusText), "%d", pointResult);
++        MacKeyVaultAppendField(buffer, statusText, (CFIndex)strlen(statusText), MacKeyVaultFieldSeparator);
++        // Hex keeps the raw point bytes clear of the record framing.
++        static const char hex[] = "0123456789abcdef";
++        for (size_t b = 0; b < pointLen; b++) {
++            char pair[2] = { hex[point[b] >> 4], hex[point[b] & 0x0f] };
++            CFDataAppendBytes(buffer, (const UInt8 *)pair, 2);
++        }
++        MacKeyVaultAppendField(buffer, NULL, 0, MacKeyVaultRecordSeparator);
++        free(point);
++    }
++    CFRelease(matches);
++
++    size_t length = (size_t)CFDataGetLength(buffer);
++    char *copy = malloc(length + 1);
++    if (copy == NULL) {
++        CFRelease(buffer);
++        return MacKeyVaultUnknownError;
++    }
++    memcpy(copy, CFDataGetBytePtr(buffer), length);
++    copy[length] = '\0';
++    CFRelease(buffer);
++    *out = copy;
++    *outLen = length;
++    return result;
++}
++
++int MacKeyVaultDelete(const char *label) {
++    CFStringRef labelString = MacKeyVaultString(label);
++    CFMutableDictionaryRef query = MacKeyVaultDictionary();
++    CFDictionarySetValue(query, kSecClass, kSecClassKey);
++    CFDictionarySetValue(query, kSecAttrLabel, labelString);
++    OSStatus status = SecItemDelete(query);
++    CFRelease(query);
++    CFRelease(labelString);
++    return (int)status;
++}
+diff --git a/internal/keyvault/security_darwin.go b/internal/keyvault/security_darwin.go
+new file mode 100644
+index 0000000..7beec52
+--- /dev/null
++++ b/internal/keyvault/security_darwin.go
+@@ -0,0 +1,142 @@
++//go:build darwin && cgo
++
++package keyvault
++
++/*
++#cgo LDFLAGS: -framework Security -framework CoreFoundation
++#include <stdlib.h>
++#include "security_darwin.h"
++*/
++import "C"
++
++import (
++	"bytes"
++	"encoding/hex"
++	"fmt"
++	"strconv"
++	"strings"
++	"time"
++	"unsafe"
++)
++
++// SecurityStore is the production Backend over the login keychain through the
++// Security.framework cgo bridge in security_darwin.c.
++type SecurityStore struct{}
++
++// NewSecurityStore returns the login-keychain backend.
++func NewSecurityStore() *SecurityStore {
++	return &SecurityStore{}
++}
++
++func (s *SecurityStore) Create(opts CreateOptions) (Key, error) {
++	label := C.CString(opts.Label)
++	tag := C.CString(encodeTag(opts))
++	defer C.free(unsafe.Pointer(label))
++	defer C.free(unsafe.Pointer(tag))
++	var point *C.uchar
++	var pointLen C.size_t
++	status := int(C.MacKeyVaultCreate(label, tag, cBool(opts.Store == StoreEnclave), cBool(opts.UserPresence), &point, &pointLen))
++	if status != 0 {
++		return Key{}, &StatusError{Op: "create", Status: status}
++	}
++	defer C.free(unsafe.Pointer(point))
++	spki, err := spkiFromPoint(C.GoBytes(unsafe.Pointer(point), C.int(pointLen)))
++	if err != nil {
++		return Key{}, fmt.Errorf("create %s: %w", opts.Label, err)
++	}
++	return Key{Label: opts.Label, Store: opts.Store, Created: opts.Created, SPKI: spki}, nil
++}
++
++func (s *SecurityStore) List() ([]Key, error) {
++	prefix := C.CString(LabelPrefix)
++	defer C.free(unsafe.Pointer(prefix))
++	var out *C.char
++	var outLen C.size_t
++	status := int(C.MacKeyVaultList(prefix, &out, &outLen))
++	if status != 0 {
++		return nil, &StatusError{Op: "list", Status: status}
++	}
++	if out == nil {
++		return nil, nil
++	}
++	defer C.free(unsafe.Pointer(out))
++	return parseListRecords(C.GoBytes(unsafe.Pointer(out), C.int(outLen)))
++}
++
++func (s *SecurityStore) Delete(label string) error {
++	cLabel := C.CString(label)
++	defer C.free(unsafe.Pointer(cLabel))
++	status := int(C.MacKeyVaultDelete(cLabel))
++	if status == errSecItemNotFound {
++		return ErrNotFound
++	}
++	if status != 0 {
++		return &StatusError{Op: "delete", Status: status}
++	}
++	return nil
++}
++
++func cBool(v bool) C.int {
++	if v {
++		return 1
++	}
++	return 0
++}
++
++// parseListRecords decodes label US tag US pointStatus US point RS records.
++// A key whose public point could not be read is still listed with an empty
++// SPKI so the caller reports the fingerprint as unknown instead of hiding it.
++func parseListRecords(raw []byte) ([]Key, error) {
++	var keys []Key
++	for _, record := range bytes.Split(raw, []byte{C.MacKeyVaultRecordSeparator}) {
++		if len(record) == 0 {
++			continue
++		}
++		fields := bytes.SplitN(record, []byte{C.MacKeyVaultFieldSeparator}, 4)
++		if len(fields) != 4 {
++			return nil, fmt.Errorf("list: malformed bridge record")
++		}
++		key := Key{Label: string(fields[0])}
++		key.Store, key.Created = decodeTag(string(fields[1]))
++		if pointStatus, err := strconv.Atoi(string(fields[2])); err == nil && pointStatus == 0 {
++			point, err := hex.DecodeString(string(fields[3]))
++			if err != nil {
++				return nil, fmt.Errorf("list %s: malformed public key hex", key.Label)
++			}
++			spki, err := spkiFromPoint(point)
++			if err != nil {
++				return nil, fmt.Errorf("list %s: %w", key.Label, err)
++			}
++			key.SPKI = spki
++		}
++		keys = append(keys, key)
++	}
++	return keys, nil
++}
++
++// The legacy keychain key schema has no creation-date attribute, so the
++// application tag carries the tool's own metadata.
++const tagVersion = "mac-keyvault/1"
++
++func encodeTag(opts CreateOptions) string {
++	return fmt.Sprintf("%s store=%s created=%s", tagVersion, opts.Store, opts.Created.UTC().Format(time.RFC3339))
++}
++
++func decodeTag(tag string) (StoreKind, time.Time) {
++	fields := strings.Fields(tag)
++	if len(fields) == 0 || fields[0] != tagVersion {
++		return StoreUnknown, time.Time{}
++	}
++	store, created := StoreUnknown, time.Time{}
++	for _, field := range fields[1:] {
++		switch {
++		case strings.HasPrefix(field, "store="):
++			store = StoreKind(strings.TrimPrefix(field, "store="))
++		case strings.HasPrefix(field, "created="):
++			if parsed, err := time.Parse(time.RFC3339, strings.TrimPrefix(field, "created=")); err == nil {
++				created = parsed
++			}
++		}
++	}
++	return store, created
++}
+diff --git a/internal/keyvault/security_darwin.h b/internal/keyvault/security_darwin.h
+new file mode 100644
+index 0000000..b600421
+--- /dev/null
++++ b/internal/keyvault/security_darwin.h
+@@ -0,0 +1,18 @@
++#ifndef MAC_KEYVAULT_SECURITY_DARWIN_H
++#define MAC_KEYVAULT_SECURITY_DARWIN_H
++
++#include <stddef.h>
++
++enum {
++    MacKeyVaultUnknownError = -1,
++    MacKeyVaultPublicKeyUnavailable = -2,
++    MacKeyVaultFieldSeparator = 0x1f,
++    MacKeyVaultRecordSeparator = 0x1e,
++};
++
++int MacKeyVaultCreate(const char *label, const char *tag, int enclave, int userPresence,
++                      unsigned char **outPub, size_t *outPubLen);
++int MacKeyVaultList(const char *prefix, char **out, size_t *outLen);
++int MacKeyVaultDelete(const char *label);
++
++#endif
+diff --git a/internal/keyvault/security_darwin_test.go b/internal/keyvault/security_darwin_test.go
+new file mode 100644
+index 0000000..9651ee0
+--- /dev/null
++++ b/internal/keyvault/security_darwin_test.go
+@@ -0,0 +1,241 @@
++//go:build darwin && cgo
++
++package keyvault
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"strings"
++	"testing"
++	"time"
++)
++
++// GuardedStore wraps a Backend and fails the test process before any Create
++// or Delete whose label is outside TestLabelPrefix reaches the real keychain.
++// Every integration test in this repository goes through it.
++type GuardedStore struct {
++	Backend
++	touched []string
++}
++
++// ErrGuardedLabel is returned when a test tries to touch a non-test label.
++var ErrGuardedLabel = errors.New("test guard: label outside " + TestLabelPrefix)
++
++func (g *GuardedStore) guard(label string) error {
++	if !strings.HasPrefix(label, TestLabelPrefix) || len(label) == len(TestLabelPrefix) {
++		return fmt.Errorf("%w: %q", ErrGuardedLabel, label)
++	}
++	g.touched = append(g.touched, label)
++	return nil
++}
++
++func (g *GuardedStore) Create(opts CreateOptions) (Key, error) {
++	if err := g.guard(opts.Label); err != nil {
++		return Key{}, err
++	}
++	return g.Backend.Create(opts)
++}
++
++func (g *GuardedStore) Delete(label string) error {
++	if err := g.guard(label); err != nil {
++		return err
++	}
++	return g.Backend.Delete(label)
++}
++
++func newGuardedSecurityStore(t *testing.T) *GuardedStore {
++	t.Helper()
++	store := &GuardedStore{Backend: NewSecurityStore()}
++	t.Cleanup(func() {
++		for _, label := range store.touched {
++			if err := store.Backend.Delete(label); err != nil && !errors.Is(err, ErrNotFound) {
++				t.Errorf("cleanup %s: %v", label, err)
++			}
++		}
++	})
++	return store
++}
++
++func testLabel(t *testing.T, suffix string) string {
++	return fmt.Sprintf("%s%d.%s", TestLabelPrefix, os.Getpid(), suffix)
++}
++
++// The guard itself refuses non-test labels (positive control for every
++// integration test below): a foreign or production-prefixed label never
++// reaches the wrapped backend.
++func TestGuardedStoreRefusesNonTestLabels(t *testing.T) {
++	inner := newFakeStore(LabelPrefix + "prod")
++	store := &GuardedStore{Backend: inner}
++	for _, label := range []string{LabelPrefix + "prod", "com.apple.security.key", TestLabelPrefix, ""} {
++		if _, err := store.Create(CreateOptions{Label: label, Store: StoreKeychain}); !errors.Is(err, ErrGuardedLabel) {
++			t.Fatalf("create %q: err = %v", label, err)
++		}
++		if err := store.Delete(label); !errors.Is(err, ErrGuardedLabel) {
++			t.Fatalf("delete %q: err = %v", label, err)
++		}
++	}
++	if len(inner.creates) != 0 || len(inner.deletes) != 0 {
++		t.Fatalf("guard leaked calls: creates=%v deletes=%v", inner.creates, inner.deletes)
++	}
++	if _, ok := inner.keys[LabelPrefix+"prod"]; !ok {
++		t.Fatal("production key was deleted through the guard")
++	}
++	if _, err := store.Create(CreateOptions{Label: TestLabelPrefix + "ok", Store: StoreKeychain}); err != nil {
++		t.Fatalf("test label refused: %v", err)
++	}
++}
++
++// Login-keychain round trip on this Mac: Create persists a P-256 pair whose
++// SPKI is a 91-byte DER, List returns it with the recorded creation time and
++// store, Delete removes both key halves so a second Delete is ErrNotFound.
++func TestSecurityStoreKeychainRoundTrip(t *testing.T) {
++	store := newGuardedSecurityStore(t)
++	label := testLabel(t, "roundtrip")
++	created := time.Date(2026, 9, 15, 9, 30, 0, 0, time.UTC)
++
++	key, err := store.Create(CreateOptions{Label: label, Store: StoreKeychain, Created: created})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(key.SPKI) != 91 || key.Fingerprint() == "" {
++		t.Fatalf("spki = %x", key.SPKI)
++	}
++
++	keys, err := store.List()
++	if err != nil {
++		t.Fatal(err)
++	}
++	var listed *Key
++	for i := range keys {
++		if keys[i].Label == label {
++			listed = &keys[i]
++		}
++		if !strings.HasPrefix(keys[i].Label, LabelPrefix) {
++			t.Fatalf("bridge listed a foreign label %q", keys[i].Label)
++		}
++	}
++	if listed == nil {
++		t.Fatalf("created key missing from list: %+v", keys)
++	}
++	if listed.Store != StoreKeychain || !listed.Created.Equal(created) || listed.Fingerprint() != key.Fingerprint() {
++		t.Fatalf("listed = %+v, created = %+v", *listed, key)
++	}
++
++	if err := store.Delete(label); err != nil {
++		t.Fatal(err)
++	}
++	if err := store.Delete(label); !errors.Is(err, ErrNotFound) {
++		t.Fatalf("second delete err = %v, want ErrNotFound (a key half survived)", err)
++	}
++	keys, err = store.List()
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, key := range keys {
++		if key.Label == label {
++			t.Fatal("deleted key still listed")
++		}
++	}
++}
++
++// Creating the same label twice at the bridge level is possible in the legacy
++// keychain, which is why Manager.Init must gate duplicates itself; this test
++// pins that bound so the gate is not mistaken for a keychain guarantee.
++func TestSecurityStoreDoesNotRefuseDuplicateLabelsItself(t *testing.T) {
++	store := newGuardedSecurityStore(t)
++	label := testLabel(t, "dupbridge")
++	for i := 0; i < 2; i++ {
++		if _, err := store.Create(CreateOptions{Label: label, Store: StoreKeychain, Created: time.Now()}); err != nil {
++			t.Fatalf("create %d: %v", i, err)
++		}
++	}
++	manager := NewManager(store)
++	if _, err := manager.Init(label, StoreKeychain, false); refusalCode(t, err) != CodeDuplicateLabel {
++		t.Fatal("manager admitted the duplicate")
++	}
++	if err := store.Delete(label); err != nil {
++		t.Fatal(err)
++	}
++}
++
++// On this unprovisioned binary the Secure Enclave and user-presence shapes
++// return exactly -34018 from Security.framework and leave no key behind.
++// Bound: on a binary signed with a provisioning profile these creates would
++// succeed and this test would report that as a failure to re-decide.
++func TestSecurityStoreEnclaveAndUserPresenceReturnMissingEntitlement(t *testing.T) {
++	store := newGuardedSecurityStore(t)
++	for name, opts := range map[string]CreateOptions{
++		"enclave":       {Store: StoreEnclave},
++		"user-presence": {Store: StoreKeychain, UserPresence: true},
++	} {
++		t.Run(name, func(t *testing.T) {
++			opts.Label = testLabel(t, name)
++			opts.Created = time.Now()
++			_, err := store.Create(opts)
++			var status *StatusError
++			if !errors.As(err, &status) || status.Status != errSecMissingEntitlement {
++				t.Fatalf("err = %v, want OSStatus -34018", err)
++			}
++			if err := store.Backend.Delete(opts.Label); !errors.Is(err, ErrNotFound) {
++				t.Fatalf("a key was persisted despite -34018: delete err = %v", err)
++			}
++		})
++	}
++}
++
++// Deleting a test label that does not exist is ErrNotFound rather than a
++// silent success.
++func TestSecurityStoreDeleteMissingIsNotFound(t *testing.T) {
++	store := newGuardedSecurityStore(t)
++	if err := store.Delete(testLabel(t, "never-created")); !errors.Is(err, ErrNotFound) {
++		t.Fatalf("err = %v", err)
++	}
++}
++
++// The application tag carries store and creation time; an unknown tag maps to
++// StoreUnknown with a zero time instead of a guessed value.
++func TestTagEncoding(t *testing.T) {
++	created := time.Date(2026, 9, 15, 8, 0, 0, 0, time.UTC)
++	tag := encodeTag(CreateOptions{Store: StoreKeychain, Created: created})
++	if tag != "mac-keyvault/1 store=keychain created=2026-09-15T08:00:00Z" {
++		t.Fatalf("tag = %q", tag)
++	}
++	store, got := decodeTag(tag)
++	if store != StoreKeychain || !got.Equal(created) {
++		t.Fatalf("decode = %s %v", store, got)
++	}
++	for _, foreign := range []string{"", "something-else", "mac-keyvault/2 store=keychain", "mac-keyvault/1 created=garbage"} {
++		store, got := decodeTag(foreign)
++		if !got.IsZero() || store != StoreUnknown {
++			t.Fatalf("decodeTag(%q) = %s %v, want unknown", foreign, store, got)
++		}
++	}
++}
++
++// Bridge records are framed by US/RS bytes with a hex point; a truncated
++// record is an error, an unreadable point yields a key without SPKI, and a
++// point containing framing bytes survives because it is hex encoded.
++func TestParseListRecords(t *testing.T) {
++	gx := "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
++	gy := "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
++	record := func(label, tag, status, point string) string {
++		return label + "\x1f" + tag + "\x1f" + status + "\x1f" + point + "\x1e"
++	}
++	keys, err := parseListRecords([]byte(record(LabelPrefix+"a", "mac-keyvault/1 store=keychain created=2026-09-15T08:00:00Z", "0", "04"+gx+gy) + record(LabelPrefix+"b", "", "-2", "")))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(keys) != 2 || keys[0].Fingerprint() == "" || keys[1].Fingerprint() != "" || keys[1].Store != StoreUnknown {
++		t.Fatalf("keys = %+v", keys)
++	}
++	if _, err := parseListRecords([]byte("only\x1ftwo\x1e")); err == nil {
++		t.Fatal("truncated record accepted")
++	}
++	if _, err := parseListRecords([]byte(record(LabelPrefix+"c", "", "0", "zz"))); err == nil {
++		t.Fatal("malformed hex accepted")
++	}
++	if _, err := parseListRecords([]byte(record(LabelPrefix+"d", "", "0", "04"+gx+gx))); err == nil {
++		t.Fatal("off-curve point accepted")
++	}
++}
+diff --git a/internal/keyvault/security_unsupported.go b/internal/keyvault/security_unsupported.go
+new file mode 100644
+index 0000000..d8a5794
+--- /dev/null
++++ b/internal/keyvault/security_unsupported.go
+@@ -0,0 +1,22 @@
++//go:build !darwin || !cgo
++
++package keyvault
++
++import "fmt"
++
++// SecurityStore is unavailable off macOS or without cgo; every call refuses.
++type SecurityStore struct{}
++
++func NewSecurityStore() *SecurityStore { return &SecurityStore{} }
++
++func (s *SecurityStore) Create(CreateOptions) (Key, error) {
++	return Key{}, fmt.Errorf("keyvault: Security.framework store requires darwin with cgo")
++}
++
++func (s *SecurityStore) List() ([]Key, error) {
++	return nil, fmt.Errorf("keyvault: Security.framework store requires darwin with cgo")
++}
++
++func (s *SecurityStore) Delete(string) error {
++	return fmt.Errorf("keyvault: Security.framework store requires darwin with cgo")
++}
+diff --git a/scripts/deinit.sh b/scripts/deinit.sh
+index 1f20a86..143b98c 100755
+--- a/scripts/deinit.sh
++++ b/scripts/deinit.sh
+@@ -59,7 +59,7 @@ if [[ -x "$BIN_DIR/mac-infra-core" ]]; then
+   }
+ fi
+ 
+-rm -f "$BIN_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-sweep" "$BIN_DIR/mac-load-profile" "$BIN_DIR/mac-video-profile" "$BIN_DIR/mac-disk-profile" "$BIN_DIR/mac-cleanup" "$BIN_DIR/mac-infra-core" "$BIN_DIR/mac-safari-session" "$BIN_DIR/mac-chrome-session" "$BIN_DIR/mac-browser-site" "$BIN_DIR/mac-document-sanitize"
++rm -f "$BIN_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-sweep" "$BIN_DIR/mac-load-profile" "$BIN_DIR/mac-video-profile" "$BIN_DIR/mac-disk-profile" "$BIN_DIR/mac-cleanup" "$BIN_DIR/mac-infra-core" "$BIN_DIR/mac-safari-session" "$BIN_DIR/mac-chrome-session" "$BIN_DIR/mac-browser-site" "$BIN_DIR/mac-document-sanitize" "$BIN_DIR/mac-keyvault"
+ rm -f "$HOME/.codex/skills/$SKILL_NAME" "$HOME/.claude/skills/$SKILL_NAME"
+ rm -rf "$HOME/.agents/skills/$SKILL_NAME"
+ 
+diff --git a/scripts/setup.sh b/scripts/setup.sh
+index a9ff0e8..6061eb5 100755
+--- a/scripts/setup.sh
++++ b/scripts/setup.sh
+@@ -116,6 +116,8 @@ echo "Building mac-document-sanitize..."
+ go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-document-sanitize" ./cmd/mac-document-sanitize
+ echo "Building mac-infra-core..."
+ go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-infra-core" ./cmd/mac-infra-core
++echo "Building mac-keyvault..."
++go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-keyvault" ./cmd/mac-keyvault
+ 
+ ln -sf "$BUILD_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-reset"
+ ln -sf "$BUILD_DIR/mac-audio-sweep" "$BIN_DIR/mac-audio-sweep"
+@@ -128,6 +130,7 @@ ln -sf "$BUILD_DIR/mac-chrome-session" "$BIN_DIR/mac-chrome-session"
+ ln -sf "$BUILD_DIR/mac-browser-site" "$BIN_DIR/mac-browser-site"
+ ln -sf "$BUILD_DIR/mac-document-sanitize" "$BIN_DIR/mac-document-sanitize"
+ ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
++ln -sf "$BUILD_DIR/mac-keyvault" "$BIN_DIR/mac-keyvault"
+ echo "Installed binary symlinks:"
+ echo "  $BIN_DIR/mac-audio-reset -> $BUILD_DIR/mac-audio-reset"
+ echo "  $BIN_DIR/mac-audio-sweep -> $BUILD_DIR/mac-audio-sweep"
+@@ -141,6 +144,7 @@ echo "  heartbeat launcher: $HEARTBEAT_LAUNCHER"
+ echo "  $BIN_DIR/mac-browser-site -> $BUILD_DIR/mac-browser-site"
+ echo "  $BIN_DIR/mac-document-sanitize -> $BUILD_DIR/mac-document-sanitize"
+ echo "  $BIN_DIR/mac-infra-core  -> $BUILD_DIR/mac-infra-core"
++echo "  $BIN_DIR/mac-keyvault    -> $BUILD_DIR/mac-keyvault"
+ 
+ if [[ ! -d "$SKILL_SOURCE" ]]; then
+   echo "missing skill source: $SKILL_SOURCE" >&2

@@ -1,0 +1,13 @@
+R4-M1-self-minted-admitted: KILLED (exit 1) by --- FAIL: TestClientFailsClosedOnUndeclaredErrorCode (0.03s) 
+R4-M2-startup-code-unchecked: KILLED (exit 1) by --- FAIL: TestClientFailsClosedOnUndeclaredErrorCode (0.04s) 
+R4-M3-undeclared-code-not-fatal: KILLED (exit 1) by --- FAIL: TestClientFailsClosedOnUndeclaredErrorCode (0.03s) 
+R4-M4-empty-code-admitted: KILLED (exit 1) by --- FAIL: TestClientFailsClosedOnUndeclaredErrorCode (0.04s) 
+R4-M5-hello-version-only: KILLED (exit 1) by --- FAIL: TestStartRefusesHelloBoundToAnotherIdentity (0.12s) 
+R4-M6-tool-impostor-admitted: KILLED (exit 1) by --- FAIL: TestStartRefusesHelloBoundToAnotherIdentity (0.09s) 
+R4-M7-address-missing-admitted: KILLED (exit 1) by --- FAIL: TestStartRefusesHelloBoundToAnotherIdentity (0.09s) 
+R4-M8-kind-default-unchecked: KILLED (exit 1) by --- FAIL: TestStartRefusesHelloBoundToAnotherIdentity (0.09s) 
+R4-M9-ops-count-only: KILLED (exit 1) by --- FAIL: TestStartRefusesHelloBoundToAnotherIdentity (0.09s) 
+R4-M10-fingerprint-optional: KILLED (exit 1) by --- FAIL: TestStartRefusesHelloBoundToAnotherIdentity (0.09s) 
+--- baseline (no mutant) ---
+ok  	github.com/relux-works/mac-infra/internal/keyvault/signerclient	0.813s
+baseline exit=0

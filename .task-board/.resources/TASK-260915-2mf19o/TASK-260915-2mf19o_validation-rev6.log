@@ -1,0 +1,10 @@
+# validation rev6 2026-09-15T13:25:46Z HEAD=f9ec756b123ea66a02545369ed007d9ddd8c5540
+## gofmt -l cmd internal
+rc=0
+## go vet ./...
+rc=0
+## go build ./...
+rc=0
+## git diff --check
+rc=0
+## go test -count=1 ./... rc=0 (log go-test-rev6.log)

@@ -1,0 +1,271 @@
+--- FAIL: TestReviewerUnknownPersistedFieldsRefusedAtRun (0.02s)
+    --- FAIL: TestReviewerUnknownPersistedFieldsRefusedAtRun/top_level (0.01s)
+        reviewer_unknown_field_test.go:31: rotate admitted unknown persisted field: code=0 creates=1 response={
+              "ok": true,
+              "command": "rotate",
+              "result": {
+                "new": {
+                  "algorithm": "ec-p256",
+                  "created": "2026-09-15T13:37:09Z",
+                  "description": "",
+                  "exposure": "never",
+                  "extraction": "none",
+                  "findings": [],
+                  "fingerprint": "2NK56ryzIqBaa99w1sLiJhOdXIIu8xmLGs6wOsmQAes",
+                  "format": {
+                    "public": "spki-der",
+                    "signature": "ecdsa-der-low-s"
+                  },
+                  "issuer": null,
+                  "kind": "key",
+                  "label": "works.relux.mac-keyvault.key.test.unknown-field.v2",
+                  "meta": {},
+                  "operations": [
+                    {
+                      "name": "ecdsa-sha256-sign",
+                      "input": "sha256-digest",
+                      "output": "ecdsa-der-low-s|ecdsa-raw",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "ecdsa-sha256-verify",
+                      "input": "sha256-digest+signature",
+                      "output": "verdict",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "ecies-p256-encrypt",
+                      "input": "payload",
+                      "output": "envelope:ecies-x963-sha256-aesgcm",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "export-public",
+                      "input": "",
+                      "output": "spki-der|spki-pem|jwk",
+                      "via": "pub"
+                    }
+                  ],
+                  "origin": {
+                    "host": "Alexis-M1-Max.local",
+                    "source": "generated",
+                    "tool": "mac-keyvault/dev",
+                    "user": "alexis"
+                  },
+                  "purpose": "unknown-field",
+                  "schema": 2,
+                  "service": "test",
+                  "store": "keychain",
+                  "title": "",
+                  "usages": [
+                    "sign",
+                    "verify"
+                  ],
+                  "validity": {
+                    "not_after": null,
+                    "not_before": null
+                  },
+                  "version": 2
+                },
+                "old": {
+                  "algorithm": "ec-p256",
+                  "created": "2026-09-15T08:01:00Z",
+                  "description": "",
+                  "exposure": "never",
+                  "extraction": "none",
+                  "findings": [],
+                  "fingerprint": "oH7qOtUG31wrU6b8xFSqKDgauGWl3Ul4qrwzvTlr720",
+                  "format": {
+                    "public": "spki-der",
+                    "signature": "ecdsa-der-low-s"
+                  },
+                  "issuer": null,
+                  "kind": "key",
+                  "label": "works.relux.mac-keyvault.key.test.unknown-field.v1",
+                  "meta": {},
+                  "operations": [
+                    {
+                      "name": "ecdsa-sha256-sign",
+                      "input": "sha256-digest",
+                      "output": "ecdsa-der-low-s|ecdsa-raw",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "ecdsa-sha256-verify",
+                      "input": "sha256-digest+signature",
+                      "output": "verdict",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "ecies-p256-encrypt",
+                      "input": "payload",
+                      "output": "envelope:ecies-x963-sha256-aesgcm",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "export-public",
+                      "input": "",
+                      "output": "spki-der|spki-pem|jwk",
+                      "via": "pub"
+                    }
+                  ],
+                  "origin": {
+                    "host": "h",
+                    "source": "generated",
+                    "tool": "t",
+                    "user": "t"
+                  },
+                  "purpose": "unknown-field",
+                  "schema": 2,
+                  "service": "test",
+                  "store": "keychain",
+                  "title": "",
+                  "usages": [
+                    "sign",
+                    "verify"
+                  ],
+                  "validity": {
+                    "not_after": null,
+                    "not_before": null
+                  },
+                  "version": 1
+                }
+              }
+            }
+    --- FAIL: TestReviewerUnknownPersistedFieldsRefusedAtRun/nested_format (0.01s)
+        reviewer_unknown_field_test.go:31: rotate admitted unknown persisted field: code=0 creates=1 response={
+              "ok": true,
+              "command": "rotate",
+              "result": {
+                "new": {
+                  "algorithm": "ec-p256",
+                  "created": "2026-09-15T13:37:09Z",
+                  "description": "",
+                  "exposure": "never",
+                  "extraction": "none",
+                  "findings": [],
+                  "fingerprint": "2NK56ryzIqBaa99w1sLiJhOdXIIu8xmLGs6wOsmQAes",
+                  "format": {
+                    "public": "spki-der",
+                    "signature": "ecdsa-der-low-s"
+                  },
+                  "issuer": null,
+                  "kind": "key",
+                  "label": "works.relux.mac-keyvault.key.test.unknown-field.v2",
+                  "meta": {},
+                  "operations": [
+                    {
+                      "name": "ecdsa-sha256-sign",
+                      "input": "sha256-digest",
+                      "output": "ecdsa-der-low-s|ecdsa-raw",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "ecdsa-sha256-verify",
+                      "input": "sha256-digest+signature",
+                      "output": "verdict",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "ecies-p256-encrypt",
+                      "input": "payload",
+                      "output": "envelope:ecies-x963-sha256-aesgcm",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "export-public",
+                      "input": "",
+                      "output": "spki-der|spki-pem|jwk",
+                      "via": "pub"
+                    }
+                  ],
+                  "origin": {
+                    "host": "Alexis-M1-Max.local",
+                    "source": "generated",
+                    "tool": "mac-keyvault/dev",
+                    "user": "alexis"
+                  },
+                  "purpose": "unknown-field",
+                  "schema": 2,
+                  "service": "test",
+                  "store": "keychain",
+                  "title": "",
+                  "usages": [
+                    "sign",
+                    "verify"
+                  ],
+                  "validity": {
+                    "not_after": null,
+                    "not_before": null
+                  },
+                  "version": 2
+                },
+                "old": {
+                  "algorithm": "ec-p256",
+                  "created": "2026-09-15T08:01:00Z",
+                  "description": "",
+                  "exposure": "never",
+                  "extraction": "none",
+                  "findings": [],
+                  "fingerprint": "oH7qOtUG31wrU6b8xFSqKDgauGWl3Ul4qrwzvTlr720",
+                  "format": {
+                    "public": "spki-der",
+                    "signature": "ecdsa-der-low-s"
+                  },
+                  "issuer": null,
+                  "kind": "key",
+                  "label": "works.relux.mac-keyvault.key.test.unknown-field.v1",
+                  "meta": {},
+                  "operations": [
+                    {
+                      "name": "ecdsa-sha256-sign",
+                      "input": "sha256-digest",
+                      "output": "ecdsa-der-low-s|ecdsa-raw",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "ecdsa-sha256-verify",
+                      "input": "sha256-digest+signature",
+                      "output": "verdict",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "ecies-p256-encrypt",
+                      "input": "payload",
+                      "output": "envelope:ecies-x963-sha256-aesgcm",
+                      "via": "reserved"
+                    },
+                    {
+                      "name": "export-public",
+                      "input": "",
+                      "output": "spki-der|spki-pem|jwk",
+                      "via": "pub"
+                    }
+                  ],
+                  "origin": {
+                    "host": "h",
+                    "source": "generated",
+                    "tool": "t",
+                    "user": "t"
+                  },
+                  "purpose": "unknown-field",
+                  "schema": 2,
+                  "service": "test",
+                  "store": "keychain",
+                  "title": "",
+                  "usages": [
+                    "sign",
+                    "verify"
+                  ],
+                  "validity": {
+                    "not_after": null,
+                    "not_before": null
+                  },
+                  "version": 1
+                }
+              }
+            }
+FAIL
+FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	1.029s
+FAIL
+exit=1

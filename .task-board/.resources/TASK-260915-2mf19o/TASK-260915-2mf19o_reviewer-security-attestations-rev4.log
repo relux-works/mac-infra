@@ -1,0 +1,12 @@
+=== RUN   TestSecurityStorePrivateKeyIsNotExtractable
+--- PASS: TestSecurityStorePrivateKeyIsNotExtractable (0.09s)
+=== RUN   TestSecurityStoreACLTrustsOnlyCallingBinary
+--- PASS: TestSecurityStoreACLTrustsOnlyCallingBinary (0.06s)
+=== RUN   TestSecurityStoreEnclaveAndUserPresenceReturnMissingEntitlement
+=== RUN   TestSecurityStoreEnclaveAndUserPresenceReturnMissingEntitlement/enclave
+=== RUN   TestSecurityStoreEnclaveAndUserPresenceReturnMissingEntitlement/user-presence
+--- PASS: TestSecurityStoreEnclaveAndUserPresenceReturnMissingEntitlement (0.01s)
+    --- PASS: TestSecurityStoreEnclaveAndUserPresenceReturnMissingEntitlement/enclave (0.01s)
+    --- PASS: TestSecurityStoreEnclaveAndUserPresenceReturnMissingEntitlement/user-presence (0.00s)
+PASS
+ok  	github.com/relux-works/mac-infra/internal/keyvault	0.574s

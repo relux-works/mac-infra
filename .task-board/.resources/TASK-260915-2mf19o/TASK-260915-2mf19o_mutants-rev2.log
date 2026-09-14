@@ -1,0 +1,228 @@
+== M1 [F1] ParseAddress accepts a full label inside the prefix as an address -> killed
+   ./cmd/mac-keyvault TestRunForeignLabelRefusedAtEntry: rc=1
+      --- FAIL: TestRunForeignLabelRefusedAtEntry/meta_get_works.relux.mac-keyvault.key.test.cli-del.v1 (0.00s)
+      main_test.go:356: code=0 resp={
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.378s
+   ./internal/keyvault TestParseAddressAndLabel/full_own_label: rc=1
+      --- FAIL: TestParseAddressAndLabel (0.00s)
+      --- FAIL: TestParseAddressAndLabel/full_own_label (0.00s)
+      keyvault_test.go:211: expected a Refusal, got <nil>
+      FAIL
+== M2 [F2] lock released after the duplicate check, before Create -> killed
+   ./internal/keyvault TestManagerInitDuplicateRefusalIsAtomic: rc=1
+      --- FAIL: TestManagerInitDuplicateRefusalIsAtomic (0.30s)
+      keyvault_test.go:503: locked race created 2 keys, want 1: [<nil> <nil>]
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.627s
+== M3 [F3] usage errors bypass the JSON emitter -> killed
+   ./cmd/mac-keyvault TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore: rc=1
+      main_test.go:319: json first: stdout is not a JSON envelope (unexpected end of JSON input): ""
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/no_args (0.00s)
+      main_test.go:319: json first: stdout is not a JSON envelope (unexpected end of JSON input): ""
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/pub_missing_address (0.00s)
+== M3b [F3] unknown command prints text and exits 2 directly -> killed
+   ./cmd/mac-keyvault TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/unknown_command: rc=1
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore (0.00s)
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/unknown_command (0.00s)
+      main_test.go:319: json first: stdout is not a JSON envelope (unexpected end of JSON input): ""
+      FAIL
+== M4 [F4] rotate maps store unknown to keychain -> killed
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/unknown_store: rc=1
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata (0.01s)
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata/unknown_store (0.00s)
+      keyvault_test.go:720: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/unknown_store: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.355s
+      FAIL
+== M4b [F4] rotate upgrades a schema-1 record to schema 2 with guessed service/purpose -> killed
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/schema_1_keychain: rc=1
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata (0.00s)
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata/schema_1_keychain (0.00s)
+      keyvault_test.go:720: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/rev1_keychain: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.681s
+      FAIL
+== M5 [F5] kSecAttrIsExtractable moved back inside kSecPrivateKeyAttrs (rev1 shape) -> killed
+   ./internal/keyvault TestSecurityStorePrivateKeyIsNotExtractable: rc=1
+      --- FAIL: TestSecurityStorePrivateKeyIsNotExtractable (0.18s)
+      security_darwin_test.go:205: private key export probe = {RepresentationStatus:0 ExportStatus:0 LeakedBytes:321}; want both paths refused with -25316 and zero bytes
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.512s
+== M6 [F5] ACL trusted-application list gains a second binary (/usr/bin/security) -> killed
+   ./internal/keyvault TestSecurityStoreACLTrustsOnlyCallingBinary: rc=1
+      --- FAIL: TestSecurityStoreACLTrustsOnlyCallingBinary (0.15s)
+      security_darwin_test.go:254: private-key ACL entry [ACLAuthorizationDecrypt ACLAuthorizationDerive ACLAuthorizationExportClear ACLAuthorizationExportWrapped ACLAuthorizationMAC ACLAuthorizationSign] t
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.496s
+== M6b [F5] private-key ACL entries rewritten to trust any application (SecACLSetContents NULL) -> killed
+   ./internal/keyvault TestSecurityStoreACLTrustsOnlyCallingBinary: rc=1
+      --- FAIL: TestSecurityStoreACLTrustsOnlyCallingBinary (0.14s)
+      security_darwin_test.go:254: private-key ACL entry [ACLAuthorizationDecrypt ACLAuthorizationDerive ACLAuthorizationExportClear ACLAuthorizationExportWrapped ACLAuthorizationMAC ACLAuthorizationSign] t
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.463s
+== M7 [model] "fingerprint" dropped from ReservedMetaNames -> killed
+   ./internal/keyvault TestValidateNew/meta_reserved_fingerprint: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/meta_reserved_fingerprint (0.00s)
+      keyvault_test.go:404: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunInitValidatesRecordBeforeStore/meta_reserved_json: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.353s
+      FAIL
+== M8 [model] ed25519 accepted as an algorithm -> killed
+   ./internal/keyvault TestValidateNew/algorithm_ed25519: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/algorithm_ed25519 (0.00s)
+      keyvault_test.go:404: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunInitValidatesRecordBeforeStore/algorithm_ed25519: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.386s
+      FAIL
+== M9 [model] extraction agent admitted on a Secure Enclave key -> killed
+   ./internal/keyvault TestValidateNew/extraction_agent_enclave: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/extraction_agent_enclave (0.00s)
+      keyvault_test.go:404: expected a Refusal, got <nil>
+      FAIL
+== M10 [F1] RequireOwnLabel accepts the prefix without its trailing dot -> killed
+   ./internal/keyvault TestRequireOwnLabel: rc=1
+      --- FAIL: TestRequireOwnLabel (0.00s)
+      keyvault_test.go:258: expected a Refusal, got <nil>
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.438s
+   ./internal/keyvault TestParseAddress/foreign_lookalike_prefix: rc=0
+   ./cmd/mac-keyvault TestRunForeignLabelRefusedAtEntry: rc=0
+== M11 [delete] delete of an explicit version needs no confirmation -> killed
+   ./internal/keyvault TestManagerDeleteGates/own_version_unconfirmed: rc=1
+      --- FAIL: TestManagerDeleteGates (0.01s)
+      --- FAIL: TestManagerDeleteGates/own_version_unconfirmed (0.01s)
+      keyvault_test.go:597: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunJSONEnvelopeAndExitCodes/delete_unconfirmed_versioned: rc=1
+      --- FAIL: TestRunJSONEnvelopeAndExitCodes (0.01s)
+      --- FAIL: TestRunJSONEnvelopeAndExitCodes/delete_unconfirmed_versioned (0.01s)
+      main_test.go:229: code=0 ok=true command=delete; want 3 false delete: {
+      FAIL
+== M12 [duplicate] duplicate check ignores rotated generations -> killed
+   ./internal/keyvault TestManagerInitValidatesThenGatesDuplicates: rc=1
+      --- FAIL: TestManagerInitValidatesThenGatesDuplicates (0.00s)
+      keyvault_test.go:450: expected a Refusal, got <nil>
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.339s
+== M13 [model] v1 tag decoded as schema 2 -> killed
+   ./internal/keyvault TestRecordEncodingAndLegacyTags: rc=1
+      --- FAIL: TestRecordEncodingAndLegacyTags (0.00s)
+      keyvault_test.go:314: legacy = {Schema:2 Kind:unknown Service:unknown Purpose:unknown Version:0 Title: Description: Algorithm:unknown Store:keychain Extraction:unknown Usages:[] Format:{Public: Signat
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.343s
+   ./cmd/mac-keyvault TestRunDescribeOperationsAndLegacy: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.346s
+      FAIL
+== M14 [model] unknown registry row falls back to the ec-p256 keychain row -> killed
+   ./internal/keyvault TestOperationsRegistry: rc=1
+      --- FAIL: TestOperationsRegistry (0.00s)
+      keyvault_test.go:916: unknown algorithm: ops=[{ecdsa-sha256-sign sha256-digest ecdsa-der-low-s|ecdsa-raw reserved false sign true false} {ecdsa-sha256-verify sha256-digest+signature verdict reserved f
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.333s
+   ./cmd/mac-keyvault TestRunDescribeOperationsAndLegacy: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.436s
+      FAIL
+== M15 [model] record validation runs after the store listing -> killed
+   ./internal/keyvault TestManagerInitValidatesThenGatesDuplicates: rc=1
+      --- FAIL: TestManagerInitValidatesThenGatesDuplicates (0.00s)
+      keyvault_test.go:445: invalid spec reached the store: creates=0 lists=2
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.332s
+   ./cmd/mac-keyvault TestRunInitValidatesRecordBeforeStore: rc=1
+      _test.go:440: refused init reached the store: creates=[] lists=1
+      --- FAIL: TestRunInitValidatesRecordBeforeStore/usages_unknown (0.00s)
+      main_test.go:440: refused init reached the store: creates=[] lists=1
+      --- FAIL: TestRunInitValidatesRecordBeforeStore/extraction_human_se (0.00s)
+== M16 [F1] singleAddress accepts a parseable full label before ParseAddress -> killed
+   ./cmd/mac-keyvault TestRunForeignLabelRefusedAtEntry: rc=1
+      --- FAIL: TestRunForeignLabelRefusedAtEntry/delete_v1_works.relux.mac-keyvault.key.test.cli-del.v1 (0.00s)
+      main_test.go:356: code=0 resp={
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.409s
+== M17 [contract] usage errors emitted without a hint -> killed
+   ./cmd/mac-keyvault TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore: rc=1
+      .go:322: json first: envelope = {OK:false Command:delete Result:<nil> Error:0x140001df9c0} stderr=""
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/rotate_two_addresses (0.00s)
+      main_test.go:322: json first: envelope = {OK:false Command:rotate Result:<nil> Error:0x140001dfb00} stderr=""
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/meta_set_no_value (0.00s)
+== M18 [contract] missing_entitlement reported as a policy refusal (exit 3) -> killed
+   ./cmd/mac-keyvault TestRunInitMissingEntitlementIsExplicit: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.349s
+      FAIL
+   ./cmd/mac-keyvault TestRunSecurityErrorIsExitOne: rc=1
+      --- FAIL: TestRunSecurityErrorIsExitOne (0.00s)
+      main_test.go:807: code=3 {
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.373s
+== M19 [model] format.envelope admitted on a key -> killed
+   ./internal/keyvault TestValidateNew/format_envelope_for_key: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/format_envelope_for_key (0.00s)
+      keyvault_test.go:404: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunInitValidatesRecordBeforeStore/format_envelope_key: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.427s
+      FAIL
+== M20 [model] address match ignores kind -> killed
+   ./cmd/mac-keyvault TestRunJSONEnvelopeAndExitCodes/describe_other_kind: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.350s
+      FAIL
+   ./internal/keyvault TestManagerListAndDescribe: rc=1
+      --- FAIL: TestManagerListAndDescribe (0.00s)
+      keyvault_test.go:786: other kind = <nil>
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.326s
+== M21 [F4] rotate accepts a record that contradicts its label -> killed
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/label_mismatch: rc=1
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata (0.00s)
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata/label_mismatch (0.00s)
+      keyvault_test.go:720: expected a Refusal, got <nil>
+      FAIL
+
+## Markdown table
+
+| Mutant | Finding | What it narrows the gate to | Named failing test(s) | Result |
+| --- | --- | --- | --- | --- |
+| M1: ParseAddress accepts a full label inside the prefix as an address | F1 | admits one raw-label shape (own full label) past the address-only contract | `TestRunForeignLabelRefusedAtEntry` (rc=1)<br>`TestParseAddressAndLabel/full_own_label` (rc=1) | killed |
+| M2: lock released after the duplicate check, before Create | F2 | admits the concurrent second create of one label | `TestManagerInitDuplicateRefusalIsAtomic` (rc=1) | killed |
+| M3: usage errors bypass the JSON emitter | F3 | admits plain-text usage output in --json mode | `TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore` (rc=1) | killed |
+| M3b: unknown command prints text and exits 2 directly | F3 | admits one usage path (unknown command) around the envelope | `TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/unknown_command` (rc=1) | killed |
+| M4: rotate maps store unknown to keychain | F4 | admits the unknown-store schema-2 record (schema-1/unreadable still refused) | `TestManagerRotateRefusesUnknownMetadata/unknown_store` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/unknown_store` (rc=1) | killed |
+| M4b: rotate upgrades a schema-1 record to schema 2 with guessed service/purpose | F4 | admits the rev1-tag key | `TestManagerRotateRefusesUnknownMetadata/schema_1_keychain` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/rev1_keychain` (rc=1) | killed |
+| M5: kSecAttrIsExtractable moved back inside kSecPrivateKeyAttrs (rev1 shape) | F5 | admits an extractable private key while every other attribute stays | `TestSecurityStorePrivateKeyIsNotExtractable` (rc=1) | killed |
+| M6: ACL trusted-application list gains a second binary (/usr/bin/security) | F5 | admits one more application into the private-key ACL | `TestSecurityStoreACLTrustsOnlyCallingBinary` (rc=1) | killed |
+| M6b: private-key ACL entries rewritten to trust any application (SecACLSetContents NULL) | F5 | the SecAccess is still installed but its private entries admit every application | `TestSecurityStoreACLTrustsOnlyCallingBinary` (rc=1) | killed |
+| M7: "fingerprint" dropped from ReservedMetaNames | model | admits one reserved name inside meta | `TestValidateNew/meta_reserved_fingerprint` (rc=1)<br>`TestRunInitValidatesRecordBeforeStore/meta_reserved_json` (rc=1) | killed |
+| M8: ed25519 accepted as an algorithm | model | admits one known-unsupported algorithm | `TestValidateNew/algorithm_ed25519` (rc=1)<br>`TestRunInitValidatesRecordBeforeStore/algorithm_ed25519` (rc=1) | killed |
+| M9: extraction agent admitted on a Secure Enclave key | model | admits one extraction value the Enclave can never honour | `TestValidateNew/extraction_agent_enclave` (rc=1) | killed |
+| M10: RequireOwnLabel accepts the prefix without its trailing dot | F1 | admits the works.relux.mac-keyvaultX lookalike namespace | `TestRequireOwnLabel` (rc=1) | killed |
+| M11: delete of an explicit version needs no confirmation | delete | admits one unconfirmed delete shape | `TestManagerDeleteGates/own_version_unconfirmed` (rc=1)<br>`TestRunJSONEnvelopeAndExitCodes/delete_unconfirmed_versioned` (rc=1) | killed |
+| M12: duplicate check ignores rotated generations | duplicate | admits init of an address that exists only as .vN | `TestManagerInitValidatesThenGatesDuplicates` (rc=1) | killed |
+| M13: v1 tag decoded as schema 2 | model | admits a silent upgrade of the legacy record | `TestRecordEncodingAndLegacyTags` (rc=1)<br>`TestRunDescribeOperationsAndLegacy` (rc=1) | killed |
+| M14: unknown registry row falls back to the ec-p256 keychain row | model | admits guessed operations for an unknown primitive | `TestOperationsRegistry` (rc=1)<br>`TestRunDescribeOperationsAndLegacy` (rc=1) | killed |
+| M15: record validation runs after the store listing | model | admits a Security call before an invalid record is refused | `TestManagerInitValidatesThenGatesDuplicates` (rc=1)<br>`TestRunInitValidatesRecordBeforeStore` (rc=1) | killed |
+| M16: singleAddress accepts a parseable full label before ParseAddress | F1 | admits one raw-label shape at the CLI layer around the address gate | `TestRunForeignLabelRefusedAtEntry` (rc=1) | killed |
+| M17: usage errors emitted without a hint | contract | admits one envelope class that violates {code, message, hint} | `TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore` (rc=1) | killed |
+| M18: missing_entitlement reported as a policy refusal (exit 3) | contract | admits one operational failure into the refusal exit class | `TestRunInitMissingEntitlementIsExplicit` (rc=1)<br>`TestRunSecurityErrorIsExitOne` (rc=1) | killed |
+| M19: format.envelope admitted on a key | model | admits one format key outside the per-kind allowed set | `TestValidateNew/format_envelope_for_key` (rc=1)<br>`TestRunInitValidatesRecordBeforeStore/format_envelope_key` (rc=1) | killed |
+| M20: address match ignores kind | model | admits a record of another kind for the same service/purpose (uniqueness tuple loses kind) | `TestRunJSONEnvelopeAndExitCodes/describe_other_kind` (rc=1)<br>`TestManagerListAndDescribe` (rc=1) | killed |
+| M21: rotate accepts a record that contradicts its label | F4 | admits one metadata mismatch shape | `TestManagerRotateRefusesUnknownMetadata/label_mismatch` (rc=1) | killed |
+
+survivors=0

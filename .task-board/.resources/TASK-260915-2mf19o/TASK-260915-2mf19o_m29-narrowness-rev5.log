@@ -1,0 +1,5 @@
+M29 applied: ./cmd/mac-keyvault TestRunMetaJSONRejectsTrailingDocument: rc=0 (expected 0 = still refused; trailing_document expected 1 = admitted)
+M29 applied: ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/trailing_garbage: rc=0 (expected 0 = still refused; trailing_document expected 1 = admitted)
+M29 applied: ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/trailing_token: rc=0 (expected 0 = still refused; trailing_document expected 1 = admitted)
+M29 applied: ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/trailing_garbage: rc=0 (expected 0 = still refused; trailing_document expected 1 = admitted)
+M29 applied: ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/trailing_document: rc=1 (expected 0 = still refused; trailing_document expected 1 = admitted)

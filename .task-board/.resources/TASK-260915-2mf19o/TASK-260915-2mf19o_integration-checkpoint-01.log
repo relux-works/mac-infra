@@ -1,0 +1,14 @@
+{
+  "already_checkpointed": false,
+  "branch_ref": "refs/heads/task-board/story/STORY-260915-3r0ys5",
+  "commit_oid": "1a150bd50e7ea064bd9b3dc12674372566925a98",
+  "cr_id": "CR-TASK-260915-2mf19o-7",
+  "id": "TASK-260915-2mf19o",
+  "index_admission": "captured_lease",
+  "repository_delta": "present",
+  "revision": 7,
+  "skip_reason": "",
+  "skipped": false,
+  "status": "integrating"
+}
+checkpoint exit=0

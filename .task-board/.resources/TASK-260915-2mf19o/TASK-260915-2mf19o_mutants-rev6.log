@@ -1,0 +1,548 @@
+# mutants rev6 — part 1 (M1-M22) and part 2 (M22b-M30h), one clean run each; both restore files byte-exact
+== M1 [F1] ParseAddress accepts a full label inside the prefix as an address -> killed
+   ./cmd/mac-keyvault TestRunForeignLabelRefusedAtEntry: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	1.015s
+      FAIL
+   ./internal/keyvault TestParseAddressAndLabel/full_own_label: rc=1
+      --- FAIL: TestParseAddressAndLabel (0.00s)
+      --- FAIL: TestParseAddressAndLabel/full_own_label (0.00s)
+      keyvault_test.go:241: expected a Refusal, got <nil>
+      FAIL
+== M2 [F2] lock released after the duplicate check, before Create -> killed
+   ./internal/keyvault TestManagerInitDuplicateRefusalIsAtomic: rc=1
+      --- FAIL: TestManagerInitDuplicateRefusalIsAtomic (0.61s)
+      keyvault_test.go:615: locked race created 2 keys, want 1: [<nil> <nil>]
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	1.070s
+== M3 [F3] usage errors bypass the JSON emitter -> killed
+   ./cmd/mac-keyvault TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore: rc=1
+      main_test.go:292: json first: stdout is not a JSON envelope (unexpected end of JSON input): ""
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/meta_no_sub (0.01s)
+      main_test.go:292: json first: stdout is not a JSON envelope (unexpected end of JSON input): ""
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/meta_unset_no_key (0.01s)
+== M3b [F3] unknown command prints text and exits 2 directly -> killed
+   ./cmd/mac-keyvault TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/unknown_command: rc=1
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore (0.03s)
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/unknown_command (0.01s)
+      main_test.go:292: json first: stdout is not a JSON envelope (unexpected end of JSON input): ""
+      FAIL
+== M4 [F4] rotate maps store unknown to keychain before the invariant table runs -> killed
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/unknown_store: rc=1
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata (0.01s)
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata/unknown_store (0.01s)
+      keyvault_test.go:855: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/unknown_store: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.381s
+      FAIL
+== M4b [F4] rotate upgrades a schema-1 record to schema 2 with guessed service/purpose -> killed
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/schema_1_keychain: rc=1
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault [build failed]
+      FAIL
+      internal/keyvault/keyvault.go:460:23: undefined: parsed
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/rev1_keychain: rc=1
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault [build failed]
+      FAIL
+      internal/keyvault/keyvault.go:460:23: undefined: parsed
+== M5 [F5] kSecAttrIsExtractable moved back inside kSecPrivateKeyAttrs (rev1 shape) -> killed
+   ./internal/keyvault TestSecurityStorePrivateKeyIsNotExtractable: rc=1
+      --- FAIL: TestSecurityStorePrivateKeyIsNotExtractable (0.22s)
+      security_darwin_test.go:205: private key export probe = {RepresentationStatus:0 ExportStatus:0 LeakedBytes:321}; want both paths refused with -25316 and zero bytes
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.596s
+== M6 [F5] ACL trusted-application list gains a second binary (/usr/bin/security) -> killed
+   ./internal/keyvault TestSecurityStoreACLTrustsOnlyCallingBinary: rc=1
+      --- FAIL: TestSecurityStoreACLTrustsOnlyCallingBinary (0.09s)
+      security_darwin_test.go:254: private-key ACL entry [ACLAuthorizationDecrypt ACLAuthorizationDerive ACLAuthorizationExportClear ACLAuthorizationExportWrapped ACLAuthorizationMAC ACLAuthorizationSign] t
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.451s
+== M6b [F5] private-key ACL entries rewritten to trust any application (SecACLSetContents NULL) -> killed
+   ./internal/keyvault TestSecurityStoreACLTrustsOnlyCallingBinary: rc=1
+      --- FAIL: TestSecurityStoreACLTrustsOnlyCallingBinary (0.16s)
+      security_darwin_test.go:254: private-key ACL entry [ACLAuthorizationDecrypt ACLAuthorizationDerive ACLAuthorizationExportClear ACLAuthorizationExportWrapped ACLAuthorizationMAC ACLAuthorizationSign] t
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.562s
+== M7 [model] "fingerprint" dropped from ReservedMetaNames -> killed
+   ./internal/keyvault TestValidateNew/meta_reserved_fingerprint: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/meta_reserved_fingerprint (0.00s)
+      keyvault_test.go:476: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunInitValidatesRecordBeforeStore/meta_reserved_json: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.369s
+      FAIL
+== M8 [model] ed25519 accepted as an algorithm -> killed
+   ./internal/keyvault TestValidateNew/algorithm_ed25519: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/algorithm_ed25519 (0.00s)
+      keyvault_test.go:476: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunInitValidatesRecordBeforeStore/algorithm_ed25519: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.659s
+      FAIL
+== M9 [model] extraction agent admitted on a Secure Enclave key -> killed
+   ./internal/keyvault TestValidateNew/extraction_agent_enclave: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/extraction_agent_enclave (0.00s)
+      keyvault_test.go:476: expected a Refusal, got <nil>
+      FAIL
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/extraction_agent_on_enclave: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.00s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/extraction_agent_on_enclave (0.00s)
+      invariants_test.go:138: expected a Refusal, got <nil>
+      FAIL
+== M10 [F1] RequireOwnLabel accepts the prefix without its trailing dot -> killed
+   ./internal/keyvault TestRequireOwnLabel: rc=1
+      --- FAIL: TestRequireOwnLabel (0.00s)
+      keyvault_test.go:288: expected a Refusal, got <nil>
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.352s
+   ./internal/keyvault TestParseAddress/foreign_lookalike_prefix: rc=0
+   ./cmd/mac-keyvault TestRunForeignLabelRefusedAtEntry: rc=0
+== M11 [delete] delete of an explicit version needs no confirmation -> killed
+   ./internal/keyvault TestManagerDeleteGates/own_version_unconfirmed: rc=1
+      --- FAIL: TestManagerDeleteGates (0.00s)
+      --- FAIL: TestManagerDeleteGates/own_version_unconfirmed (0.00s)
+      keyvault_test.go:709: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunJSONEnvelopeAndExitCodes/delete_unconfirmed_versioned: rc=1
+      --- FAIL: TestRunJSONEnvelopeAndExitCodes (0.01s)
+      --- FAIL: TestRunJSONEnvelopeAndExitCodes/delete_unconfirmed_versioned (0.01s)
+      main_test.go:230: code=0 ok=true command=delete; want 3 false delete: {
+      FAIL
+== M12 [duplicate] duplicate check ignores rotated generations -> killed
+   ./internal/keyvault TestManagerInitValidatesThenGatesDuplicates: rc=1
+      --- FAIL: TestManagerInitValidatesThenGatesDuplicates (0.01s)
+      keyvault_test.go:559: expected a Refusal, got <nil>
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.494s
+== M13 [model] v1 tag decoded as schema 2 -> killed
+   ./internal/keyvault TestRecordEncodingAndLegacyTags: rc=1
+      --- FAIL: TestRecordEncodingAndLegacyTags (0.00s)
+      keyvault_test.go:344: legacy = {Schema:2 Kind:unknown Service:unknown Purpose:unknown Version:0 Title: Description: Algorithm:unknown Store:keychain Extraction:unknown Usages:[] Format:{Public: Signat
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.651s
+   ./cmd/mac-keyvault TestRunDescribeOperationsAndLegacy: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.364s
+      FAIL
+== M14 [model] unknown registry row falls back to the ec-p256 keychain row -> killed
+   ./internal/keyvault TestOperationsRegistry: rc=1
+      --- FAIL: TestOperationsRegistry (0.00s)
+      keyvault_test.go:1059: schema 1: ops=[{ecdsa-sha256-verify sha256-digest+signature verdict reserved false  false false} {ecies-p256-encrypt payload envelope:ecies-x963-sha256-aesgcm reserved false  fa
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.619s
+   ./cmd/mac-keyvault TestRunDescribeOperationsAndLegacy: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.470s
+      FAIL
+== M15 [model] record validation runs after the store listing -> killed
+   ./internal/keyvault TestManagerInitValidatesThenGatesDuplicates: rc=1
+      --- FAIL: TestManagerInitValidatesThenGatesDuplicates (0.00s)
+      keyvault_test.go:554: invalid spec reached the store: creates=0 lists=2
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.367s
+   ./cmd/mac-keyvault TestRunInitValidatesRecordBeforeStore: rc=1
+      test.go:562: refused init reached the store: creates=[] lists=1
+      --- FAIL: TestRunInitValidatesRecordBeforeStore/meta_nested_json (0.00s)
+      main_test.go:562: refused init reached the store: creates=[] lists=1
+      --- FAIL: TestRunInitValidatesRecordBeforeStore/algorithm_rsa_reserved (0.00s)
+== M16 [F1] singleAddress accepts a parseable full label before ParseAddress -> killed
+   ./cmd/mac-keyvault TestRunForeignLabelRefusedAtEntry: rc=1
+      --- FAIL: TestRunForeignLabelRefusedAtEntry/delete_v1_works.relux.mac-keyvault.key.test.cli-del.v1 (0.00s)
+      main_test.go:478: code=0 resp={
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.639s
+== M17 [contract] usage errors emitted without a hint -> killed
+   ./cmd/mac-keyvault TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore: rc=1
+      main_test.go:292: json first: envelope = {OK:false Command:delete Result:<nil> Error:0x14000202fc0} stderr=""
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/meta_set_bad_json (0.01s)
+      main_test.go:292: json first: envelope = {OK:false Command:meta set Result:<nil> Error:0x14000203400} stderr=""
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/meta_no_sub (0.01s)
+== M18 [contract] missing_entitlement reported as a policy refusal (exit 3) -> killed
+   ./cmd/mac-keyvault TestRunInitMissingEntitlementIsExplicit: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.417s
+      FAIL
+   ./cmd/mac-keyvault TestRunSecurityErrorIsExitOne: rc=1
+      --- FAIL: TestRunSecurityErrorIsExitOne (0.01s)
+      main_test.go:1048: code=3 {
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.698s
+== M19 [model] format.envelope admitted on a key -> killed
+   ./internal/keyvault TestValidateNew/format_envelope_for_key: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/format_envelope_for_key (0.00s)
+      keyvault_test.go:476: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunInitValidatesRecordBeforeStore/format_envelope_key: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.428s
+      FAIL
+== M20 [model] address match ignores kind -> killed
+   ./cmd/mac-keyvault TestRunJSONEnvelopeAndExitCodes/describe_other_kind: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.564s
+      FAIL
+   ./internal/keyvault TestManagerListAndDescribe: rc=1
+      --- FAIL: TestManagerListAndDescribe (0.01s)
+      keyvault_test.go:929: other kind = <nil>
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.370s
+== M21 [F4] label agreement ignores the version (kind/service/purpose still compared) -> killed
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/label_mismatch: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.01s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/label_mismatch (0.00s)
+      invariants_test.go:138: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunForgedStoredRecordRefusedEverywhere/label_mismatch: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.644s
+      FAIL
+== M22 [F6] version accepts and ignores extra positionals/flags (JSON emitter kept) -> killed
+   ./cmd/mac-keyvault TestRunVersionRejectsExtraInput: rc=1
+      --- FAIL: TestRunVersionRejectsExtraInput/version_flag_value (0.01s)
+      main_test.go:353: json first: code = 0, want 2; stdout={
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.517s
+
+## Markdown table
+
+| Mutant | Finding | What it narrows the gate to | Named failing test(s) | Result |
+| --- | --- | --- | --- | --- |
+| M1: ParseAddress accepts a full label inside the prefix as an address | F1 | admits one raw-label shape (own full label) past the address-only contract | `TestRunForeignLabelRefusedAtEntry` (rc=1)<br>`TestParseAddressAndLabel/full_own_label` (rc=1) | killed |
+| M2: lock released after the duplicate check, before Create | F2 | admits the concurrent second create of one label | `TestManagerInitDuplicateRefusalIsAtomic` (rc=1) | killed |
+| M3: usage errors bypass the JSON emitter | F3 | admits plain-text usage output in --json mode | `TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore` (rc=1) | killed |
+| M3b: unknown command prints text and exits 2 directly | F3 | admits one usage path (unknown command) around the envelope | `TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/unknown_command` (rc=1) | killed |
+| M4: rotate maps store unknown to keychain before the invariant table runs | F4 | admits the unknown-store schema-2 record (schema-1/unreadable still refused) | `TestManagerRotateRefusesUnknownMetadata/unknown_store` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/unknown_store` (rc=1) | killed |
+| M4b: rotate upgrades a schema-1 record to schema 2 with guessed service/purpose | F4 | admits the rev1-tag key | `TestManagerRotateRefusesUnknownMetadata/schema_1_keychain` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/rev1_keychain` (rc=1) | killed |
+| M5: kSecAttrIsExtractable moved back inside kSecPrivateKeyAttrs (rev1 shape) | F5 | admits an extractable private key while every other attribute stays | `TestSecurityStorePrivateKeyIsNotExtractable` (rc=1) | killed |
+| M6: ACL trusted-application list gains a second binary (/usr/bin/security) | F5 | admits one more application into the private-key ACL | `TestSecurityStoreACLTrustsOnlyCallingBinary` (rc=1) | killed |
+| M6b: private-key ACL entries rewritten to trust any application (SecACLSetContents NULL) | F5 | the SecAccess is still installed but its private entries admit every application | `TestSecurityStoreACLTrustsOnlyCallingBinary` (rc=1) | killed |
+| M7: "fingerprint" dropped from ReservedMetaNames | model | admits one reserved name inside meta | `TestValidateNew/meta_reserved_fingerprint` (rc=1)<br>`TestRunInitValidatesRecordBeforeStore/meta_reserved_json` (rc=1) | killed |
+| M8: ed25519 accepted as an algorithm | model | admits one known-unsupported algorithm | `TestValidateNew/algorithm_ed25519` (rc=1)<br>`TestRunInitValidatesRecordBeforeStore/algorithm_ed25519` (rc=1) | killed |
+| M9: extraction agent admitted on a Secure Enclave key | model | admits one extraction value (agent) on the enclave store; human still refused | `TestValidateNew/extraction_agent_enclave` (rc=1)<br>`TestForgedStoredRecordRefusedEverywhere/extraction_agent_on_enclave` (rc=1) | killed |
+| M10: RequireOwnLabel accepts the prefix without its trailing dot | F1 | admits the works.relux.mac-keyvaultX lookalike namespace | `TestRequireOwnLabel` (rc=1) | killed |
+| M11: delete of an explicit version needs no confirmation | delete | admits one unconfirmed delete shape | `TestManagerDeleteGates/own_version_unconfirmed` (rc=1)<br>`TestRunJSONEnvelopeAndExitCodes/delete_unconfirmed_versioned` (rc=1) | killed |
+| M12: duplicate check ignores rotated generations | duplicate | admits init of an address that exists only as .vN | `TestManagerInitValidatesThenGatesDuplicates` (rc=1) | killed |
+| M13: v1 tag decoded as schema 2 | model | admits a silent upgrade of the legacy record | `TestRecordEncodingAndLegacyTags` (rc=1)<br>`TestRunDescribeOperationsAndLegacy` (rc=1) | killed |
+| M14: unknown registry row falls back to the ec-p256 keychain row | model | admits guessed operations for an unknown primitive | `TestOperationsRegistry` (rc=1)<br>`TestRunDescribeOperationsAndLegacy` (rc=1) | killed |
+| M15: record validation runs after the store listing | model | admits a Security call before an invalid record is refused | `TestManagerInitValidatesThenGatesDuplicates` (rc=1)<br>`TestRunInitValidatesRecordBeforeStore` (rc=1) | killed |
+| M16: singleAddress accepts a parseable full label before ParseAddress | F1 | admits one raw-label shape at the CLI layer around the address gate | `TestRunForeignLabelRefusedAtEntry` (rc=1) | killed |
+| M17: usage errors emitted without a hint | contract | admits one envelope class that violates {code, message, hint} | `TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore` (rc=1) | killed |
+| M18: missing_entitlement reported as a policy refusal (exit 3) | contract | admits one operational failure into the refusal exit class | `TestRunInitMissingEntitlementIsExplicit` (rc=1)<br>`TestRunSecurityErrorIsExitOne` (rc=1) | killed |
+| M19: format.envelope admitted on a key | model | admits one foreign format key (envelope) on kind key; public-key still refuses it | `TestValidateNew/format_envelope_for_key` (rc=1)<br>`TestRunInitValidatesRecordBeforeStore/format_envelope_key` (rc=1) | killed |
+| M20: address match ignores kind | model | admits a record of another kind for the same service/purpose (uniqueness tuple loses kind) | `TestRunJSONEnvelopeAndExitCodes/describe_other_kind` (rc=1)<br>`TestManagerListAndDescribe` (rc=1) | killed |
+| M21: label agreement ignores the version (kind/service/purpose still compared) | F4 | admits a stored record whose version disagrees with its label | `TestForgedStoredRecordRefusedEverywhere/label_mismatch` (rc=1)<br>`TestRunForgedStoredRecordRefusedEverywhere/label_mismatch` (rc=1) | killed |
+| M22: version accepts and ignores extra positionals/flags (JSON emitter kept) | F6 | admits one command (version) around the usage gate while every other command keeps it | `TestRunVersionRejectsExtraInput` (rc=1) | killed |
+
+survivors=0
+
+== M22b [F6] version parses flags but drops leftover positionals -> killed
+   ./cmd/mac-keyvault TestRunVersionRejectsExtraInput/version_positional: rc=1
+      --- FAIL: TestRunVersionRejectsExtraInput (0.00s)
+      --- FAIL: TestRunVersionRejectsExtraInput/version_positional (0.00s)
+      main_test.go:353: json first: code = 0, want 2; stdout={
+      FAIL
+== M23 [F6] shared DecodeSingleJSON keeps decoding, trailing document admitted (EOF check dropped) -> killed
+   ./cmd/mac-keyvault TestRunMetaJSONRejectsTrailingDocument: rc=1
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault [build failed]
+      FAIL
+      internal/keyvault/record.go:6:2: "errors" imported and not used
+      internal/keyvault/record.go:8:2: "io" imported and not used
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/trailing_token: rc=1
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault [build failed]
+      FAIL
+      internal/keyvault/record.go:6:2: "errors" imported and not used
+      internal/keyvault/record.go:8:2: "io" imported and not used
+== M23b [F6] shared decoder: trailing garbage refused but a well-formed second document admitted -> killed
+   ./cmd/mac-keyvault TestRunMetaJSONRejectsTrailingDocument/second_object: rc=1
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault [build failed]
+      FAIL
+      internal/keyvault/record.go:6:2: "errors" imported and not used
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/trailing_document: rc=1
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault [build failed]
+      FAIL
+      internal/keyvault/record.go:6:2: "errors" imported and not used
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/trailing_document: rc=1
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault [build failed]
+      FAIL
+      internal/keyvault/record.go:6:2: "errors" imported and not used
+== M24 [F7] title bound restored to bytes (len instead of RuneCountInString) -> killed
+   ./cmd/mac-keyvault TestRunTitleCharacterBound: rc=1
+      --- FAIL: TestRunTitleCharacterBound (0.01s)
+      main_test.go:428: 80-character title refused: 3 {
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.377s
+   ./internal/keyvault TestValidateNew: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      keyvault_test.go:394: 80-character title (160 bytes) refused: invalid_title: title is 160 characters, the limit is 80
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.381s
+== M24b [F7] title bound off by one (81 characters admitted) -> killed
+   ./cmd/mac-keyvault TestRunTitleCharacterBound: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.408s
+      FAIL
+   ./internal/keyvault TestValidateNew/title_81_armenian: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/title_81_armenian (0.00s)
+      keyvault_test.go:476: expected a Refusal, got <nil>
+      FAIL
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/title_81_characters: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.01s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/title_81_characters (0.01s)
+      invariants_test.go:138: expected a Refusal, got <nil>
+      FAIL
+== M25 [F8] issuer with a complete {dn, fingerprint} admitted on a key (only partial issuers refused) -> killed
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/forged_issuer: rc=1
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata (0.01s)
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata/forged_issuer (0.01s)
+      keyvault_test.go:855: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/forged_issuer: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.431s
+      FAIL
+   ./internal/keyvault TestValidateNew/issuer_on_key: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/issuer_on_key (0.00s)
+      keyvault_test.go:476: expected a Refusal, got <nil>
+      FAIL
+== M25b [F8] rotate skips ValidateStored (ValidateNew on the re-stamped next record kept) -> killed
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/version_zero: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.01s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/version_zero (0.01s)
+      invariants_test.go:139: rotate: code duplicate, err duplicate: test/forged version 1 already exists as works.relux.mac-keyvault.key.test.forged.v1; want metadata_unknown naming invalid_version
+      FAIL
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/created_null: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.01s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/created_null (0.01s)
+      invariants_test.go:138: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunForgedStoredRecordRefusedEverywhere/label_mismatch: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.385s
+      FAIL
+== M26 [F9] JSON detection narrowed back to string matching of four enumerated spellings (flag pre-parser bypassed) -> killed
+   ./cmd/mac-keyvault TestRunJSONSpellingsRouteUsageErrors: rc=1
+      --- FAIL: TestRunJSONSpellingsRouteUsageErrors/text_later_false_wins (0.01s)
+      main_test.go:1289: code=2 stdout="{\n  \"ok\": false,\n  \"command\": \"version\",\n  \"error\": {\n    \"code\": \"usage\",\n    \"message\": \"version takes no arguments (got \\\"extra\\\")\",\n    
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.742s
+== M26b [F9] flag pre-parser kept, exactly one spelling (--json=1) excluded from detection -> killed
+   ./cmd/mac-keyvault TestRunJSONSpellingsRouteUsageErrors/--json=1_first: rc=1
+      --- FAIL: TestRunJSONSpellingsRouteUsageErrors (0.01s)
+      --- FAIL: TestRunJSONSpellingsRouteUsageErrors/--json=1_first (0.01s)
+      main_test.go:1240: stdout is not a JSON envelope (unexpected end of JSON input): stdout="" stderr="error: usage: unknown command \"--json=1\"\nhint: mac-keyvault help lists the commands: init, list, d
+      FAIL
+== M26c [F9] detector stops scanning at the first non-json token (json-after-command shapes bypass) -> killed
+   ./cmd/mac-keyvault TestRunJSONSpellingsRouteUsageErrors/--json_after: rc=1
+      --- FAIL: TestRunJSONSpellingsRouteUsageErrors (0.01s)
+      --- FAIL: TestRunJSONSpellingsRouteUsageErrors/--json_after (0.00s)
+      main_test.go:1240: stdout is not a JSON envelope (unexpected end of JSON input): stdout="" stderr="error: usage: version takes no arguments (got \"extra\")\nhint: mac-keyvault [--json] version\n"
+      FAIL
+   ./cmd/mac-keyvault TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/list_with_arg: rc=1
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore (0.03s)
+      --- FAIL: TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/list_with_arg (0.01s)
+      main_test.go:292: json last: stdout is not a JSON envelope (unexpected end of JSON input): ""
+      FAIL
+== M27 [F10] list kind validation admits exactly one unknown kind ("bogus") -> killed
+   ./cmd/mac-keyvault TestRunListRejectsInvalidKindBeforeBackend/json_bogus: rc=1
+      --- FAIL: TestRunListRejectsInvalidKindBeforeBackend (0.05s)
+      --- FAIL: TestRunListRejectsInvalidKindBeforeBackend/json_bogus (0.01s)
+      main_test.go:1311: kind "bogus" admitted: code=0 {
+      FAIL
+== M27b [F10] list kind validated only after Backend.List was called -> killed
+   ./cmd/mac-keyvault TestRunListRejectsInvalidKindBeforeBackend: rc=1
+      --- FAIL: TestRunListRejectsInvalidKindBeforeBackend/text_* (0.00s)
+      main_test.go:1320: kind "*" admitted: code=3 stdout="" stderr="error: invalid_kind: kind \"*\" is not one of key, public-key, certificate, secret\nhint: nothing was created or changed; fix the input a
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.391s
+== M28 [F11] DecodeRecord converts only numeric meta to float64 after the UseNumber decode -> killed
+   ./internal/keyvault TestDecodeRecordPreservesNumericMeta: rc=1
+      --- FAIL: TestDecodeRecordPreservesNumericMeta (0.00s)
+      keyvault_test.go:1213: meta = map[string]interface {}{"big":9.007199254740992e+15, "flag":true, "frac":0.1, "huge":1.8446744073709552e+19, "small":7}
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.348s
+   ./cmd/mac-keyvault TestRunMetaNumberRoundTrips: rc=1
+      --- FAIL: TestRunMetaNumberRoundTrips (0.01s)
+      main_test.go:1371: decoded meta = map[string]interface {}{"big":9.007199254740992e+15, "frac":0.1, "small":7}
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.371s
+== M28b [F11] meta set --json-value converts the parsed json.Number to float64 (rev3 shape) -> killed
+   ./cmd/mac-keyvault TestRunMetaNumberRoundTrips: rc=1
+      --- FAIL: TestRunMetaNumberRoundTrips (0.02s)
+      main_test.go:1382: meta set: 0 {
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.391s
+== M28c [F11] keyView re-decodes the record without UseNumber (stored tag exact, printed envelope rounded) -> killed
+   ./cmd/mac-keyvault TestRunMetaNumberRoundTrips: rc=1
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault [build failed]
+      FAIL
+      cmd/mac-keyvault/main.go:12:2: "bytes" imported and not used
+== M29 [F12] DecodeRecord admits exactly a well-formed second JSON document after the record; trailing garbage/token still unreadable; --meta-json boundary untouched -> killed
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/trailing_document: rc=1
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata (0.01s)
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata/trailing_document (0.01s)
+      keyvault_test.go:855: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/trailing_document: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.376s
+      FAIL
+   ./internal/keyvault TestRecordEncodingAndLegacyTags: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.576s
+      FAIL
+== M29b [F12] DecodeRecord bypasses the shared decoder and reads the tag with a bare json.Decoder (rev4 shape) -> killed
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/trailing_garbage: rc=1
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata (0.03s)
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata/trailing_garbage (0.01s)
+      keyvault_test.go:855: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/trailing_token: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.385s
+      FAIL
+   ./internal/keyvault TestRecordEncodingAndLegacyTags: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.357s
+      FAIL
+== M30 [F13] validity row admits non-null not_before on a key when not_after is null (reversed-interval refusal kept) -> killed
+   ./internal/keyvault TestManagerRotateRefusesUnknownMetadata/forged_not_before: rc=1
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata (0.00s)
+      --- FAIL: TestManagerRotateRefusesUnknownMetadata/forged_not_before (0.00s)
+      keyvault_test.go:855: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunRotateRefusesUnknownMetadata/forged_not_before: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.455s
+      FAIL
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/validity_not_before_on_key: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.00s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/validity_not_before_on_key (0.00s)
+      invariants_test.go:138: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunForgedStoredRecordRefusedEverywhere/validity_not_before_on_key: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.386s
+      FAIL
+   ./internal/keyvault TestValidateNew/validity_not_before_on_key: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/validity_not_before_on_key (0.00s)
+      keyvault_test.go:476: expected a Refusal, got <nil>
+      FAIL
+== M30b [F13] one table row weakened to a no-op (created); every other row present -> killed
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/created_null: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.05s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/created_null (0.05s)
+      invariants_test.go:138: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunForgedStoredRecordRefusedEverywhere/created_null: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.362s
+      FAIL
+   ./internal/keyvault TestValidateNew/created_null: rc=1
+      --- FAIL: TestValidateNew (0.00s)
+      --- FAIL: TestValidateNew/created_null (0.00s)
+      keyvault_test.go:476: expected a Refusal, got <nil>
+      FAIL
+== M30c [F13] one table row dropped (origin removed from the table; field list shrinks) -> killed
+   ./internal/keyvault TestRecordInvariantsCoverEveryField: rc=1
+      --- FAIL: TestRecordInvariantsCoverEveryField (0.00s)
+      invariants_test.go:106: invariant rows [schema kind service purpose version title description algorithm store extraction usages format created issuer validity meta]
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/internal/keyvault	0.367s
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/origin_source_bogus: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.00s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/origin_source_bogus (0.00s)
+      invariants_test.go:138: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunForgedStoredRecordRefusedEverywhere/origin_user_empty: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.500s
+      FAIL
+== M30d [F13] reads hide invariant violations (Findings skips ValidateStored) -> killed
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/issuer_on_key: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.00s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/issuer_on_key (0.00s)
+      invariants_test.go:161: describe findings [] do not name record_invalid:invalid_issuer
+      FAIL
+   ./cmd/mac-keyvault TestRunForgedStoredRecordRefusedEverywhere/validity_not_before_on_key: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.390s
+      FAIL
+   ./cmd/mac-keyvault TestRunDescribeOperationsAndLegacy: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.393s
+      FAIL
+== M30e [F13] meta writes skip ValidateStored (rotate still refuses) -> killed
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/validity_not_before_on_key: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.02s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/validity_not_before_on_key (0.02s)
+      invariants_test.go:141: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunForgedStoredRecordRefusedEverywhere/issuer_on_key: rc=1
+      --- FAIL: TestRunForgedStoredRecordRefusedEverywhere (0.00s)
+      --- FAIL: TestRunForgedStoredRecordRefusedEverywhere/issuer_on_key (0.00s)
+      main_test.go:874: meta set: code=0 resp={
+      FAIL
+== M30f [F13] certificate validity row admits a missing not_before (not_after still required) -> killed
+   ./internal/keyvault TestValidateRecordPerKind/certificate_no_not_before: rc=1
+      --- FAIL: TestValidateRecordPerKind (0.00s)
+      --- FAIL: TestValidateRecordPerKind/certificate_no_not_before (0.00s)
+      invariants_test.go:256: expected a Refusal, got <nil>
+      FAIL
+== M30g [F13] extraction row admits agent on a public-key (human still refused on public kinds) -> killed
+   ./internal/keyvault TestValidateRecordPerKind/public-key_extraction_agent: rc=1
+      --- FAIL: TestValidateRecordPerKind (0.00s)
+      --- FAIL: TestValidateRecordPerKind/public-key_extraction_agent (0.00s)
+      invariants_test.go:256: expected a Refusal, got <nil>
+      FAIL
+== M30h [F13] origin.source accepts any imported:<hex> digest length -> killed
+   ./internal/keyvault TestForgedStoredRecordRefusedEverywhere/origin_source_short_digest: rc=1
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere (0.00s)
+      --- FAIL: TestForgedStoredRecordRefusedEverywhere/origin_source_short_digest (0.00s)
+      invariants_test.go:138: expected a Refusal, got <nil>
+      FAIL
+   ./cmd/mac-keyvault TestRunForgedStoredRecordRefusedEverywhere/origin_source_short_digest: rc=1
+      FAIL
+      FAIL	github.com/relux-works/mac-infra/cmd/mac-keyvault	0.409s
+      FAIL
+
+## Markdown table
+
+| Mutant | Finding | What it narrows the gate to | Named failing test(s) | Result |
+| --- | --- | --- | --- | --- |
+| M22b: version parses flags but drops leftover positionals | F6 | admits the positional shape (version extra) while an unknown flag is still refused | `TestRunVersionRejectsExtraInput/version_positional` (rc=1) | killed |
+| M23: shared DecodeSingleJSON keeps decoding, trailing document admitted (EOF check dropped) | F6 | admits a second/trailing JSON document after a well-formed first object | `TestRunMetaJSONRejectsTrailingDocument` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/trailing_token` (rc=1) | killed |
+| M23b: shared decoder: trailing garbage refused but a well-formed second document admitted | F6 | admits exactly the second-object shape ({"a":1} {"b":2}); garbage after the first object still fails | `TestRunMetaJSONRejectsTrailingDocument/second_object` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/trailing_document` (rc=1)<br>`TestManagerRotateRefusesUnknownMetadata/trailing_document` (rc=1) | killed |
+| M24: title bound restored to bytes (len instead of RuneCountInString) | F7 | refuses the valid 80-character non-ASCII title (positive boundary control fails) | `TestRunTitleCharacterBound` (rc=1)<br>`TestValidateNew` (rc=1) | killed |
+| M24b: title bound off by one (81 characters admitted) | F7 | admits exactly the 81-character title | `TestRunTitleCharacterBound` (rc=1)<br>`TestValidateNew/title_81_armenian` (rc=1)<br>`TestForgedStoredRecordRefusedEverywhere/title_81_characters` (rc=1) | killed |
+| M25: issuer with a complete {dn, fingerprint} admitted on a key (only partial issuers refused) | F8 | admits one non-null issuer shape (complete) on a non-certificate kind | `TestManagerRotateRefusesUnknownMetadata/forged_issuer` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/forged_issuer` (rc=1)<br>`TestValidateNew/issuer_on_key` (rc=1) | killed |
+| M25b: rotate skips ValidateStored (ValidateNew on the re-stamped next record kept) | F8 | admits exactly the stored fields the next generation overwrites (version 0 -> 1, created null -> now, label disagreement); every policy field is still caught by ValidateNew | `TestForgedStoredRecordRefusedEverywhere/version_zero` (rc=1)<br>`TestForgedStoredRecordRefusedEverywhere/created_null` (rc=1)<br>`TestRunForgedStoredRecordRefusedEverywhere/label_mismatch` (rc=1) | killed |
+| M26: JSON detection narrowed back to string matching of four enumerated spellings (flag pre-parser bypassed) | F9 | admits every other flag.Bool true spelling (--json=TRUE, --json=1, -json=t, ...) into text mode on a usage error | `TestRunJSONSpellingsRouteUsageErrors` (rc=1) | killed |
+| M26b: flag pre-parser kept, exactly one spelling (--json=1) excluded from detection | F9 | admits the single spelling --json=1 into text mode; every other spelling still selects the envelope | `TestRunJSONSpellingsRouteUsageErrors/--json=1_first` (rc=1) | killed |
+| M26c: detector stops scanning at the first non-json token (json-after-command shapes bypass) | F9 | admits every "--json after the command" placement into text mode; --json first still detected with every spelling | `TestRunJSONSpellingsRouteUsageErrors/--json_after` (rc=1)<br>`TestRunUsageErrorsAreJSONEnvelopesAndDoNotReachStore/list_with_arg` (rc=1) | killed |
+| M27: list kind validation admits exactly one unknown kind ("bogus") | F10 | admits the single kind value bogus on the list path; the address paths still refuse it | `TestRunListRejectsInvalidKindBeforeBackend/json_bogus` (rc=1) | killed |
+| M27b: list kind validated only after Backend.List was called | F10 | the refusal still happens (exit 3, invalid_kind) but one Security call precedes it | `TestRunListRejectsInvalidKindBeforeBackend` (rc=1) | killed |
+| M28: DecodeRecord converts only numeric meta to float64 after the UseNumber decode | F11 | strings and bools still round-trip; numbers alone are rounded (2^53+1 -> 2^53) | `TestDecodeRecordPreservesNumericMeta` (rc=1)<br>`TestRunMetaNumberRoundTrips` (rc=1) | killed |
+| M28b: meta set --json-value converts the parsed json.Number to float64 (rev3 shape) | F11 | init --meta-json numbers still exact; only the meta set path rounds | `TestRunMetaNumberRoundTrips` (rc=1) | killed |
+| M28c: keyView re-decodes the record without UseNumber (stored tag exact, printed envelope rounded) | F11 | the record is persisted digit-exact; only what init/describe/list print is rounded | `TestRunMetaNumberRoundTrips` (rc=1) | killed |
+| M29: DecodeRecord admits exactly a well-formed second JSON document after the record; trailing garbage/token still unreadable; --meta-json boundary untouched | F12 | admits the {record} {record} tag shape only (the reviewer probe shape); "{record}}" and "{record} 1" stay read failures and the shared input decoder is unchanged | `TestManagerRotateRefusesUnknownMetadata/trailing_document` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/trailing_document` (rc=1)<br>`TestRecordEncodingAndLegacyTags` (rc=1) | killed |
+| M29b: DecodeRecord bypasses the shared decoder and reads the tag with a bare json.Decoder (rev4 shape) | F12 | the persisted-record boundary alone loses the EOF rule; --meta-json and --json-value keep it | `TestManagerRotateRefusesUnknownMetadata/trailing_garbage` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/trailing_token` (rc=1)<br>`TestRecordEncodingAndLegacyTags` (rc=1) | killed |
+| M30: validity row admits non-null not_before on a key when not_after is null (reversed-interval refusal kept) | F13 | admits exactly the reviewer probe shape {not_before: T, not_after: null} on a key; not_before with not_after and inverted intervals stay refused | `TestManagerRotateRefusesUnknownMetadata/forged_not_before` (rc=1)<br>`TestRunRotateRefusesUnknownMetadata/forged_not_before` (rc=1)<br>`TestForgedStoredRecordRefusedEverywhere/validity_not_before_on_key` (rc=1)<br>`TestRunForgedStoredRecordRefusedEverywhere/validity_not_before_on_key` (rc=1)<br>`TestValidateNew/validity_not_before_on_key` (rc=1) | killed |
+| M30b: one table row weakened to a no-op (created); every other row present | F13 | admits exactly a null created on a stored record; every other field stays governed | `TestForgedStoredRecordRefusedEverywhere/created_null` (rc=1)<br>`TestRunForgedStoredRecordRefusedEverywhere/created_null` (rc=1)<br>`TestValidateNew/created_null` (rc=1) | killed |
+| M30c: one table row dropped (origin removed from the table; field list shrinks) | F13 | admits every origin forgery; the coverage test sees a Record field without a row | `TestRecordInvariantsCoverEveryField` (rc=1)<br>`TestForgedStoredRecordRefusedEverywhere/origin_source_bogus` (rc=1)<br>`TestRunForgedStoredRecordRefusedEverywhere/origin_user_empty` (rc=1) | killed |
+| M30d: reads hide invariant violations (Findings skips ValidateStored) | F13 | writes still refuse; describe/list print a forged record with no record_invalid finding | `TestForgedStoredRecordRefusedEverywhere/issuer_on_key` (rc=1)<br>`TestRunForgedStoredRecordRefusedEverywhere/validity_not_before_on_key` (rc=1)<br>`TestRunDescribeOperationsAndLegacy` (rc=1) | killed |
+| M30e: meta writes skip ValidateStored (rotate still refuses) | F13 | admits re-persisting a forged record through meta set/unset | `TestForgedStoredRecordRefusedEverywhere/validity_not_before_on_key` (rc=1)<br>`TestRunForgedStoredRecordRefusedEverywhere/issuer_on_key` (rc=1) | killed |
+| M30f: certificate validity row admits a missing not_before (not_after still required) | F13 | admits exactly {not_before: null, not_after: T} on a certificate | `TestValidateRecordPerKind/certificate_no_not_before` (rc=1) | killed |
+| M30g: extraction row admits agent on a public-key (human still refused on public kinds) | F13 | admits exactly extraction=agent on kind public-key | `TestValidateRecordPerKind/public-key_extraction_agent` (rc=1) | killed |
+| M30h: origin.source accepts any imported:<hex> digest length | F13 | admits exactly a short imported digest; generated and full sha256 unchanged | `TestForgedStoredRecordRefusedEverywhere/origin_source_short_digest` (rc=1)<br>`TestRunForgedStoredRecordRefusedEverywhere/origin_source_short_digest` (rc=1) | killed |
+
+survivors=0

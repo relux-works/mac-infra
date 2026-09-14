@@ -1,0 +1,14 @@
+M1 KILLED exit=1 absent ok admitted (read as false), raw gate otherwise intact :: TestClientRefusesEnvelopeMissingOrNullMembers/hello/ok-missing-with-error TestClientRefusesEnvelopeMissingOrNullMembers/call/ok-missing-with-error 
+M2 KILLED exit=1 error:null read as absent :: TestClientRefusesEnvelopeMissingOrNullMembers/hello/error-null-on-ok TestClientRefusesEnvelopeMissingOrNullMembers/call/error-null-on-ok 
+M3 KILLED exit=1 error.message optional :: TestClientRefusesEnvelopeMissingOrNullMembers/hello/error-message-missing TestClientRefusesEnvelopeMissingOrNullMembers/call/error-message-missing TestClientRefusesEnvelopeMissingOrNullMembers/hello/error-message-null 
+M4 KILLED exit=1 error.hint optional :: TestClientRefusesEnvelopeMissingOrNullMembers/hello/error-hint-missing TestClientRefusesEnvelopeMissingOrNullMembers/call/error-hint-missing TestClientRefusesEnvelopeMissingOrNullMembers/hello/error-hint-null 
+M5 KILLED exit=1 unknown top-level member admitted on responses (hello still strict) :: TestClientRefusesEnvelopeMissingOrNullMembers/call/contract-on-response TestClientRefusesEnvelopeMissingOrNullMembers/call/extra-member TestClientRefusesEnvelopeMissingOrNullMembers/call/extra-member-on-fail 
+M6 SURVIVED exit=0 absent id admitted on a response
+M7 KILLED exit=1 result:null read as absent :: TestClientRefusesEnvelopeMissingOrNullMembers/call/result-null-on-ok TestClientRefusesEnvelopeMissingOrNullMembers/call/result-null-on-verify-fail 
+M8 KILLED exit=1 raw gate skipped for the hello (typed decode only), responses still gated :: TestClientRefusesEnvelopeMissingOrNullMembers/hello/error-code-only TestClientRefusesEnvelopeMissingOrNullMembers/hello/error-extra-member TestClientRefusesEnvelopeMissingOrNullMembers/hello/error-hint-missing 
+M9 KILLED exit=1 raw gate skipped for responses (typed decode only), hello still gated :: TestClientRefusesEnvelopeMissingOrNullMembers/call/contract-on-response TestClientRefusesEnvelopeMissingOrNullMembers/call/error-code-only TestClientRefusesEnvelopeMissingOrNullMembers/call/error-extra-member 
+M10 SURVIVED exit=0 error.code:null admitted by the raw gate (typed decode kept)
+M11 SURVIVED exit=0 os_status as a JSON string admitted by the raw gate (typed decode kept)
+M12 KILLED exit=1 unknown error-object member admitted :: TestClientRefusesEnvelopeMissingOrNullMembers/hello/error-extra-member TestClientRefusesEnvelopeMissingOrNullMembers/call/error-extra-member 
+M13 KILLED exit=1 result of any JSON type admitted (only null refused) :: TestClientRefusesEnvelopeMissingOrNullMembers/call/result-array TestClientRefusesEnvelopeMissingOrNullMembers/call/result-string 
+M14 SURVIVED exit=0 ok of any non-null JSON type admitted (typed decode kept)

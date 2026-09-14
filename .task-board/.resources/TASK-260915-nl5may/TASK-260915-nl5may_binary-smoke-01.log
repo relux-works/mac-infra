@@ -1,0 +1,89 @@
++(eval):1> grep '"ok"'
++(eval):1> .temp/TASK-260915-nl5may/mac-keyvault --json init --service test --purpose smoke-final-56860 --usages sign,verify
++grep:1> local _cc_a
++grep:2> _cc_a="ok"
++grep:3> case "ok" (-*-filter* | -*-pager* | -*-view* | -*-format-open* | -*-config* | ---* | -@* | -*-save-config* | -[Zz]* | -[!-]*[Zz]* | --null | --null-data)
++grep:5> local _cc_bin=/Users/alexis/.local/share/claude/versions/2.1.272
++grep:6> [[ -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:7> [[ ! -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:8> [[ -n 5.9 ]]
++grep:9> ARGV0=ugrep ugrep -G --ignore-files --hidden -I '--exclude-dir=.git' '--exclude-dir=.svn' '--exclude-dir=.hg' '--exclude-dir=.bzr' '--exclude-dir=.jj' '--exclude-dir=.sl' '"ok"'
+  "ok": true,
++(eval):1> printf hello
++(eval):1> grep -E '"(ok|digest|format|low_s|normalized)"'
++(eval):1> .temp/TASK-260915-nl5may/mac-keyvault --json sign test/smoke-final-56860 --data-file .temp/TASK-260915-nl5may/hello.bin --out .temp/TASK-260915-nl5may/sig.der
++grep:1> local _cc_a
++grep:2> _cc_a=-E
++grep:3> case -E (-*-filter* | -*-pager* | -*-view* | -*-format-open* | -*-config* | ---* | -@* | -*-save-config* | -[Zz]* | -[!-]*[Zz]* | --null | --null-data)
++grep:2> _cc_a="(ok|digest|format|low_s|normalized)"
++grep:3> case "(ok|digest|format|low_s|normalized)" (-*-filter* | -*-pager* | -*-view* | -*-format-open* | -*-config* | ---* | -@* | -*-save-config* | -[Zz]* | -[!-]*[Zz]* | --null | --null-data)
++grep:5> local _cc_bin=/Users/alexis/.local/share/claude/versions/2.1.272
++grep:6> [[ -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:7> [[ ! -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:8> [[ -n 5.9 ]]
++grep:9> ARGV0=ugrep ugrep -G --ignore-files --hidden -I '--exclude-dir=.git' '--exclude-dir=.svn' '--exclude-dir=.hg' '--exclude-dir=.bzr' '--exclude-dir=.jj' '--exclude-dir=.sl' -E '"(ok|digest|format|low_s|normalized)"'
+  "ok": true,
+    "digest": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    "format": "ecdsa-der-low-s",
+    "low_s": true,
+    "normalized": false,
++(eval):1> .temp/TASK-260915-nl5may/mac-keyvault pub test/smoke-final-56860 --out .temp/TASK-260915-nl5may/pub.pem
+wrote works.relux.mac-keyvault.key.test.smoke-final-56860.v1 spki-pem to .temp/TASK-260915-nl5may/pub.pem fingerprint=U3WXioDs1M2n10_mVBElpdxDsSIdJ4wD7fK_m1MIvQo
++(eval):1> openssl dgst -sha256 -verify .temp/TASK-260915-nl5may/pub.pem -signature .temp/TASK-260915-nl5may/sig.der .temp/TASK-260915-nl5may/hello.bin
+Verified OK
++(eval):1> echo openssl 'rc=0'
+openssl rc=0
++(eval):1> .temp/TASK-260915-nl5may/mac-keyvault verify test/smoke-final-56860 --data-file .temp/TASK-260915-nl5may/hello.bin --sig @.temp/TASK-260915-nl5may/sig.der
+verified: true
++(eval):1> echo 'rc=0'
+rc=0
++(eval):1> grep '"code"'
++(eval):1> .temp/TASK-260915-nl5may/mac-keyvault --json verify --spki .temp/TASK-260915-nl5may/pub.pem --digest 00 --sig @.temp/TASK-260915-nl5may/sig.der
++grep:1> local _cc_a
++grep:2> _cc_a="code"
++grep:3> case "code" (-*-filter* | -*-pager* | -*-view* | -*-format-open* | -*-config* | ---* | -@* | -*-save-config* | -[Zz]* | -[!-]*[Zz]* | --null | --null-data)
++grep:5> local _cc_bin=/Users/alexis/.local/share/claude/versions/2.1.272
++grep:6> [[ -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:7> [[ ! -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:8> [[ -n 5.9 ]]
++grep:9> ARGV0=ugrep ugrep -G --ignore-files --hidden -I '--exclude-dir=.git' '--exclude-dir=.svn' '--exclude-dir=.hg' '--exclude-dir=.bzr' '--exclude-dir=.jj' '--exclude-dir=.sl' '"code"'
+    "code": "invalid_digest",
++(eval):1> .temp/TASK-260915-nl5may/mac-keyvault --json describe test/smoke-final-56860
++(eval):1> grep -B1 '"via": "sign"'
++grep:1> local _cc_a
++grep:2> _cc_a=-B1
++(eval):1> head -2
++grep:3> case -B1 (-*-filter* | -*-pager* | -*-view* | -*-format-open* | -*-config* | ---* | -@* | -*-save-config* | -[Zz]* | -[!-]*[Zz]* | --null | --null-data)
++grep:2> _cc_a="via": "sign"
++grep:3> case "via": "sign" (-*-filter* | -*-pager* | -*-view* | -*-format-open* | -*-config* | ---* | -@* | -*-save-config* | -[Zz]* | -[!-]*[Zz]* | --null | --null-data)
++grep:5> local _cc_bin=/Users/alexis/.local/share/claude/versions/2.1.272
++grep:6> [[ -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:7> [[ ! -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:8> [[ -n 5.9 ]]
++grep:9> ARGV0=ugrep ugrep -G --ignore-files --hidden -I '--exclude-dir=.git' '--exclude-dir=.svn' '--exclude-dir=.hg' '--exclude-dir=.bzr' '--exclude-dir=.jj' '--exclude-dir=.sl' -B1 '"via": "sign"'
+        "output": "ecdsa-der-low-s|ecdsa-raw",
+        "via": "sign"
++(eval):1> grep '"ok"'
++(eval):1> .temp/TASK-260915-nl5may/mac-keyvault --json delete test/smoke-final-56860 --confirm
++grep:1> local _cc_a
++grep:2> _cc_a="ok"
++grep:3> case "ok" (-*-filter* | -*-pager* | -*-view* | -*-format-open* | -*-config* | ---* | -@* | -*-save-config* | -[Zz]* | -[!-]*[Zz]* | --null | --null-data)
++grep:5> local _cc_bin=/Users/alexis/.local/share/claude/versions/2.1.272
++grep:6> [[ -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:7> [[ ! -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:8> [[ -n 5.9 ]]
++grep:9> ARGV0=ugrep ugrep -G --ignore-files --hidden -I '--exclude-dir=.git' '--exclude-dir=.svn' '--exclude-dir=.hg' '--exclude-dir=.bzr' '--exclude-dir=.jj' '--exclude-dir=.sl' '"ok"'
+  "ok": true,
++(eval):1> grep -c '"label"'
++(eval):1> .temp/TASK-260915-nl5may/mac-keyvault --json list --service test
++grep:1> local _cc_a
++grep:2> _cc_a=-c
++grep:3> case -c (-*-filter* | -*-pager* | -*-view* | -*-format-open* | -*-config* | ---* | -@* | -*-save-config* | -[Zz]* | -[!-]*[Zz]* | --null | --null-data)
++grep:2> _cc_a="label"
++grep:3> case "label" (-*-filter* | -*-pager* | -*-view* | -*-format-open* | -*-config* | ---* | -@* | -*-save-config* | -[Zz]* | -[!-]*[Zz]* | --null | --null-data)
++grep:5> local _cc_bin=/Users/alexis/.local/share/claude/versions/2.1.272
++grep:6> [[ -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:7> [[ ! -x /Users/alexis/.local/share/claude/versions/2.1.272 ]]
++grep:8> [[ -n 5.9 ]]
++grep:9> ARGV0=ugrep ugrep -G --ignore-files --hidden -I '--exclude-dir=.git' '--exclude-dir=.svn' '--exclude-dir=.hg' '--exclude-dir=.bzr' '--exclude-dir=.jj' '--exclude-dir=.sl' -c '"label"'
+0

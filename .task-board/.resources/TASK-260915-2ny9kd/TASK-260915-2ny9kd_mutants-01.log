@@ -1,0 +1,16 @@
+M1-null-id-admitted: KILLED (exit 1) by --- FAIL: TestSignerServeGoldenWire (0.00s) --- FAIL: TestSignerServeGoldenWire/signer (0.00s) 
+M2-op-case-insensitive: KILLED (exit 1) by --- FAIL: TestSignerServeGoldenWire (0.00s) --- FAIL: TestSignerServeGoldenWire/signer (0.00s) 
+M3-sign-digest-length-server-only: KILLED (exit 1) by --- FAIL: TestSignerServeGoldenWire (0.00s) --- FAIL: TestSignerServeGoldenWire/signer (0.00s) 
+M3b-verify-digest-length-removed: KILLED (exit 1) by --- FAIL: TestSignerServeGoldenWire (0.00s) --- FAIL: TestSignerServeGoldenWire/signer (0.00s) 
+M4-bad-request-ends-stream: KILLED (exit 1) by --- FAIL: TestSignerServeGoldenWire (0.00s) --- FAIL: TestSignerServeGoldenWire/signer (0.00s) 
+M5-high-s-after-store: KILLED (exit 1) by --- FAIL: TestSignerServeGatesBeforeStore (0.00s) 
+M9-unknown-member-admitted: KILLED (exit 1) by --- FAIL: TestSignerServeGoldenWire (0.00s) --- FAIL: TestSignerServeGoldenWire/signer (0.00s) 
+M6-contract-ge-1-accepted: KILLED (exit 1) by --- FAIL: TestStartRefusesForeignContractAndSurfacesStartupErrors (0.05s) 
+M7-id-unchecked-when-ok: KILLED (exit 1) by --- FAIL: TestCallProtocolViolationsAndRemoteErrors (0.01s) 
+M10-any-hash-accepted: KILLED (exit 1) by --- FAIL: TestTypedCallsAgainstFake (0.01s) 
+M8-raw-label-inside-prefix-admitted: KILLED (exit 1) by --- FAIL: TestRunSignerServeRefusesBeforeStore (0.00s) 
+M11-serve-usage-text-mode: KILLED (exit 1) by --- FAIL: TestRunSignerServeRefusesBeforeStore (0.01s) 
+--- baseline (no mutant) ---
+ok  	github.com/relux-works/mac-infra/internal/keyvault	0.821s
+ok  	github.com/relux-works/mac-infra/internal/keyvault/signerclient	0.689s
+ok  	github.com/relux-works/mac-infra/cmd/mac-keyvault	1.250s

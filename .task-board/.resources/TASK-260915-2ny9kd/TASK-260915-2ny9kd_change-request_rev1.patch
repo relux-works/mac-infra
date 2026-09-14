@@ -1,0 +1,2861 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index ee11630..8336cd8 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -5,6 +5,13 @@
+ 
+ ## 2026-09-15
+ 
++### 2140 — mac-keyvault T3: the signer contract is the CLI's gates on a stream, pinned byte for byte, and mac-keyvault defines it because kvctl does not exist yet
++- DECISION: kvctl (bsim `EPIC-260915-3slg4l`) is not code, so mac-keyvault defines the machine contract and ships the client kvctl will vendor: `mac-keyvault signer serve --address <s>/<p> [--kind] [--version N]` speaks **contract 1** as JSON lines — hello `{contract:1, ok, result{tool, tool_version, address, kind, version, label, fingerprint, ops}}`, then `{id, op: describe|pub|sign|verify, …}` → `{id, ok, result|error{code, message, hint, os_status?}}` in order. A one-shot CLI contract was rejected: kvctl signs many times per PKI run and each CLI call re-lists the keychain; a persistent server also lets the consumer check `fingerprint` once. The server (`internal/keyvault/signer.go`) is a thin loop over the same `Manager.Describe/Sign/PublicKeyFor` the CLI uses, so `usages`, `validity`, the trust gate and the prefix guard apply unchanged; the address is parsed by `ParseAddress`, so a raw label is refused before the vault is opened (mutant M8, a raw label inside the prefix admitted, is killed by `TestRunSignerServeRefusesBeforeStore`).
++- DECISION: Errors never end the stream and a startup failure is one line. A line that is not one JSON object is `bad_request` under `id: null`; the id is read first from an open map so a request with a member outside the contract is still answered under its own id (`bad_request`); `missing_id` covers absent, null and non-scalar ids; `unknown_op` matches exactly (`SIGN` ≠ `sign`, M2 killed). Every pre-server failure of `signer serve` (usage, `foreign_label`, no vault) is written as the same one-line hello with `ok: false` — the first version wrote the multi-line CLI envelope and the client read `{` as the hello (caught by the e2e test, fixed by `WriteStartupFailure`; M11 restoring text mode for usage is killed). EOF exits 0; blank lines are skipped.
++- FINDING: Golden fixtures (`internal/keyvault/testdata/signer-v1/*.json`, 35 fixture files plus the key material, one request/response each, 17 negative responses across every server-side code plus `usage_refused`/`expired`/`not_found` sessions) need a deterministic backend: ECDSA is randomised, so the fixtures carry one P-256 SPKI, one digest and one low-S DER signature (`fixture-key.json`) that a canned store returns for exactly that digest and the test re-verifies before trusting the fixtures. `json.Marshal` HTML-escapes `<` in hints; the wire uses `SetEscapeHTML(false)` so a line reads as written. `-update` regenerates responses; a change of bytes is a contract change.
++- FINDING: `signerclient` is stdlib-only and self-contained (kvctl vendors it verbatim); the server imports it for the wire types so both sides share one struct set. `Start` refuses any contract but 1 (M6 `>= 1` killed), `Call` refuses a foreign id even on `ok: true` (M7 killed) and marks the client broken; `CryptoSigner` adapts the key to `crypto.Signer` and `x509.CreateCertificate` signs a self-signed CA through the vault end to end against the built binary and the login keychain (`TestClientAgainstBuiltBinaryAndLoginKeychain`), SHA-256 only (M10 killed). Mid-stream `not_found` (key deleted after the hello) is covered by a pipe-driven test, not a golden.
++- SCOPE: `TASK-260915-2ny9kd`: `internal/keyvault/signer.go` (+ `Key.View`, `ClassifyError` moved out of `cmd`), `internal/keyvault/signerclient/{wire,client}.go`, `internal/keyvault/testdata/signer-v1/`, `cmd/mac-keyvault/main.go` (`signer serve`), tests, README, SKILL. Stated bounds: no live kvctl interop; `scripts/setup.sh` already builds `mac-keyvault` (verified by running its build line, not the full install from the worktree).
++
+ ### 2010 — mac-keyvault T2 rev2: an embedded interface method is a guard bypass, and a bytes-only policy check belongs before the backend boundary
+ - FINDING (review rev1 F1): `GuardedStore` embeds `Backend` and overrode `Create`/`Delete`/`UpdateTag` only; Go promoted `Backend.Sign` unchanged, so the integration guard that keeps tests inside `works.relux.mac-keyvault.key.test.*` did not cover the private-key operation added in T2 — the rev1 results artifact claimed it did. Fix: `(*GuardedStore).Sign` calls `guard` first; `TestGuardedStoreRefusesNonTestLabels` now drives `Sign` with a signing-capable production label (a leak would return a real signature, not `ErrNotFound`) and a test-label positive control. Rule recorded in the type comment: every mutating or private-key-using `Backend` method must be overridden on the guard; embedding is where bypasses come from.
+ - FINDING (review rev1 F2): `runVerify` refused high-S after `Manager.PublicKeyFor` → `Backend.List`, so a malleable signature by label caused a Security call before the policy refusal, against the T1 "no backend call before validation" guard. The check only needs the parsed `(r, s)`, so it now sits directly after `ParseSignature`, before the `--spki` file read and before the address is resolved; the refusal envelope carries the digest/format/low_s inputs but no key fields. `TestRunVerifyHighSRefusedBeforeStore` prepares signatures with `crypto/ecdsa` (never via `run(sign)`), uses a fresh recording store holding the key, and asserts zero calls plus two ordering witnesses (absent address and absent `--spki` path are still `high_s_refused`, not `not_found`/usage). Mutants M16 (rev1 order), M17 (early gate DER-only), M18 (early gate `--spki`-only) are all killed; M4 from rev1 only proved the raw refusal existed.
+diff --git a/README.md b/README.md
+index 66eaf9e..8095f14 100644
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
+ | `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected and sanitized `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no cookies, browser storage, authorization material, or cursor/session state |
+ | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
+ | `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
+-| `mac-keyvault` | Create, list, describe, export, sign with, verify against, rotate, annotate, and delete non-extractable P-256 key pairs in the login keychain; every item is a schema-2 record addressed as `<service>/<purpose>` (+ `--kind`, `--version`) under the derived label `works.relux.mac-keyvault.<kind>.<service>.<purpose>.v<N>`; `--enclave` fails explicitly on an unprovisioned binary | `mac-keyvault [--json] init --service S --purpose P [--title T] [--usages sign,verify] [--extraction none\|human\|agent] [--meta k=v]`, `list [--service S] [--kind K]`, `describe S/P [--version N]`, `pub S/P [--out FILE] [--format spki-der\|spki-pem\|jwk]`, `sign S/P --digest HEX\|@FILE \| --data-file F \| --stdin [--raw] [--out FILE]`, `verify S/P \| --spki FILE --digest ... --sig HEX\|@FILE [--raw] [--allow-high-s]`, `rotate S/P`, `meta get\|set\|unset S/P ...`, `delete S/P --confirm [--version N]` | keychain items only; `pub --out` writes a `0600` file; `~/Library/Application Support/mac-infra/keyvault/init.lock` serialises creates |
++| `mac-keyvault` | Create, list, describe, export, sign with, verify against, rotate, annotate, and delete non-extractable P-256 key pairs in the login keychain; every item is a schema-2 record addressed as `<service>/<purpose>` (+ `--kind`, `--version`) under the derived label `works.relux.mac-keyvault.<kind>.<service>.<purpose>.v<N>`; `--enclave` fails explicitly on an unprovisioned binary | `mac-keyvault [--json] init --service S --purpose P [--title T] [--usages sign,verify] [--extraction none\|human\|agent] [--meta k=v]`, `list [--service S] [--kind K]`, `describe S/P [--version N]`, `pub S/P [--out FILE] [--format spki-der\|spki-pem\|jwk]`, `sign S/P --digest HEX\|@FILE \| --data-file F \| --stdin [--raw] [--out FILE]`, `verify S/P \| --spki FILE --digest ... --sig HEX\|@FILE [--raw] [--allow-high-s]`, `rotate S/P`, `meta get\|set\|unset S/P ...`, `delete S/P --confirm [--version N]`, `signer serve --address S/P [--kind K] [--version N]` (JSON lines on stdin/stdout, contract 1, for kvctl; Go client `internal/keyvault/signerclient`) | keychain items only; `signer serve` writes one hello line then one response line per request and exits 0 on EOF; `pub --out` writes a `0600` file; `~/Library/Application Support/mac-infra/keyvault/init.lock` serialises creates |
+ | `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
+ | `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
+ | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
+@@ -313,6 +313,8 @@ Model rules the tool enforces (`STORY-260915-3r0ys5_key-record-model-v2.md`): `s
+ 
+ Signing (`sign`, T2) is ECDSA P-256 over a caller-supplied SHA-256 digest: `--digest` takes 64 hex characters or `@FILE` with the 32 raw bytes (a file is never hex-decoded), `--data-file`/`--stdin` make the tool hash the bytes itself and the output says so (`hash: sha256`, `digest`, `digest_source: digest|file|stdin`). The bridge signs with `kSecKeyAlgorithmECDSASignatureDigestX962SHA256`, so the digest is signed as given and the private key never leaves Security.framework; the DER corecrypto returns is parsed strictly, normalised to low-S (`normalized: true` in the output when s was in the high half) and re-checked under the record's own public key before it is emitted. Output is strict DER (`ecdsa-der-low-s`, the record's `format.signature` default) or 64-byte `r||s` (`--raw` / `--format ecdsa-raw`); `--out FILE` writes the bytes `0600`, text mode prints hex. Gates run in this order, every one before the keychain is touched: digest length (`invalid_digest`, exit 3), address inside the namespace (`foreign_label`), a readable and invariant-valid record (`metadata_unknown` — a rev1 tag or a forged field never reaches the private key), a registry row (`unsupported_primitive`, exit 1), `usages ∋ sign` (`usage_refused`, exit 3, the hint names the record's usages), `validity.not_after` unexpired (`expired`, exit 3, the hint names the timestamp). `verify` judges a signature over the same digest inputs against a vault address (its readable public half; no usage or validity gate, since verification is always allowed) or any P-256 SPKI file with `--spki` (DER or PEM, no vault access): exit 0 `verified: true`; exit 1 `signature_invalid` with `verified: false` for a well-formed signature that does not match (tampered bytes, another digest, another key); exit 3 `invalid_signature` for a signature that is not strict DER (non-minimal integer or length, trailing bytes, r or s outside `[1, n-1]`) or not exactly 64 raw bytes; exit 3 `high_s_refused` for a valid signature whose s is in the high half unless `--allow-high-s` is typed (the verdict is then computed and `low_s: false` reported); like the strict-DER check, the high-S refusal is judged on the signature bytes alone and happens before the `--spki` file is read or the vault is listed, so a malleable signature never causes a Security call. Signatures made here verify with Go `crypto/ecdsa` and `openssl dgst -sha256 -verify`, and signatures made by both verify here (an openssl signature may need `--allow-high-s`; openssl does not normalise). `describe` now lists `ecdsa-sha256-sign` via `sign` and `ecdsa-sha256-verify` via `verify`; ECDH, ECIES and `export-private` stay `reserved`.
+ 
++Signer contract for kvctl (`signer serve`, T3): `mac-keyvault signer serve --address <service>/<purpose> [--kind key] [--version N]` binds one vault key and speaks **contract 1** as JSON lines on stdin/stdout, so a consumer such as kvctl's `macos-keychain` backend gets signatures without linking Security.framework or ever seeing the private half. The first stdout line is the hello, `{"contract":1,"ok":true,"result":{tool, tool_version, address, kind, version, label, fingerprint, ops}}`; when the address does not resolve, or the flags are wrong, the only line is `{"contract":1,"ok":false,"error":{code, message, hint}}` and the process exits with the CLI code (`not_found` 1, `foreign_label` 3, `usage` 2) — never text on stderr, never the multi-line CLI envelope. Every following stdin line is one request `{"id": <string|number>, "op": "describe"|"pub"|"sign"|"verify", ...}` and gets exactly one response line in order: `{"id", "ok": true, "result"}` or `{"id", "ok": false, "error": {code, message, hint, os_status?}}`. `describe` returns the record view (`describe --json`'s result); `pub` takes `format: spki-der` (default, `result.der_base64`) or `spki-pem` (`result.pem`); `sign` takes `digest` (64 hex, SHA-256) and `format: ecdsa-der-low-s|ecdsa-raw` (default the record's `format.signature`) and returns `{label, fingerprint, hash, digest, format, signature (hex), signature_base64, low_s, normalized}`; `verify` takes `digest`, `signature` (hex), `format` (default DER) and `allow_high_s` and returns `{..., verified}` — a false verdict is `ok: false` with `error.code: signature_invalid` **and** `result.verified: false`. The stream never ends on a bad request: a line that is not one JSON object is `bad_request` under `id: null`, a member outside the contract or a malformed parameter is `bad_request` under the request's id, a missing/null/non-scalar id is `missing_id`, an op outside the four is `unknown_op`, and the vault's own gates answer with their contract codes (`invalid_digest`, `invalid_signature`, `high_s_refused`, `usage_refused`, `expired`, `metadata_unknown`, `unsupported_primitive`, `not_found` when the key vanished after the hello, `security` with `os_status`). Blank lines are skipped; EOF on stdin exits 0. Every operation runs the same gates as the CLI command of the same name — the contract adds no path around `usages`, `validity`, the trust gate or the prefix guard, and the address is parsed by the same `ParseAddress`, so a raw label is refused before the vault is opened. The wire is pinned byte for byte by golden fixtures in `internal/keyvault/testdata/signer-v1/*.json` (one file per request/response, one negative per error code, three sessions plus a startup-failure session; `go test ./internal/keyvault -run TestSignerServeGoldenWire -update` regenerates them — review the diff). `internal/keyvault/signerclient` is the stdlib-only Go client kvctl vendors: `Start(ctx, Options{Binary, Address, Kind, Version})` spawns the server and refuses any contract but 1, `Describe`, `PublicKey`, `PublicKeyPEM`, `Sign`, `Verify`, `Call`, `Close` (exit 0 on EOF), and `CryptoSigner` adapts the key to `crypto.Signer` (SHA-256 only, DER out) so `x509.CreateCertificate` signs through the vault; a foreign id, an unparsable line or an early EOF is `ErrProtocol` and the client refuses further calls. The client suite drives the built binary end to end against a test-label key and verifies with `crypto/ecdsa` and a self-signed X.509 certificate. Stated bound: kvctl is not code yet (bsim `EPIC-260915-3slg4l`), so mac-keyvault defines the contract and this client is the only consumer it is proven against; no live kvctl interop exists.
++
+ Duplicate refusal is atomic across processes: `init`, `rotate` and `meta set` hold an exclusive `flock` on `~/Library/Application Support/mac-infra/keyvault/init.lock` across one listing and the create, because the legacy keychain itself accepts duplicate labels.
+ 
+ Store decision (recorded on `EPIC-260915-1g0e1c_secure-enclave-probe.md` and re-verified while building the tool): an ad-hoc signed CLI gets `-34018 errSecMissingEntitlement` for a permanent Secure Enclave key, for any `kSecAttrAccessControl`-based ACL (it routes the item into the Data Protection keychain), and for `kSecAccessControlUserPresence`. `--enclave` and `--user-presence` therefore try the real Security call and fail with `missing_entitlement`; there is no silent keychain fallback. Persisting Secure Enclave keys needs a signed helper with a provisioning profile and is a separate follow-up. The Security.framework bridge is a small cgo C file (`internal/keyvault/security_darwin.c`): the `security` CLI cannot express `SecKey` ACLs or the Enclave shape, and a separate Swift helper would add a second binary to sign and trust in the ACL.
+diff --git a/agents/skills/mac-infra/SKILL.md b/agents/skills/mac-infra/SKILL.md
+index ac019dc..dc538cb 100644
+--- a/agents/skills/mac-infra/SKILL.md
++++ b/agents/skills/mac-infra/SKILL.md
+@@ -515,6 +515,16 @@ mac-keyvault --json delete kvctl/pki-root --confirm --version 1
+ - `--extraction` defaults to `none`. An agent never passes `--extraction agent` for a key on its own; that value is typed only on an explicit human instruction so the transcript shows the choice. `export-private` and `--human-authorized` are not implemented in this revision; agents never pass `--human-authorized` by contract.
+ - Tests and probes must use `--service test` (labels `works.relux.mac-keyvault.<kind>.test.*`) and delete them afterwards.
+ 
++### Signer contract for kvctl (`signer serve`, contract 1)
++
++- Use `mac-keyvault signer serve --address <service>/<purpose> [--kind key] [--version N]` when a program (kvctl's `macos-keychain` signer backend, a CI step, another agent tool) needs many signatures from one vault key without shelling out per signature and without ever holding the private half: the server binds one address, writes one hello line, then answers one JSON line per request on stdin until EOF (exit 0). Do not use it for one-off work; `sign`/`verify`/`pub` are the one-shot commands.
++- Wire: hello `{"contract":1,"ok":true,"result":{tool, tool_version, address, kind, version, label, fingerprint, ops}}`; requests `{"id":1,"op":"describe"}`, `{"id":2,"op":"pub","format":"spki-der|spki-pem"}`, `{"id":3,"op":"sign","digest":"<64 hex>","format":"ecdsa-der-low-s|ecdsa-raw"}`, `{"id":4,"op":"verify","digest":"<64 hex>","signature":"<hex>","format":"...","allow_high_s":false}`; responses `{"id","ok":true,"result"}` or `{"id","ok":false,"error":{code,message,hint,os_status?}}` in request order. Check `contract` on the hello before sending anything; a consumer that reads `contract != 1` must stop, not guess. A startup failure is one hello line with `ok: false` (`not_found` exit 1, `foreign_label` exit 3, `usage` exit 2). Errors never end the stream (`bad_request`, `missing_id`, `unknown_op`, and the vault codes `invalid_digest`, `invalid_signature`, `high_s_refused`, `signature_invalid` with `result.verified: false`, `usage_refused`, `expired`, `metadata_unknown`, `security`); read `error.code`, fix the request, keep the session.
++- How kvctl selects this backend: `signer: {backend: macos-keychain, address: <service>/<purpose>, version: N}` maps to `Start(ctx, signerclient.Options{Address, Version})` from `internal/keyvault/signerclient` (vendored verbatim; stdlib only); `Hello().Fingerprint` is compared with the configured key fingerprint before the first signature; `CryptoSigner(ctx)` is the `crypto.Signer` kvctl hands to `x509.CreateCertificate`/`CreateCertificateRequest` (SHA-256 digests only; DER low-S out). `file` and `pkcs11` backends are kvctl's own; this contract covers only `macos-keychain`. kvctl does not exist as code yet: this is the defined contract, proven against the Go client in this repository, not against a live kvctl.
++- Keychain vs Secure Enclave: `signer serve` works for `store: keychain` (login keychain, `exposure: never`, the private key never leaves Security.framework). `store: enclave` cannot be created by this ad-hoc signed binary (`missing_entitlement`, -34018); an Enclave-backed signer needs a provisioned helper and is a follow-up. Never fall back from one to the other silently; the record's `store` says which it is.
++- ACL prompts the user will see: none for a key created by the same `mac-keyvault` binary that serves it (the private-key ACL trusts exactly that binary). After the binary is rebuilt or updated (`setup.sh`), the **first private-key use — the first `sign` in a session — triggers the macOS keychain dialog once** ("mac-keyvault wants to use your confidential information stored in ... in your keychain"); the human clicks *Always Allow* to re-trust the new binary, *Allow* answers only that one use. `describe`, `pub`, `list`, `rotate`, `delete` never prompt. An agent must not loop on a `security` error with `errSecAuthFailed`/`errSecUserCanceled`/`errSecInteractionNotAllowed` — that is the prompt being refused or unavailable (headless session); report it and let the human run one `sign` interactively.
++- Extraction policy on the contract: the signer has no `export-private` op and no `--human-authorized` flag; a key with `extraction: none` cannot be exported by anyone through any path, and agents never pass `--human-authorized` or `--extraction agent` on their own (the human types those on the CLI so the transcript shows the choice). The contract is `describe`, `pub`, `sign`, `verify` — nothing else, by design.
++- Golden wire fixtures live in `internal/keyvault/testdata/signer-v1/*.json`; a contract change is a new `contract` number, new fixtures, and a client that refuses the old one. Never edit a fixture by hand to make a test pass.
++
+ ## Cleanup Planning Workflow
+ 
+ - Start with read-only planning only:
+diff --git a/cmd/mac-keyvault/main.go b/cmd/mac-keyvault/main.go
+index db8c358..0d24f82 100644
+--- a/cmd/mac-keyvault/main.go
++++ b/cmd/mac-keyvault/main.go
+@@ -11,7 +11,6 @@
+ package main
+ 
+ import (
+-	"bytes"
+ 	"crypto/sha256"
+ 	"encoding/base64"
+ 	"encoding/hex"
+@@ -69,19 +68,21 @@ func usagef(format string, args ...any) error {
+ // usageLines are the per-command usage lines the error contract hands back
+ // as the hint of a usage error.
+ var usageLines = map[string]string{
+-	"init":       "mac-keyvault [--json] init --service S --purpose P [--kind key] [--algorithm ec-p256] [--title T] [--description D] [--usages a,b] [--format-public F] [--format-signature F] [--format-envelope F] [--extraction none|human|agent] [--not-after RFC3339] [--meta k=v]... [--meta-json FILE] [--generate SPEC] [--keychain|--enclave] [--user-presence]",
+-	"list":       "mac-keyvault [--json] list [--service S] [--kind K]",
+-	"describe":   "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
+-	"pub":        "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk]",
+-	"sign":       "mac-keyvault [--json] sign <service>/<purpose> (--digest <hex|@file> | --data-file FILE | --stdin) [--raw | --format ecdsa-der-low-s|ecdsa-raw] [--out FILE] [--kind K] [--version N]",
+-	"verify":     "mac-keyvault [--json] verify (<service>/<purpose> [--kind K] [--version N] | --spki FILE) (--digest <hex|@file> | --data-file FILE | --stdin) --sig <hex|@file> [--raw] [--allow-high-s]",
+-	"rotate":     "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
+-	"delete":     "mac-keyvault [--json] delete <service>/<purpose> --confirm [--kind K] [--version N]",
+-	"meta":       "mac-keyvault [--json] meta get|set|unset <service>/<purpose> [key] [value] [--kind K] [--version N] [--json-value]",
+-	"meta get":   "mac-keyvault [--json] meta get <service>/<purpose> [key] [--kind K] [--version N]",
+-	"meta set":   "mac-keyvault [--json] meta set <service>/<purpose> <key> <value> [--json-value] [--kind K] [--version N]",
+-	"meta unset": "mac-keyvault [--json] meta unset <service>/<purpose> <key> [--kind K] [--version N]",
+-	"version":    "mac-keyvault [--json] version",
++	"init":         "mac-keyvault [--json] init --service S --purpose P [--kind key] [--algorithm ec-p256] [--title T] [--description D] [--usages a,b] [--format-public F] [--format-signature F] [--format-envelope F] [--extraction none|human|agent] [--not-after RFC3339] [--meta k=v]... [--meta-json FILE] [--generate SPEC] [--keychain|--enclave] [--user-presence]",
++	"list":         "mac-keyvault [--json] list [--service S] [--kind K]",
++	"describe":     "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
++	"pub":          "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk]",
++	"sign":         "mac-keyvault [--json] sign <service>/<purpose> (--digest <hex|@file> | --data-file FILE | --stdin) [--raw | --format ecdsa-der-low-s|ecdsa-raw] [--out FILE] [--kind K] [--version N]",
++	"verify":       "mac-keyvault [--json] verify (<service>/<purpose> [--kind K] [--version N] | --spki FILE) (--digest <hex|@file> | --data-file FILE | --stdin) --sig <hex|@file> [--raw] [--allow-high-s]",
++	"rotate":       "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
++	"delete":       "mac-keyvault [--json] delete <service>/<purpose> --confirm [--kind K] [--version N]",
++	"meta":         "mac-keyvault [--json] meta get|set|unset <service>/<purpose> [key] [value] [--kind K] [--version N] [--json-value]",
++	"meta get":     "mac-keyvault [--json] meta get <service>/<purpose> [key] [--kind K] [--version N]",
++	"meta set":     "mac-keyvault [--json] meta set <service>/<purpose> <key> <value> [--json-value] [--kind K] [--version N]",
++	"meta unset":   "mac-keyvault [--json] meta unset <service>/<purpose> <key> [--kind K] [--version N]",
++	"signer":       "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
++	"signer serve": "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
++	"version":      "mac-keyvault [--json] version",
+ }
+ 
+ // response is the JSON envelope every command emits in --json mode.
+@@ -150,8 +151,6 @@ func (o output) failWith(result any, err error) int {
+ 	return code
+ }
+ 
+-type hinter interface{ Hint() string }
+-
+ func (o output) classify(err error) (int, *responseError) {
+ 	var usage *usageError
+ 	if errors.As(err, &usage) {
+@@ -160,31 +159,25 @@ func (o output) classify(err error) (int, *responseError) {
+ 			hint = usageLines[strings.SplitN(o.command, " ", 2)[0]]
+ 		}
+ 		if hint == "" {
+-			hint = "mac-keyvault help lists the commands: init, list, describe, pub, sign, verify, rotate, delete, meta, version"
++			hint = "mac-keyvault help lists the commands: init, list, describe, pub, sign, verify, rotate, delete, meta, signer, version"
+ 		}
+ 		return exitUsage, &responseError{Code: "usage", Message: usage.msg, Hint: hint}
+ 	}
+-	var refusal *keyvault.Refusal
+-	if errors.As(err, &refusal) {
+-		code := exitRefused
+-		if refusal.Failure {
+-			code = exitFailure
+-		}
+-		return code, &responseError{Code: refusal.Code, Message: refusal.Message, Hint: refusal.Hint, Status: refusal.Status}
+-	}
+-	if errors.Is(err, keyvault.ErrNotFound) {
+-		hint := "list shows every record"
+-		var h hinter
+-		if errors.As(err, &h) {
+-			hint = h.Hint()
+-		}
+-		return exitFailure, &responseError{Code: "not_found", Message: err.Error(), Hint: hint}
+-	}
+-	var status *keyvault.StatusError
+-	if errors.As(err, &status) {
+-		return o.classify(keyvault.Translate(status.Op, err))
++	return exitCodeOf(err), contractError(err)
++}
++
++// exitCodeOf maps a non-usage error to its exit class: 1 for the
++// operational failures, 3 for policy refusals.
++func exitCodeOf(err error) int {
++	if keyvault.ClassifyError(err).Failure {
++		return exitFailure
+ 	}
+-	return exitFailure, &responseError{Code: "failure", Message: err.Error(), Hint: "check the path or environment named in the message and rerun"}
++	return exitRefused
++}
++
++func contractError(err error) *responseError {
++	c := keyvault.ClassifyError(err)
++	return &responseError{Code: c.Code, Message: c.Message, Hint: c.Hint, Status: c.Status}
+ }
+ 
+ func encodeJSON(w io.Writer, v any) {
+@@ -263,6 +256,8 @@ func run(args []string, stdout, stderr io.Writer) int {
+ 		return runDelete(rest, out)
+ 	case "meta":
+ 		return runMeta(rest, out)
++	case "signer":
++		return runSigner(rest, out)
+ 	case "version":
+ 		return runVersion(rest, out)
+ 	case "help", "--help", "-h":
+@@ -372,23 +367,10 @@ func singleAddress(fs *flag.FlagSet, positional []string, kind string, version i
+ }
+ 
+ // keyView is the flat JSON a read command prints: the record plus derived
+-// label, fingerprint, operations and findings.
++// label, fingerprint, operations and findings (keyvault.Key.View, shared
++// with the signer contract's describe).
+ func keyView(key keyvault.Key) map[string]any {
+-	view := map[string]any{}
+-	raw, _ := json.Marshal(key.Record)
+-	decoder := json.NewDecoder(bytes.NewReader(raw))
+-	decoder.UseNumber() // numeric meta is re-emitted digit-exact (review F11)
+-	_ = decoder.Decode(&view)
+-	ops, findings := key.Findings(now())
+-	if findings == nil {
+-		findings = []string{}
+-	}
+-	view["label"] = key.Label
+-	view["fingerprint"] = key.Fingerprint()
+-	view["exposure"] = keyvault.Exposure(key.Record)
+-	view["operations"] = ops
+-	view["findings"] = findings
+-	return view
++	return key.View(now())
+ }
+ 
+ func orUnknown(value string) string {
+@@ -1063,6 +1045,7 @@ Usage:
+   %s
+   %s
+   %s
++  %s
+ 
+ sign takes a SHA-256 digest (--digest) or hashes --data-file/--stdin itself and says so;
+ it emits strict DER with low-S (or --raw r||s). verify judges the digest, the signature
+@@ -1070,8 +1053,62 @@ and a key (vault address or --spki FILE): exit 0 verified, 1 not, 3 high-S refus
+ Raw labels are refused as foreign_label. --enclave and --user-presence fail with
+ missing_entitlement (OSStatus -34018) when the binary has no provisioning profile;
+ there is no silent fallback. --extraction agent must be typed literally.
++signer serve binds one address and speaks JSON lines (contract 1) on stdin/stdout for a
++consumer such as kvctl: hello line, then {id, op: describe|pub|sign|verify, ...} ->
++{id, ok, result|error}; errors never end the stream, EOF exits 0.
+ 
+ Exit codes: 0 ok, 1 failure, 2 usage, 3 refused by a policy gate. Every error is
+ {code, message, hint, os_status}; text mode prints "error: <code>: <message>" and "hint: <hint>".
+-`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["version"])
++`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["signer"], usageLines["version"])
++}
++
++// runSigner dispatches the signer subcommands; serve is the only one in
++// contract 1. Its stdout is the JSON-lines stream by definition, so every
++// failure before the server runs — usage, a refused address, no vault —
++// is written as the one-line startup hello (contract 1, ok=false, error)
++// with the usual exit code; text mode and the multi-line CLI envelope are
++// never used here.
++func runSigner(args []string, out output) int {
++	fail := func(err error) int {
++		code, respErr := out.classify(err)
++		_ = keyvault.WriteStartupFailure(out.stdout, keyvault.ContractError{Code: respErr.Code, Message: respErr.Message, Hint: respErr.Hint, Status: respErr.Status})
++		return code
++	}
++	if len(args) == 0 {
++		return fail(usagef("signer requires serve"))
++	}
++	sub, rest := args[0], args[1:]
++	out.command = "signer " + sub
++	if sub != "serve" {
++		return fail(usagef("unknown signer command %q; use serve", sub))
++	}
++	fs := flag.NewFlagSet("signer serve", flag.ContinueOnError)
++	address := fs.String("address", "", "the <service>/<purpose> the server signs with")
++	kind, version := addressFlags(fs)
++	positional, err := parseFlags(fs, rest)
++	if err != nil {
++		return fail(err)
++	}
++	switch {
++	case len(positional) != 0:
++		return fail(usagef("signer serve takes no positional arguments; use --address (got %q)", positional[0]))
++	case *address == "":
++		return fail(usagef("signer serve requires --address <service>/<purpose>"))
++	}
++	addr, err := keyvault.ParseAddress(*address, *kind, *version)
++	if err != nil {
++		return fail(err)
++	}
++	manager, err := newManager()
++	if err != nil {
++		return fail(err)
++	}
++	server := &keyvault.SignerServer{Manager: manager, Address: addr, ToolVersion: Version}
++	if err := server.Serve(stdinReader, out.stdout); err != nil {
++		// A startup failure already wrote its hello line; a write failure
++		// has no stream left to report on. Only the exit code remains.
++		code, _ := out.classify(err)
++		return code
++	}
++	return exitOK
+ }
+diff --git a/cmd/mac-keyvault/signer_test.go b/cmd/mac-keyvault/signer_test.go
+new file mode 100644
+index 0000000..7a413c6
+--- /dev/null
++++ b/cmd/mac-keyvault/signer_test.go
+@@ -0,0 +1,263 @@
++package main
++
++import (
++	"bytes"
++	"crypto/ecdsa"
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"math/big"
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/relux-works/mac-infra/internal/keyvault"
++	"github.com/relux-works/mac-infra/internal/keyvault/signerclient"
++)
++
++// runSignerServe drives run(signer serve ...) with the given stdin and
++// returns the exit code, the parsed stdout lines (hello first) and stderr.
++func runSignerServe(t *testing.T, stdin string, args ...string) (int, []signerclient.Response, string) {
++	t.Helper()
++	previous := stdinReader
++	stdinReader = strings.NewReader(stdin)
++	t.Cleanup(func() { stdinReader = previous })
++	var stdout, stderr bytes.Buffer
++	code := run(append([]string{"signer", "serve"}, args...), &stdout, &stderr)
++	var lines []signerclient.Response
++	for i, line := range strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n") {
++		var resp signerclient.Response
++		if err := json.Unmarshal([]byte(line), &resp); err != nil {
++			t.Fatalf("stdout line %d is not a response (%v): %q", i, err, line)
++		}
++		if resp.Error != nil && (resp.Error.Code == "" || resp.Error.Message == "" || resp.Error.Hint == "") {
++			t.Fatalf("line %d violates the error contract: %s", i, line)
++		}
++		lines = append(lines, resp)
++	}
++	return code, lines, stderr.String()
++}
++
++func request(t *testing.T, req signerclient.Request) string {
++	t.Helper()
++	data, err := json.Marshal(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return string(data) + "\n"
++}
++
++// run(signer serve --address) through the production entry point: the
++// hello announces contract 1 with the resolved label; describe, pub,
++// sign (DER and raw) and verify round-trip over the stream against a
++// recording store, the DER signature verifies with crypto/ecdsa under the
++// pub result's SPKI, a refused request in the middle does not end the
++// stream, EOF exits 0 with an empty stderr and one Sign call per sign.
++func TestRunSignerServeRoundTrip(t *testing.T) {
++	label := tl("serve", 1)
++	store := newMemStore(label)
++	useStore(t, store)
++	pub := signerFor(store.keys[label].SPKI).PublicKey
++	digest := digestHex("signer serve round trip")
++	stdin := request(t, signerclient.Request{ID: json.RawMessage("1"), Op: "describe"}) +
++		request(t, signerclient.Request{ID: json.RawMessage("2"), Op: "pub"}) +
++		request(t, signerclient.Request{ID: json.RawMessage("3"), Op: "sign", Digest: digest}) +
++		`{"id":4,"op":"sign","digest":"` + digest + `","format":"pkcs1"}` + "\n" +
++		request(t, signerclient.Request{ID: json.RawMessage("5"), Op: "sign", Digest: digest, Format: signerclient.FormatRaw})
++	code, lines, stderr := runSignerServe(t, stdin, "--address", "test/serve")
++	if code != exitOK || stderr != "" {
++		t.Fatalf("exit %d stderr %q", code, stderr)
++	}
++	if len(lines) != 6 {
++		t.Fatalf("%d lines: %+v", len(lines), lines)
++	}
++	var hello signerclient.Hello
++	if lines[0].Contract != signerclient.Contract || !lines[0].OK || json.Unmarshal(lines[0].Result, &hello) != nil || hello.Label != label || hello.Tool != "mac-keyvault" {
++		t.Fatalf("hello: %+v", lines[0])
++	}
++	var view map[string]any
++	if !lines[1].OK || json.Unmarshal(lines[1].Result, &view) != nil || view["label"] != label || view["schema"] != 2.0 {
++		t.Fatalf("describe: %+v", lines[1])
++	}
++	var pubResult signerclient.PublicKey
++	if !lines[2].OK || json.Unmarshal(lines[2].Result, &pubResult) != nil {
++		t.Fatalf("pub: %+v", lines[2])
++	}
++	der, err := base64.StdEncoding.DecodeString(pubResult.DERBase64)
++	if err != nil {
++		t.Fatal(err)
++	}
++	parsed, err := x509.ParsePKIXPublicKey(der)
++	if err != nil || !parsed.(*ecdsa.PublicKey).Equal(&pub) {
++		t.Fatalf("pub SPKI: %v", err)
++	}
++	var sig signerclient.Signature
++	if !lines[3].OK || json.Unmarshal(lines[3].Result, &sig) != nil || sig.Format != signerclient.FormatDERLowS || sig.Digest != digest || !sig.LowS {
++		t.Fatalf("sign: %+v", lines[3])
++	}
++	if !ecdsa.VerifyASN1(&pub, hexBytes(t, digest), hexBytes(t, sig.Signature)) {
++		t.Fatal("crypto/ecdsa rejects the streamed DER signature")
++	}
++	if lines[4].OK || lines[4].Error.Code != signerclient.CodeBadRequest || string(lines[4].ID) != "4" {
++		t.Fatalf("bad format: %+v", lines[4])
++	}
++	var raw signerclient.Signature
++	if !lines[5].OK || json.Unmarshal(lines[5].Result, &raw) != nil || raw.Format != signerclient.FormatRaw {
++		t.Fatalf("sign raw: %+v", lines[5])
++	}
++	rawSig := hexBytes(t, raw.Signature)
++	if len(rawSig) != 64 || !ecdsa.Verify(&pub, hexBytes(t, digest), new(big.Int).SetBytes(rawSig[:32]), new(big.Int).SetBytes(rawSig[32:])) {
++		t.Fatal("crypto/ecdsa rejects the streamed raw signature")
++	}
++	if len(store.signs) != 2 {
++		t.Fatalf("store saw %d signs, want 2", len(store.signs))
++	}
++}
++
++// The address gate runs before the store exists: a raw label (inside or
++// outside the prefix), a bad kind, a missing --address, a positional, a
++// negative version, an unknown signer subcommand and a bare `signer` are
++// refused with exactly one startup hello line on stdout (contract 1,
++// ok=false, error code), the documented exit code, an empty stderr — text
++// mode and the multi-line CLI envelope are never used by the stream
++// command — and zero store calls; the store then serves a valid address,
++// so it was reachable.
++func TestRunSignerServeRefusesBeforeStore(t *testing.T) {
++	store := newMemStore(tl("guard", 1))
++	useStore(t, store)
++	cases := []struct {
++		args []string
++		exit int
++		code string
++	}{
++		{[]string{"--address", keyvault.LabelPrefix + "key.kvctl.pki-root.v1"}, exitRefused, keyvault.CodeForeignLabel},
++		{[]string{"--address", "com.apple.security.something"}, exitRefused, keyvault.CodeForeignLabel},
++		{[]string{"--address", "test/guard", "--kind", "bogus"}, exitRefused, keyvault.CodeInvalidKind},
++		{[]string{"--address", "test/guard", "--version", "-1"}, exitRefused, keyvault.CodeInvalidPurpose},
++		{[]string{"--address", "Test/guard"}, exitRefused, keyvault.CodeInvalidService},
++		{[]string{}, exitUsage, "usage"},
++		{[]string{"--address", "test/guard", "extra"}, exitUsage, "usage"},
++		{[]string{"--address", "test/guard", "--bogus"}, exitUsage, "usage"},
++	}
++	for _, c := range cases {
++		previous := stdinReader
++		stdinReader = strings.NewReader(`{"id":1,"op":"sign","digest":"` + digestHex("x") + `"}` + "\n")
++		var stdout, stderr bytes.Buffer
++		code := run(append([]string{"signer", "serve"}, c.args...), &stdout, &stderr)
++		stdinReader = previous
++		var resp signerclient.Response
++		if err := keyvault.DecodeSingleJSON(stdout.Bytes(), &resp); err != nil || strings.Count(stdout.String(), "\n") != 1 {
++			t.Fatalf("%v: stdout is not exactly one hello line: %v: %s", c.args, err, stdout.String())
++		}
++		if code != c.exit || resp.OK || resp.Contract != signerclient.Contract || resp.Error == nil || resp.Error.Code != c.code || stderr.Len() != 0 {
++			t.Errorf("%v: exit %d %+v stderr %q, want %d %s", c.args, code, resp.Error, stderr.String(), c.exit, c.code)
++		}
++	}
++	for _, args := range [][]string{{"signer"}, {"signer", "attest"}, {"--json", "signer"}} {
++		var stdout, stderr bytes.Buffer
++		code := run(args, &stdout, &stderr)
++		var resp signerclient.Response
++		if err := keyvault.DecodeSingleJSON(stdout.Bytes(), &resp); err != nil || code != exitUsage || stderr.Len() != 0 || resp.Contract != signerclient.Contract || resp.Error == nil || resp.Error.Code != "usage" {
++			t.Errorf("%v: exit %d stdout %q stderr %q (%v)", args, code, stdout.String(), stderr.String(), err)
++		}
++	}
++	if store.touched() {
++		t.Fatalf("a refused signer serve reached the store: creates=%d lists=%d signs=%d", len(store.creates), store.lists, len(store.signs))
++	}
++	if code, lines, _ := runSignerServe(t, "", "--address", "test/guard"); code != exitOK || len(lines) != 1 || !lines[0].OK {
++		t.Fatalf("positive control: exit %d %+v", code, lines)
++	}
++	if store.lists != 1 {
++		t.Fatalf("positive control listed %d times", store.lists)
++	}
++}
++
++// A key that does not exist is a startup failure: exactly one line, the
++// hello with ok=false and not_found, exit 1, and the pending request is
++// never answered; a Security failure on sign is one error response in the
++// stream (code security, os_status attached), exit 0 at EOF.
++func TestRunSignerServeStartupAndSecurityFailures(t *testing.T) {
++	store := newMemStore(tl("sec", 1))
++	useStore(t, store)
++	code, lines, stderr := runSignerServe(t, `{"id":1,"op":"describe"}`+"\n", "--address", "test/absent")
++	if code != exitFailure || stderr != "" || len(lines) != 1 || lines[0].OK || lines[0].Contract != signerclient.Contract || lines[0].Error.Code != "not_found" {
++		t.Fatalf("absent: exit %d %+v stderr %q", code, lines, stderr)
++	}
++	store.signE = &keyvault.StatusError{Op: "SecKeyCreateSignature", Status: -25293}
++	code, lines, _ = runSignerServe(t, request(t, signerclient.Request{ID: json.RawMessage(`"a"`), Op: "sign", Digest: digestHex("sec")})+request(t, signerclient.Request{ID: json.RawMessage(`"b"`), Op: "pub"}), "--address", "test/sec")
++	if code != exitOK || len(lines) != 3 {
++		t.Fatalf("security: exit %d %+v", code, lines)
++	}
++	if lines[1].OK || lines[1].Error.Code != keyvault.CodeSecurity || lines[1].Error.OSStatus != -25293 || string(lines[1].ID) != `"a"` {
++		t.Fatalf("security response: %+v", lines[1])
++	}
++	if !lines[2].OK || string(lines[2].ID) != `"b"` {
++		t.Fatalf("stream ended after the security failure: %+v", lines[2])
++	}
++}
++
++// End-to-end through the production SecurityStore on this Mac: a key
++// created by run(init) under service test serves describe, pub, sign and
++// verify over run(signer serve); the DER signature verifies with
++// crypto/ecdsa under the streamed SPKI and under run(pub)'s file; a
++// tampered signature is signature_invalid without ending the stream; EOF
++// exits 0. Every label the store saw is a test label and is deleted in
++// cleanup.
++func TestRunSignerServeAgainstLoginKeychain(t *testing.T) {
++	if os.Getenv("MAC_KEYVAULT_SKIP_KEYCHAIN") != "" {
++		t.Skip("MAC_KEYVAULT_SKIP_KEYCHAIN set")
++	}
++	guard := &guardedBackend{t: t, inner: keyvault.NewSecurityStore()}
++	useStore(t, guard)
++	t.Cleanup(func() {
++		for _, label := range guard.touched {
++			if err := guard.inner.Delete(label); err != nil && !errors.Is(err, keyvault.ErrNotFound) {
++				t.Errorf("cleanup %s: %v", label, err)
++			}
++		}
++	})
++	purpose := fmt.Sprintf("serve-e2e-%d", os.Getpid())
++	if code, _, raw := runJSON(t, initArgs(purpose, "--usages", "sign,verify")...); code != exitOK {
++		t.Fatalf("init: %s", raw)
++	}
++	digest := digestHex("serve e2e " + purpose)
++	stdin := request(t, signerclient.Request{ID: json.RawMessage("1"), Op: "pub"}) +
++		request(t, signerclient.Request{ID: json.RawMessage("2"), Op: "sign", Digest: digest})
++	code, lines, stderr := runSignerServe(t, stdin, "--address", "test/"+purpose)
++	if code != exitOK || stderr != "" || len(lines) != 3 || !lines[1].OK || !lines[2].OK {
++		t.Fatalf("serve: exit %d %+v stderr %q", code, lines, stderr)
++	}
++	var hello signerclient.Hello
++	if err := json.Unmarshal(lines[0].Result, &hello); err != nil || hello.Label != tl(purpose, 1) {
++		t.Fatalf("hello: %v %+v", err, hello)
++	}
++	var pubResult signerclient.PublicKey
++	var sig signerclient.Signature
++	if json.Unmarshal(lines[1].Result, &pubResult) != nil || json.Unmarshal(lines[2].Result, &sig) != nil {
++		t.Fatal("results do not decode")
++	}
++	der, _ := base64.StdEncoding.DecodeString(pubResult.DERBase64)
++	parsed, err := x509.ParsePKIXPublicKey(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !ecdsa.VerifyASN1(parsed.(*ecdsa.PublicKey), hexBytes(t, digest), hexBytes(t, sig.Signature)) {
++		t.Fatal("crypto/ecdsa rejects the keychain signature streamed by signer serve")
++	}
++	tampered := hexBytes(t, sig.Signature)
++	tampered[len(tampered)-1] ^= 0x01
++	stdin = request(t, signerclient.Request{ID: json.RawMessage("1"), Op: "verify", Digest: digest, Signature: hex.EncodeToString(tampered)}) +
++		request(t, signerclient.Request{ID: json.RawMessage("2"), Op: "verify", Digest: digest, Signature: sig.Signature})
++	code, lines, _ = runSignerServe(t, stdin, "--address", "test/"+purpose)
++	if code != exitOK || len(lines) != 3 || lines[1].OK || lines[1].Error.Code != keyvault.CodeSignatureInvalid || !lines[2].OK {
++		t.Fatalf("verify: exit %d %+v", code, lines)
++	}
++	for _, touched := range guard.touched {
++		if !keyvault.IsTestLabel(touched) {
++			t.Fatalf("non-test label touched: %s", touched)
++		}
++	}
++}
+diff --git a/internal/keyvault/signer.go b/internal/keyvault/signer.go
+new file mode 100644
+index 0000000..e2b9994
+--- /dev/null
++++ b/internal/keyvault/signer.go
+@@ -0,0 +1,382 @@
++package keyvault
++
++import (
++	"bufio"
++	"bytes"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"time"
++
++	"github.com/relux-works/mac-infra/internal/keyvault/signerclient"
++)
++
++// ContractError is the error contract (model §8) as data: every error the
++// Manager or a command produces maps onto one of these. Failure marks the
++// operational class (CLI exit 1) as opposed to a policy refusal (exit 3).
++type ContractError struct {
++	Code    string
++	Message string
++	Hint    string
++	Status  int
++	Failure bool
++}
++
++// ClassifyError maps an error onto the contract: a Refusal keeps its code,
++// ErrNotFound is not_found (with the nearest-version hint when the error
++// carries one), a raw StatusError is translated, anything else is failure.
++func ClassifyError(err error) ContractError {
++	var refusal *Refusal
++	if errors.As(err, &refusal) {
++		return ContractError{Code: refusal.Code, Message: refusal.Message, Hint: refusal.Hint, Status: refusal.Status, Failure: refusal.Failure}
++	}
++	if errors.Is(err, ErrNotFound) {
++		hint := "list shows every record"
++		var h interface{ Hint() string }
++		if errors.As(err, &h) {
++			hint = h.Hint()
++		}
++		return ContractError{Code: "not_found", Message: err.Error(), Hint: hint, Failure: true}
++	}
++	var status *StatusError
++	if errors.As(err, &status) {
++		return ClassifyError(Translate(status.Op, err))
++	}
++	return ContractError{Code: "failure", Message: err.Error(), Hint: "check the path or environment named in the message and rerun", Failure: true}
++}
++
++// View is the flat JSON a read command prints and describe returns over
++// the signer contract: the record plus derived label, fingerprint,
++// exposure, operations and findings. Numeric meta is re-emitted
++// digit-exact (json.Number).
++func (k Key) View(now time.Time) map[string]any {
++	view := map[string]any{}
++	raw, _ := json.Marshal(k.Record)
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.UseNumber()
++	_ = decoder.Decode(&view)
++	ops, findings := k.Findings(now)
++	if findings == nil {
++		findings = []string{}
++	}
++	view["label"] = k.Label
++	view["fingerprint"] = k.Fingerprint()
++	view["exposure"] = Exposure(k.Record)
++	view["operations"] = ops
++	view["findings"] = findings
++	return view
++}
++
++// SignerServer serves the signer contract (signerclient, contract 1) for
++// one address over JSON lines: the vault side of `mac-keyvault signer
++// serve`. Every request resolves the address again (version 0 follows the
++// newest generation), and every operation runs the same gates as the CLI
++// command of the same name — the contract adds no path around them.
++type SignerServer struct {
++	Manager     *Manager
++	Address     Address
++	ToolVersion string
++}
++
++// Serve writes the hello line, then answers each stdin line with exactly
++// one response line until EOF, and returns nil. A startup failure (the
++// address does not resolve) is written as a hello with ok=false and
++// returned so the caller maps it to an exit code; a write failure is
++// returned as is. No request, malformed or refused, ends the loop.
++func (s *SignerServer) Serve(in io.Reader, out io.Writer) error {
++	key, err := s.Manager.Describe(s.Address)
++	if err != nil {
++		hello := signerclient.Response{Contract: signerclient.Contract, Error: wireError(err)}
++		if writeErr := writeLine(out, hello); writeErr != nil {
++			return writeErr
++		}
++		return err
++	}
++	hello := signerclient.Hello{Tool: "mac-keyvault", ToolVersion: s.ToolVersion, Address: s.Address.Service + "/" + s.Address.Purpose, Kind: s.Address.Kind, Version: s.Address.Version,
++		Label: key.Label, Fingerprint: key.Fingerprint(), Ops: signerclient.Ops}
++	if err := writeLine(out, signerclient.Response{Contract: signerclient.Contract, OK: true, Result: mustJSON(hello)}); err != nil {
++		return err
++	}
++	reader := bufio.NewReader(in)
++	for {
++		line, readErr := reader.ReadBytes('\n')
++		if trimmed := bytes.TrimSpace(line); len(trimmed) != 0 {
++			if err := writeLine(out, s.handle(trimmed)); err != nil {
++				return err
++			}
++		}
++		if readErr != nil {
++			if errors.Is(readErr, io.EOF) {
++				return nil
++			}
++			return readErr
++		}
++	}
++}
++
++// wireJSON encodes one value compactly without HTML escaping (a hint may
++// contain "<"), so a line reads as written.
++func wireJSON(v any) ([]byte, error) {
++	var buf bytes.Buffer
++	enc := json.NewEncoder(&buf)
++	enc.SetEscapeHTML(false)
++	if err := enc.Encode(v); err != nil {
++		return nil, err
++	}
++	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
++}
++
++func writeLine(out io.Writer, resp signerclient.Response) error {
++	data, err := wireJSON(resp)
++	if err != nil {
++		return err
++	}
++	_, err = out.Write(append(data, '\n'))
++	return err
++}
++
++func mustJSON(v any) json.RawMessage {
++	data, err := wireJSON(v)
++	if err != nil {
++		panic(err)
++	}
++	return data
++}
++
++func wireError(err error) *signerclient.Error {
++	c := ClassifyError(err)
++	return &signerclient.Error{Code: c.Code, Message: c.Message, Hint: c.Hint, OSStatus: c.Status}
++}
++
++// badRequest is a parameter the server cannot read for the op: it is
++// answered before any store call.
++func badRequest(format string, args ...any) *signerclient.Error {
++	return &signerclient.Error{Code: signerclient.CodeBadRequest, Message: fmt.Sprintf(format, args...), Hint: "requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes"}
++}
++
++var nullID = json.RawMessage("null")
++
++// handle answers one non-blank line. Gates in order: the line is one JSON
++// object with known members, id is a string or number, op is known; then
++// the op's own parameter checks, then the Manager's gates.
++func (s *SignerServer) handle(line []byte) signerclient.Response {
++	// The id is read first and loosely (open map, one document) so that a
++	// request whose members the contract does not define is still
++	// answered under its own id; only a line that is not one JSON object
++	// is answered under id null.
++	probe := map[string]json.RawMessage{}
++	if err := DecodeSingleJSON(line, &probe); err != nil {
++		return signerclient.Response{ID: nullID, Error: badRequest("line is not one JSON object: %v", err)}
++	}
++	id := probe["id"]
++	if !validID(id) {
++		return signerclient.Response{ID: nullID, Error: &signerclient.Error{Code: signerclient.CodeMissingID, Message: "id is required and must be a JSON string or number", Hint: "send {\"id\": <string|number>, \"op\": ...}; the id is echoed in the response"}}
++	}
++	var req signerclient.Request
++	if err := decodeStrictObject(line, &req); err != nil {
++		return signerclient.Response{ID: id, Error: badRequest("%v", err)}
++	}
++	var result any
++	var wireErr *signerclient.Error
++	switch req.Op {
++	case signerclient.OpDescribe:
++		result, wireErr = s.describe(req)
++	case signerclient.OpPub:
++		result, wireErr = s.pub(req)
++	case signerclient.OpSign:
++		result, wireErr = s.sign(req)
++	case signerclient.OpVerify:
++		result, wireErr = s.verify(req)
++	default:
++		wireErr = &signerclient.Error{Code: signerclient.CodeUnknownOp, Message: fmt.Sprintf("unknown op %q", req.Op), Hint: "ops are describe, pub, sign, verify"}
++	}
++	resp := signerclient.Response{ID: id, OK: wireErr == nil, Error: wireErr}
++	if result != nil {
++		resp.Result = mustJSON(result)
++	}
++	return resp
++}
++
++// validID accepts a JSON string or number: the shapes a client can compare
++// without deep equality.
++func validID(id json.RawMessage) bool {
++	if len(id) == 0 || bytes.Equal(id, nullID) {
++		return false
++	}
++	var v any
++	if err := json.Unmarshal(id, &v); err != nil {
++		return false
++	}
++	switch v.(type) {
++	case string, float64:
++		return true
++	}
++	return false
++}
++
++// decodeStrictObject decodes one JSON object with DisallowUnknownFields
++// (DecodeSingleJSON), phrasing the error for a request.
++func decodeStrictObject(line []byte, req *signerclient.Request) error {
++	if err := DecodeSingleJSON(line, req); err != nil {
++		return fmt.Errorf("request has a member or shape the contract does not define: %v", err)
++	}
++	return nil
++}
++
++// noParams refuses parameters an op does not take, so a caller who sends
++// a digest to describe learns it was ignored rather than assuming it was
++// used.
++func noParams(req signerclient.Request) *signerclient.Error {
++	if req.Format != "" || req.Digest != "" || req.Signature != "" || req.AllowHighS {
++		return badRequest("%s takes no parameters", req.Op)
++	}
++	return nil
++}
++
++func (s *SignerServer) describe(req signerclient.Request) (any, *signerclient.Error) {
++	if err := noParams(req); err != nil {
++		return nil, err
++	}
++	key, err := s.Manager.Describe(s.Address)
++	if err != nil {
++		return nil, wireError(err)
++	}
++	return key.View(s.Manager.now()), nil
++}
++
++func (s *SignerServer) pub(req signerclient.Request) (any, *signerclient.Error) {
++	if req.Digest != "" || req.Signature != "" || req.AllowHighS {
++		return nil, badRequest("pub takes only format")
++	}
++	format := req.Format
++	switch format {
++	case "":
++		format = signerclient.FormatSPKIDER
++	case signerclient.FormatSPKIDER, signerclient.FormatSPKIPEM:
++	default:
++		return nil, badRequest("pub format must be %s or %s, got %q", signerclient.FormatSPKIDER, signerclient.FormatSPKIPEM, format)
++	}
++	key, err := s.Manager.Describe(s.Address)
++	if err != nil {
++		return nil, wireError(err)
++	}
++	if len(key.SPKI) == 0 {
++		return nil, wireError(&Refusal{Code: CodeSecurity, Failure: true, Message: fmt.Sprintf("public key of %s is unreadable; fingerprint unknown", key.Label), Hint: "describe shows the findings; rotate the record"})
++	}
++	pub := signerclient.PublicKey{Label: key.Label, Fingerprint: key.Fingerprint(), Format: format}
++	if format == signerclient.FormatSPKIPEM {
++		pub.PEM = string(EncodePEM(key.SPKI))
++	} else {
++		pub.DERBase64 = base64.StdEncoding.EncodeToString(key.SPKI)
++	}
++	return pub, nil
++}
++
++// digestParam reads the digest parameter: hex the server can read
++// (bad_request otherwise), then the length gate (invalid_digest).
++func digestParam(req signerclient.Request) ([]byte, *signerclient.Error) {
++	if req.Digest == "" {
++		return nil, badRequest("%s requires digest: the SHA-256 digest as 64 hex characters", req.Op)
++	}
++	digest, err := hex.DecodeString(req.Digest)
++	if err != nil {
++		return nil, badRequest("digest must be hex: %v", err)
++	}
++	if err := ValidateDigest(digest); err != nil {
++		wireErr := wireError(err)
++		wireErr.Hint = "digest is the SHA-256 digest of the payload as 64 hex characters; nothing was " + map[string]string{signerclient.OpSign: "signed", signerclient.OpVerify: "verified"}[req.Op]
++		return nil, wireErr
++	}
++	return digest, nil
++}
++
++func signatureFormatParam(req signerclient.Request, fallback string) (string, *signerclient.Error) {
++	switch req.Format {
++	case "":
++		return fallback, nil
++	case signerclient.FormatDERLowS, signerclient.FormatRaw:
++		return req.Format, nil
++	}
++	return "", badRequest("%s format must be %s or %s, got %q", req.Op, signerclient.FormatDERLowS, signerclient.FormatRaw, req.Format)
++}
++
++func (s *SignerServer) sign(req signerclient.Request) (any, *signerclient.Error) {
++	if req.Signature != "" || req.AllowHighS {
++		return nil, badRequest("sign takes digest and format only")
++	}
++	if _, err := signatureFormatParam(req, ""); err != nil {
++		return nil, err
++	}
++	digest, wireErr := digestParam(req)
++	if wireErr != nil {
++		return nil, wireErr
++	}
++	signed, err := s.Manager.Sign(s.Address, digest)
++	if err != nil {
++		return nil, wireError(err)
++	}
++	format, _ := signatureFormatParam(req, signed.Key.Record.Format.Signature)
++	if format != signerclient.FormatRaw {
++		format = signerclient.FormatDERLowS
++	}
++	payload, err := signed.Signature.Encode(format)
++	if err != nil {
++		return nil, wireError(err)
++	}
++	return signerclient.Signature{Label: signed.Key.Label, Fingerprint: signed.Key.Fingerprint(), Hash: signerclient.Hash, Digest: hex.EncodeToString(digest), Format: format,
++		Signature: hex.EncodeToString(payload), SignatureBase64: base64.StdEncoding.EncodeToString(payload), LowS: true, Normalized: signed.Normalized}, nil
++}
++
++// verify judges digest, signature and the address's public key. As in the
++// CLI, malformed and high-S signatures are refused on the bytes alone,
++// before the vault is read.
++func (s *SignerServer) verify(req signerclient.Request) (any, *signerclient.Error) {
++	format, wireErr := signatureFormatParam(req, signerclient.FormatDERLowS)
++	if wireErr != nil {
++		return nil, wireErr
++	}
++	digest, wireErr := digestParam(req)
++	if wireErr != nil {
++		return nil, wireErr
++	}
++	if req.Signature == "" {
++		return nil, badRequest("verify requires signature: the signature bytes as hex")
++	}
++	sigBytes, err := hex.DecodeString(req.Signature)
++	if err != nil {
++		return nil, badRequest("signature must be hex: %v", err)
++	}
++	sig, err := ParseSignature(sigBytes, format)
++	if err != nil {
++		return nil, wireError(err)
++	}
++	verdict := signerclient.Verdict{Hash: signerclient.Hash, Digest: hex.EncodeToString(digest), Format: format, LowS: sig.IsLowS(), HighSAllowed: req.AllowHighS}
++	if !sig.IsLowS() && !req.AllowHighS {
++		return verdict, wireError(&Refusal{Code: CodeHighSRefused, Message: "signature s is in the high half of the P-256 order (malleable form); the vault only accepts low-S signatures", Hint: "signatures made by mac-keyvault are always low-S; set allow_high_s to accept this one knowingly"})
++	}
++	key, err := s.Manager.PublicKeyFor(s.Address)
++	if err != nil {
++		return nil, wireError(err)
++	}
++	verdict.Label, verdict.Fingerprint = key.Label, key.Fingerprint()
++	verified, err := VerifyDigest(key.SPKI, digest, sig)
++	if err != nil {
++		return nil, wireError(err)
++	}
++	verdict.Verified = verified
++	if !verified {
++		return verdict, wireError(&Refusal{Code: CodeSignatureInvalid, Failure: true, Message: "signature does not verify over the digest under this public key", Hint: "the digest, the signature or the key is not the one that was signed; verdict false"})
++	}
++	return verdict, nil
++}
++
++// WriteStartupFailure writes the hello line of a server that cannot
++// start (usage or address refused before the vault is opened): contract 1,
++// ok=false, the error — one line, the same shape Serve writes when the
++// address does not resolve, so a client reads exactly one line either way.
++func WriteStartupFailure(out io.Writer, e ContractError) error {
++	return writeLine(out, signerclient.Response{Contract: signerclient.Contract, Error: &signerclient.Error{Code: e.Code, Message: e.Message, Hint: e.Hint, OSStatus: e.Status}})
++}
+diff --git a/internal/keyvault/signer_test.go b/internal/keyvault/signer_test.go
+new file mode 100644
+index 0000000..6c2ffa6
+--- /dev/null
++++ b/internal/keyvault/signer_test.go
+@@ -0,0 +1,451 @@
++package keyvault
++
++import (
++	"bytes"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"flag"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/relux-works/mac-infra/internal/keyvault/signerclient"
++)
++
++var updateGolden = flag.Bool("update", false, "rewrite the signer-v1 golden responses from the current server output")
++
++const goldenDir = "testdata/signer-v1"
++
++// goldenFixture is one testdata/signer-v1/<session>-<NN>-<name>.json:
++// the request line (an object, or request_raw for a line that is not
++// JSON) and the exact response line the server must write. A fixture
++// without a request is the session's hello line.
++type goldenFixture struct {
++	Session    string          `json:"session"`
++	Note       string          `json:"note"`
++	Request    json.RawMessage `json:"request,omitempty"`
++	RequestRaw *string         `json:"request_raw,omitempty"`
++	Response   *string         `json:"response"`
++	path       string
++}
++
++// requestLine is the exact bytes sent for the fixture: the compacted
++// object, or request_raw verbatim.
++func (f goldenFixture) requestLine(t *testing.T) []byte {
++	t.Helper()
++	if f.RequestRaw != nil {
++		return []byte(*f.RequestRaw)
++	}
++	var compact bytes.Buffer
++	if err := json.Compact(&compact, f.Request); err != nil {
++		t.Fatalf("%s: request is not JSON: %v", f.path, err)
++	}
++	return compact.Bytes()
++}
++
++// goldenMaterial is testdata/signer-v1/fixture-key.json: one P-256 SPKI,
++// one digest and one low-S DER signature over it under that key, so the
++// canned backend's answer is fixed and every response line is
++// reproducible byte for byte.
++type goldenMaterial struct {
++	SPKI   []byte
++	Digest []byte
++	DER    []byte
++}
++
++func loadGoldenMaterial(t *testing.T) goldenMaterial {
++	t.Helper()
++	data, err := os.ReadFile(filepath.Join(goldenDir, "fixture-key.json"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	var raw struct {
++		SPKI   string `json:"spki_der_base64"`
++		Digest string `json:"digest_hex"`
++		DER    string `json:"signature_der_hex"`
++	}
++	if err := json.Unmarshal(data, &raw); err != nil {
++		t.Fatal(err)
++	}
++	spki, err := base64.StdEncoding.DecodeString(raw.SPKI)
++	if err != nil {
++		t.Fatal(err)
++	}
++	digest, err := hex.DecodeString(raw.Digest)
++	if err != nil {
++		t.Fatal(err)
++	}
++	der, err := hex.DecodeString(raw.DER)
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Premise: the canned signature verifies under the canned key, so a
++	// fixture that says verified:true is a real verdict.
++	sig, err := ParseSignature(der, FormatSignatureDERLowS)
++	if err != nil || !sig.IsLowS() {
++		t.Fatalf("fixture signature: %v low-S=%v", err, sig.IsLowS())
++	}
++	if ok, err := VerifyDigest(spki, digest, sig); err != nil || !ok {
++		t.Fatalf("fixture signature does not verify: %v %v", ok, err)
++	}
++	return goldenMaterial{SPKI: spki, Digest: digest, DER: der}
++}
++
++// cannedStore signs exactly one digest with one canned signature; any
++// other digest is a backend failure, so a fixture cannot sign something
++// the material does not cover.
++type cannedStore struct {
++	*fakeStore
++	material goldenMaterial
++}
++
++func (s *cannedStore) Sign(label string, digest []byte) ([]byte, error) {
++	s.mu.Lock()
++	s.signs = append(s.signs, label)
++	s.mu.Unlock()
++	if _, ok := s.keys[label]; !ok {
++		return nil, ErrNotFound
++	}
++	if !bytes.Equal(digest, s.material.Digest) {
++		return nil, fmt.Errorf("cannedStore: digest %x is not the golden digest", digest)
++	}
++	return s.material.DER, nil
++}
++
++func goldenClock() time.Time { return time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC) }
++
++// goldenSessions builds the store and address of each fixture session:
++// signer (usages sign,verify), verify-only (usages verify), expired
++// (not_after in the past) share the canned SPKI; missing has no item.
++func goldenSessions(t *testing.T, material goldenMaterial) map[string]*SignerServer {
++	t.Helper()
++	sessions := map[string]*SignerServer{}
++	build := func(name string, adjust func(*Record)) {
++		label := tl(name, 1)
++		store := &cannedStore{fakeStore: newFakeStore(), material: material}
++		if adjust != nil {
++			rec := testRecord(label)
++			rec.Title = "golden " + name
++			rec.Description = "signer contract v1 golden fixture"
++			rec.Meta = map[string]any{"owner": "golden"}
++			adjust(&rec)
++			tag, err := EncodeRecord(rec)
++			if err != nil {
++				t.Fatal(err)
++			}
++			store.keys[label] = Item{Label: label, Tag: tag, SPKI: material.SPKI}
++		}
++		m := NewManager(store, NoLock{}, testOrigin)
++		m.SetClock(goldenClock)
++		sessions[name] = &SignerServer{Manager: m, Address: Address{Kind: KindKey, Service: TestService, Purpose: name}, ToolVersion: "test"}
++	}
++	build("signer", func(*Record) {})
++	build("verify-only", func(rec *Record) { rec.Usages = []string{"verify"} })
++	build("expired", func(rec *Record) {
++		notAfter := NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
++		rec.Validity.NotAfter = &notAfter
++	})
++	build("missing", nil)
++	return sessions
++}
++
++func loadGoldenFixtures(t *testing.T) map[string][]goldenFixture {
++	t.Helper()
++	paths, err := filepath.Glob(filepath.Join(goldenDir, "*.json"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	sort.Strings(paths)
++	fixtures := map[string][]goldenFixture{}
++	for _, path := range paths {
++		if filepath.Base(path) == "fixture-key.json" {
++			continue
++		}
++		data, err := os.ReadFile(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		var fixture goldenFixture
++		if err := json.Unmarshal(data, &fixture); err != nil {
++			t.Fatalf("%s: %v", path, err)
++		}
++		fixture.path = path
++		if !strings.HasPrefix(filepath.Base(path), fixture.Session+"-") {
++			t.Fatalf("%s: file name does not start with its session %q", path, fixture.Session)
++		}
++		fixtures[fixture.Session] = append(fixtures[fixture.Session], fixture)
++	}
++	return fixtures
++}
++
++// The signer-v1 wire is pinned byte for byte: for every fixture session
++// (signer, verify-only, expired, missing) the request lines are sent in
++// file order through one SignerServer.Serve call over a canned backend
++// and a fixed clock, and each response line — hello first — must equal
++// the fixture's response exactly (bytes, including key order). The
++// signer session interleaves 17 error responses (bad_request, missing_id,
++// unknown_op, invalid_digest, invalid_signature, high_s_refused,
++// signature_invalid) with later successful requests, so a green run also
++// proves no error ended the stream; the missing session proves a startup
++// failure is one hello line with ok=false and a returned not_found. Run
++// with -update to regenerate the response fields from the current
++// server; review the diff, never the run.
++func TestSignerServeGoldenWire(t *testing.T) {
++	material := loadGoldenMaterial(t)
++	sessions := goldenSessions(t, material)
++	fixtures := loadGoldenFixtures(t)
++	if len(fixtures) != len(sessions) {
++		t.Fatalf("fixture sessions %v, server sessions %d", keysOf(fixtures), len(sessions))
++	}
++	for name, server := range sessions {
++		t.Run(name, func(t *testing.T) {
++			list := fixtures[name]
++			if len(list) == 0 || list[0].Request != nil || list[0].RequestRaw != nil {
++				t.Fatalf("session %s must start with a hello fixture (no request)", name)
++			}
++			var in bytes.Buffer
++			for _, f := range list[1:] {
++				if f.Request == nil && f.RequestRaw == nil {
++					t.Fatalf("%s: only the first fixture of a session may lack a request", f.path)
++				}
++				in.Write(f.requestLine(t))
++				in.WriteByte('\n')
++			}
++			var out bytes.Buffer
++			err := server.Serve(&in, &out)
++			if name == "missing" {
++				if !errors.Is(err, ErrNotFound) {
++					t.Fatalf("missing session: Serve returned %v, want ErrNotFound", err)
++				}
++			} else if err != nil {
++				t.Fatalf("Serve: %v", err)
++			}
++			lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
++			if len(lines) != len(list) {
++				t.Fatalf("server wrote %d lines for %d fixtures:\n%s", len(lines), len(list), out.String())
++			}
++			for i, f := range list {
++				if *updateGolden {
++					line := lines[i]
++					f.Response = &line
++					var data bytes.Buffer
++					enc := json.NewEncoder(&data)
++					enc.SetEscapeHTML(false)
++					enc.SetIndent("", "  ")
++					if err := enc.Encode(f); err != nil {
++						t.Fatal(err)
++					}
++					if err := os.WriteFile(f.path, data.Bytes(), 0o644); err != nil {
++						t.Fatal(err)
++					}
++					continue
++				}
++				if f.Response == nil {
++					t.Fatalf("%s: no response recorded; run with -update", f.path)
++				}
++				if lines[i] != *f.Response {
++					t.Errorf("%s (%s):\n got: %s\nwant: %s", f.path, f.Note, lines[i], *f.Response)
++				}
++			}
++		})
++	}
++}
++
++func keysOf(m map[string][]goldenFixture) []string {
++	out := make([]string, 0, len(m))
++	for k := range m {
++		out = append(out, k)
++	}
++	sort.Strings(out)
++	return out
++}
++
++// serveLines runs one session over the given input and returns the
++// response lines after the hello.
++func serveLines(t *testing.T, server *SignerServer, input string) (hello signerclient.Response, responses []signerclient.Response, err error) {
++	t.Helper()
++	var out bytes.Buffer
++	err = server.Serve(strings.NewReader(input), &out)
++	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
++	for i, line := range lines {
++		var resp signerclient.Response
++		if decodeErr := json.Unmarshal([]byte(line), &resp); decodeErr != nil {
++			t.Fatalf("line %d is not a response: %v: %s", i, decodeErr, line)
++		}
++		if resp.Error != nil && (resp.Error.Code == "" || resp.Error.Message == "" || resp.Error.Hint == "") {
++			t.Fatalf("line %d violates the error contract: %s", i, line)
++		}
++		if i == 0 {
++			hello = resp
++		} else {
++			responses = append(responses, resp)
++		}
++	}
++	return hello, responses, err
++}
++
++// Serve ends with nil on EOF whether or not the last line has a newline,
++// skips blank and whitespace-only lines without a response, and the
++// hello carries contract 1 with the resolved label and fingerprint.
++func TestSignerServeEOFAndBlankLines(t *testing.T) {
++	material := loadGoldenMaterial(t)
++	server := goldenSessions(t, material)["signer"]
++	hello, responses, err := serveLines(t, server, "\n   \n{\"id\":1,\"op\":\"pub\"}\n\n{\"id\":2,\"op\":\"pub\"}")
++	if err != nil {
++		t.Fatalf("Serve: %v", err)
++	}
++	if hello.Contract != signerclient.Contract || !hello.OK {
++		t.Fatalf("hello: %+v", hello)
++	}
++	var h signerclient.Hello
++	if err := json.Unmarshal(hello.Result, &h); err != nil || h.Label != tl("signer", 1) || h.Fingerprint != (Key{SPKI: material.SPKI}).Fingerprint() || len(h.Ops) != 4 {
++		t.Fatalf("hello result: %v %+v", err, h)
++	}
++	if len(responses) != 2 || string(responses[0].ID) != "1" || string(responses[1].ID) != "2" || !responses[0].OK || !responses[1].OK {
++		t.Fatalf("responses: %+v", responses)
++	}
++}
++
++// The request gates answer before any store call: a malformed line, an
++// unknown member, a missing id, an unknown op, a mis-sized or non-hex
++// digest, a malformed signature and a high-S signature each produce their
++// error response with zero Sign and zero List calls beyond the hello's
++// one listing; the positive control (a valid sign) then reaches Sign
++// exactly once, so the store really is reachable in this session.
++func TestSignerServeGatesBeforeStore(t *testing.T) {
++	material := loadGoldenMaterial(t)
++	server := goldenSessions(t, material)["signer"]
++	store := server.Manager.backend.(*cannedStore)
++	digest := hex.EncodeToString(material.Digest)
++	highS := "304502200f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a022100e5d7cb4270847d84783350fc089c6935d699d8c342041381bc00a2fe1ea43eff"
++	gated := []struct{ line, code string }{
++		{`{"id":1,"op":"sign"`, signerclient.CodeBadRequest},
++		{`{"id":2,"op":"sign","digest":"` + digest + `","extra":true}`, signerclient.CodeBadRequest},
++		{`{"op":"sign","digest":"` + digest + `"}`, signerclient.CodeMissingID},
++		{`{"id":4,"op":"rotate"}`, signerclient.CodeUnknownOp},
++		{`{"id":5,"op":"sign","digest":"abcd"}`, CodeInvalidDigest},
++		{`{"id":6,"op":"sign","digest":"xyz"}`, signerclient.CodeBadRequest},
++		{`{"id":7,"op":"verify","digest":"` + digest + `","signature":"3000"}`, CodeInvalidSignature},
++		{`{"id":8,"op":"verify","digest":"` + digest + `","signature":"` + highS + `"}`, CodeHighSRefused},
++		{`{"id":9,"op":"sign","digest":"` + digest + `","format":"pkcs1"}`, signerclient.CodeBadRequest},
++	}
++	var input strings.Builder
++	for _, g := range gated {
++		input.WriteString(g.line + "\n")
++	}
++	input.WriteString(`{"id":10,"op":"sign","digest":"` + digest + `"}` + "\n")
++	_, responses, err := serveLines(t, server, input.String())
++	if err != nil {
++		t.Fatalf("Serve: %v", err)
++	}
++	if len(responses) != len(gated)+1 {
++		t.Fatalf("%d responses for %d requests", len(responses), len(gated)+1)
++	}
++	for i, g := range gated {
++		if responses[i].OK || responses[i].Error == nil || responses[i].Error.Code != g.code {
++			t.Errorf("%s: got %+v, want %s", g.line, responses[i], g.code)
++		}
++	}
++	if !responses[len(gated)].OK {
++		t.Fatalf("positive control failed: %+v", responses[len(gated)])
++	}
++	_, _, _, lists := store.calls()
++	if len(store.signs) != 1 || lists != 2 { // hello listing + the control's listing
++		t.Fatalf("store saw %d signs and %d lists; the gates leaked a store call", len(store.signs), lists)
++	}
++}
++
++// syncBuffer is a writer the serving goroutine fills while the test reads
++// the lines written so far.
++type syncBuffer struct {
++	mu sync.Mutex
++	b  bytes.Buffer
++}
++
++func (s *syncBuffer) Write(p []byte) (int, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return s.b.Write(p)
++}
++
++func (s *syncBuffer) lines() []string {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	text := strings.TrimSuffix(s.b.String(), "\n")
++	if text == "" {
++		return nil
++	}
++	return strings.Split(text, "\n")
++}
++
++func waitForLines(t *testing.T, out *syncBuffer, n int) {
++	t.Helper()
++	deadline := time.Now().Add(5 * time.Second)
++	for len(out.lines()) < n {
++		if time.Now().After(deadline) {
++			t.Fatalf("waited for %d lines, have %v", n, out.lines())
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++}
++
++// A key missing at start is one hello line with ok=false, not_found and
++// a returned ErrNotFound with no further lines; a key that disappears
++// after the hello yields not_found for sign and for verify while the
++// stream continues, and a later request on the re-added key succeeds.
++func TestSignerServeNotFoundMidStream(t *testing.T) {
++	material := loadGoldenMaterial(t)
++	server := goldenSessions(t, material)["signer"]
++	store := server.Manager.backend.(*cannedStore)
++	label := tl("signer", 1)
++	item := store.keys[label]
++	digest := hex.EncodeToString(material.Digest)
++
++	delete(store.keys, label)
++	hello, responses, err := serveLines(t, server, `{"id":1,"op":"sign","digest":"`+digest+`"}`+"\n")
++	if !errors.Is(err, ErrNotFound) || hello.OK || hello.Error == nil || hello.Error.Code != "not_found" || hello.Contract != signerclient.Contract || len(responses) != 0 {
++		t.Fatalf("startup with a missing key: err=%v hello=%+v responses=%d", err, hello, len(responses))
++	}
++	store.keys[label] = item
++
++	pr, pw := io.Pipe()
++	out := &syncBuffer{}
++	done := make(chan error, 1)
++	go func() { done <- server.Serve(pr, out) }()
++	waitForLines(t, out, 1) // the hello listed the key
++	store.mu.Lock()
++	delete(store.keys, label)
++	store.mu.Unlock()
++	fmt.Fprintf(pw, `{"id":1,"op":"sign","digest":"%s"}`+"\n", digest)
++	fmt.Fprintf(pw, `{"id":2,"op":"verify","digest":"%s","signature":"%s"}`+"\n", digest, hex.EncodeToString(material.DER))
++	waitForLines(t, out, 3)
++	store.mu.Lock()
++	store.keys[label] = item
++	store.mu.Unlock()
++	fmt.Fprintf(pw, `{"id":3,"op":"sign","digest":"%s"}`+"\n", digest)
++	pw.Close()
++	if err := <-done; err != nil {
++		t.Fatalf("Serve: %v", err)
++	}
++	lines := out.lines()
++	if len(lines) != 4 {
++		t.Fatalf("lines: %v", lines)
++	}
++	for i, want := range []string{"", "not_found", "not_found", ""} {
++		var resp signerclient.Response
++		if err := json.Unmarshal([]byte(lines[i]), &resp); err != nil {
++			t.Fatal(err)
++		}
++		if want == "" && !resp.OK || want != "" && (resp.OK || resp.Error == nil || resp.Error.Code != want) {
++			t.Errorf("line %d: %s", i, lines[i])
++		}
++	}
++}
+diff --git a/internal/keyvault/signerclient/client.go b/internal/keyvault/signerclient/client.go
+new file mode 100644
+index 0000000..7e7fe17
+--- /dev/null
++++ b/internal/keyvault/signerclient/client.go
+@@ -0,0 +1,355 @@
++package signerclient
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"crypto"
++	"crypto/ecdsa"
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"os/exec"
++	"strconv"
++	"sync"
++)
++
++// Options configure Start.
++type Options struct {
++	// Binary is the mac-keyvault executable; empty resolves "mac-keyvault"
++	// on PATH.
++	Binary string
++	// Address is <service>/<purpose>; the server refuses anything else
++	// (raw labels included) before it touches the keychain.
++	Address string
++	// Kind is the record kind; empty means key.
++	Kind string
++	// Version pins one generation; 0 follows the newest at each request.
++	Version int
++	// Stderr receives the server's stderr; nil discards it.
++	Stderr io.Writer
++}
++
++// Errors the client itself raises. A refused or failed operation is a
++// *Error carrying the server's code.
++var (
++	// ErrContract: the hello announced a contract this package does not
++	// speak (or none at all); the server was stopped.
++	ErrContract = errors.New("signerclient: unsupported contract")
++	// ErrProtocol: the server wrote something that is not a response to
++	// the pending request (unparsable line, foreign id, EOF); the client
++	// is unusable afterwards.
++	ErrProtocol = errors.New("signerclient: protocol violation")
++	// ErrClosed: Close was called or a protocol violation ended the session.
++	ErrClosed = errors.New("signerclient: session closed")
++)
++
++// Client is one `mac-keyvault signer serve` process. Calls are serialised;
++// a Client is safe for concurrent use.
++type Client struct {
++	cmd    *exec.Cmd
++	stdin  io.WriteCloser
++	lines  *bufio.Reader
++	hello  Hello
++	mu     sync.Mutex
++	nextID uint64
++	broken error
++	waited bool
++	waitE  error
++}
++
++// Start spawns the server, reads the hello line and refuses any contract
++// other than Contract. ctx bounds the process: when it is done the server
++// is killed. A startup failure (address does not resolve, foreign label,
++// usage) is returned as *Error after the process exited.
++func Start(ctx context.Context, opts Options) (*Client, error) {
++	binary := opts.Binary
++	if binary == "" {
++		binary = "mac-keyvault"
++	}
++	if opts.Address == "" {
++		return nil, fmt.Errorf("signerclient: Address is required")
++	}
++	args := []string{"signer", "serve", "--address", opts.Address}
++	if opts.Kind != "" {
++		args = append(args, "--kind", opts.Kind)
++	}
++	if opts.Version != 0 {
++		args = append(args, "--version", strconv.Itoa(opts.Version))
++	}
++	cmd := exec.CommandContext(ctx, binary, args...)
++	cmd.Stderr = opts.Stderr
++	stdin, err := cmd.StdinPipe()
++	if err != nil {
++		return nil, err
++	}
++	stdout, err := cmd.StdoutPipe()
++	if err != nil {
++		return nil, err
++	}
++	if err := cmd.Start(); err != nil {
++		return nil, err
++	}
++	c := &Client{cmd: cmd, stdin: stdin, lines: bufio.NewReader(stdout)}
++	resp, err := c.readResponse(ctx)
++	if err != nil {
++		c.abort()
++		return nil, fmt.Errorf("%w: no hello line: %v", ErrProtocol, err)
++	}
++	if resp.Contract != Contract {
++		c.abort()
++		return nil, fmt.Errorf("%w: server announced contract %d, this client speaks %d", ErrContract, resp.Contract, Contract)
++	}
++	if !resp.OK {
++		_ = c.abort()
++		if resp.Error == nil {
++			return nil, fmt.Errorf("%w: hello is not ok and carries no error", ErrProtocol)
++		}
++		return nil, resp.Error
++	}
++	if err := json.Unmarshal(resp.Result, &c.hello); err != nil {
++		c.abort()
++		return nil, fmt.Errorf("%w: hello result: %v", ErrProtocol, err)
++	}
++	return c, nil
++}
++
++// Hello is what the server bound to: label, fingerprint, ops.
++func (c *Client) Hello() Hello { return c.hello }
++
++// Call sends one request and returns its response. The id is assigned
++// here; a response with another id is ErrProtocol. A response with ok
++// false is returned together with its *Error so a caller can read a
++// partial result (verify's verdict).
++func (c *Client) Call(ctx context.Context, req Request) (Response, error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.broken != nil {
++		return Response{}, c.broken
++	}
++	c.nextID++
++	req.ID = json.RawMessage(strconv.FormatUint(c.nextID, 10))
++	line, err := json.Marshal(req)
++	if err != nil {
++		return Response{}, err
++	}
++	if _, err := c.stdin.Write(append(line, '\n')); err != nil {
++		c.broken = fmt.Errorf("%w: write: %v", ErrProtocol, err)
++		return Response{}, c.broken
++	}
++	resp, err := c.readResponse(ctx)
++	if err != nil {
++		c.broken = fmt.Errorf("%w: %w", ErrProtocol, err)
++		return Response{}, c.broken
++	}
++	if !bytes.Equal(bytes.TrimSpace(resp.ID), req.ID) {
++		c.broken = fmt.Errorf("%w: response id %s does not answer request %s", ErrProtocol, resp.ID, req.ID)
++		c.abort()
++		return Response{}, c.broken
++	}
++	if !resp.OK {
++		if resp.Error == nil {
++			c.broken = fmt.Errorf("%w: response is not ok and carries no error", ErrProtocol)
++			return Response{}, c.broken
++		}
++		return resp, resp.Error
++	}
++	return resp, nil
++}
++
++// readResponse reads one line; ctx cancellation kills the server so the
++// blocked read returns.
++func (c *Client) readResponse(ctx context.Context) (Response, error) {
++	type read struct {
++		line []byte
++		err  error
++	}
++	done := make(chan read, 1)
++	go func() {
++		line, err := c.lines.ReadBytes('\n')
++		done <- read{line, err}
++	}()
++	var r read
++	select {
++	case r = <-done:
++	case <-ctx.Done():
++		c.abort()
++		<-done
++		return Response{}, ctx.Err()
++	}
++	if r.err != nil {
++		switch {
++		case !errors.Is(r.err, io.EOF):
++			return Response{}, r.err
++		case len(bytes.TrimSpace(r.line)) == 0:
++			return Response{}, fmt.Errorf("server closed the stream (%v)", c.exitStatus())
++		}
++		// A final line without a newline is still one response.
++	}
++	var resp Response
++	if err := json.Unmarshal(r.line, &resp); err != nil {
++		return Response{}, fmt.Errorf("line is not a response: %v: %q", err, bytes.TrimSpace(r.line))
++	}
++	return resp, nil
++}
++
++func (c *Client) exitStatus() error {
++	c.waitLocked()
++	if c.waitE == nil {
++		return errors.New("exit 0")
++	}
++	return c.waitE
++}
++
++// waitLocked reaps the process once; callers hold no assumption about mu.
++func (c *Client) waitLocked() {
++	if !c.waited {
++		c.waited = true
++		c.waitE = c.cmd.Wait()
++	}
++}
++
++// abort kills the server and reaps it.
++func (c *Client) abort() error {
++	_ = c.stdin.Close()
++	_ = c.cmd.Process.Kill()
++	c.waitLocked()
++	return c.waitE
++}
++
++// Close ends the session: stdin is closed, the server exits on EOF, and a
++// non-zero exit is returned.
++func (c *Client) Close() error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if errors.Is(c.broken, ErrClosed) {
++		return nil
++	}
++	c.broken = ErrClosed
++	_ = c.stdin.Close()
++	c.waitLocked()
++	return c.waitE
++}
++
++// Describe returns the record view (record fields plus label, fingerprint,
++// exposure, operations, findings); numbers are json.Number.
++func (c *Client) Describe(ctx context.Context) (map[string]any, error) {
++	resp, err := c.Call(ctx, Request{Op: OpDescribe})
++	if err != nil {
++		return nil, err
++	}
++	view := map[string]any{}
++	dec := json.NewDecoder(bytes.NewReader(resp.Result))
++	dec.UseNumber()
++	if err := dec.Decode(&view); err != nil {
++		return nil, fmt.Errorf("%w: describe result: %v", ErrProtocol, err)
++	}
++	return view, nil
++}
++
++// PublicKey returns the SPKI DER and the parsed P-256 public key.
++func (c *Client) PublicKey(ctx context.Context) ([]byte, *ecdsa.PublicKey, error) {
++	resp, err := c.Call(ctx, Request{Op: OpPub, Format: FormatSPKIDER})
++	if err != nil {
++		return nil, nil, err
++	}
++	var pub PublicKey
++	if err := json.Unmarshal(resp.Result, &pub); err != nil {
++		return nil, nil, fmt.Errorf("%w: pub result: %v", ErrProtocol, err)
++	}
++	der, err := base64.StdEncoding.DecodeString(pub.DERBase64)
++	if err != nil {
++		return nil, nil, fmt.Errorf("%w: pub der_base64: %v", ErrProtocol, err)
++	}
++	parsed, err := x509.ParsePKIXPublicKey(der)
++	if err != nil {
++		return nil, nil, fmt.Errorf("%w: pub SPKI: %v", ErrProtocol, err)
++	}
++	ec, ok := parsed.(*ecdsa.PublicKey)
++	if !ok {
++		return nil, nil, fmt.Errorf("%w: pub SPKI is %T, not ECDSA", ErrProtocol, parsed)
++	}
++	return der, ec, nil
++}
++
++// PublicKeyPEM returns the SPKI as a PUBLIC KEY PEM block.
++func (c *Client) PublicKeyPEM(ctx context.Context) (string, error) {
++	resp, err := c.Call(ctx, Request{Op: OpPub, Format: FormatSPKIPEM})
++	if err != nil {
++		return "", err
++	}
++	var pub PublicKey
++	if err := json.Unmarshal(resp.Result, &pub); err != nil {
++		return "", fmt.Errorf("%w: pub result: %v", ErrProtocol, err)
++	}
++	return pub.PEM, nil
++}
++
++// Sign signs a 32-byte SHA-256 digest; format is FormatDERLowS, FormatRaw
++// or "" for the record's default. It returns the signature bytes and the
++// full result.
++func (c *Client) Sign(ctx context.Context, digest []byte, format string) ([]byte, Signature, error) {
++	resp, err := c.Call(ctx, Request{Op: OpSign, Digest: hex.EncodeToString(digest), Format: format})
++	if err != nil {
++		return nil, Signature{}, err
++	}
++	var sig Signature
++	if err := json.Unmarshal(resp.Result, &sig); err != nil {
++		return nil, Signature{}, fmt.Errorf("%w: sign result: %v", ErrProtocol, err)
++	}
++	raw, err := hex.DecodeString(sig.Signature)
++	if err != nil {
++		return nil, Signature{}, fmt.Errorf("%w: sign signature hex: %v", ErrProtocol, err)
++	}
++	return raw, sig, nil
++}
++
++// Verify judges digest and signature under the bound key. A false verdict
++// returns Verdict.Verified false together with the signature_invalid
++// *Error; a malformed or high-S signature is an *Error without a verdict
++// (high_s_refused carries the partial verdict).
++func (c *Client) Verify(ctx context.Context, digest, signature []byte, format string, allowHighS bool) (Verdict, error) {
++	resp, err := c.Call(ctx, Request{Op: OpVerify, Digest: hex.EncodeToString(digest), Signature: hex.EncodeToString(signature), Format: format, AllowHighS: allowHighS})
++	var verdict Verdict
++	if len(resp.Result) != 0 {
++		if decodeErr := json.Unmarshal(resp.Result, &verdict); decodeErr != nil {
++			return Verdict{}, fmt.Errorf("%w: verify result: %v", ErrProtocol, decodeErr)
++		}
++	}
++	return verdict, err
++}
++
++// CryptoSigner adapts the bound key to crypto.Signer (crypto/x509
++// CreateCertificate, CreateCertificateRequest, ...). Public is fetched now;
++// Sign accepts only a 32-byte SHA-256 digest and emits X9.62 DER (low-S),
++// the encoding crypto/x509 expects for ECDSA.
++func (c *Client) CryptoSigner(ctx context.Context) (crypto.Signer, error) {
++	_, pub, err := c.PublicKey(ctx)
++	if err != nil {
++		return nil, err
++	}
++	return &cryptoSigner{client: c, ctx: ctx, pub: pub}, nil
++}
++
++type cryptoSigner struct {
++	client *Client
++	ctx    context.Context
++	pub    *ecdsa.PublicKey
++}
++
++func (s *cryptoSigner) Public() crypto.PublicKey { return s.pub }
++
++func (s *cryptoSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
++	if opts == nil || opts.HashFunc() != crypto.SHA256 {
++		return nil, fmt.Errorf("signerclient: the vault signs SHA-256 digests only, got %v", opts)
++	}
++	if len(digest) != DigestSize {
++		return nil, fmt.Errorf("signerclient: digest must be %d bytes, got %d", DigestSize, len(digest))
++	}
++	sig, _, err := s.client.Sign(s.ctx, digest, FormatDERLowS)
++	return sig, err
++}
+diff --git a/internal/keyvault/signerclient/client_test.go b/internal/keyvault/signerclient/client_test.go
+new file mode 100644
+index 0000000..0a1a47a
+--- /dev/null
++++ b/internal/keyvault/signerclient/client_test.go
+@@ -0,0 +1,397 @@
++package signerclient_test
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"crypto"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/sha256"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"math/big"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/relux-works/mac-infra/internal/keyvault/signerclient"
++)
++
++// The test binary doubles as a scripted fake server when
++// SIGNERCLIENT_FAKE_SERVER names a scenario, so the client's own gates
++// (contract check, id match, stream end, cancellation) are driven
++// without a keychain.
++func TestMain(m *testing.M) {
++	if scenario := os.Getenv("SIGNERCLIENT_FAKE_SERVER"); scenario != "" {
++		os.Exit(fakeServer(scenario))
++	}
++	os.Exit(m.Run())
++}
++
++func fakeServer(scenario string) int {
++	out := bufio.NewWriter(os.Stdout)
++	defer out.Flush()
++	write := func(v any) {
++		data, _ := json.Marshal(v)
++		out.Write(append(data, '\n'))
++		out.Flush()
++	}
++	hello := func() {
++		write(signerclient.Response{Contract: signerclient.Contract, OK: true, Result: json.RawMessage(`{"tool":"fake","tool_version":"0","address":"test/fake","kind":"key","version":0,"label":"works.relux.mac-keyvault.key.test.fake.v1","fingerprint":"f","ops":["describe","pub","sign","verify"]}`)})
++	}
++	in := bufio.NewReader(os.Stdin)
++	switch scenario {
++	case "contract-2":
++		write(signerclient.Response{Contract: 2, OK: true, Result: json.RawMessage(`{}`)})
++		return 0
++	case "no-contract":
++		write(signerclient.Response{OK: true, Result: json.RawMessage(`{}`)})
++		return 0
++	case "startup-error":
++		write(signerclient.Response{Contract: signerclient.Contract, Error: &signerclient.Error{Code: "not_found", Message: "key not found: test/fake", Hint: "list shows every record"}})
++		return 1
++	case "garbage":
++		fmt.Fprintln(out, "mac-keyvault: something that is not JSON")
++		return 0
++	case "id-mismatch":
++		hello()
++		for {
++			if _, err := in.ReadBytes('\n'); err != nil {
++				return 0
++			}
++			write(signerclient.Response{ID: json.RawMessage("999"), OK: true, Result: json.RawMessage(`{}`)})
++		}
++	case "exit-early":
++		hello()
++		return 0
++	case "silent":
++		hello()
++		for {
++			if _, err := in.ReadBytes('\n'); err != nil {
++				return 0
++			}
++		}
++	case "ok":
++		hello()
++		priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++		spki, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
++		for {
++			line, err := in.ReadBytes('\n')
++			if err != nil {
++				return 0
++			}
++			var req signerclient.Request
++			if err := json.Unmarshal(line, &req); err != nil {
++				write(signerclient.Response{ID: json.RawMessage("null"), Error: &signerclient.Error{Code: signerclient.CodeBadRequest, Message: err.Error(), Hint: "h"}})
++				continue
++			}
++			switch req.Op {
++			case signerclient.OpPub:
++				write(signerclient.Response{ID: req.ID, OK: true, Result: mustJSON(signerclient.PublicKey{Label: "l", Fingerprint: "f", Format: signerclient.FormatSPKIDER, DERBase64: base64.StdEncoding.EncodeToString(spki)})})
++			case signerclient.OpSign:
++				digest, _ := hex.DecodeString(req.Digest)
++				der, _ := ecdsa.SignASN1(rand.Reader, priv, digest)
++				write(signerclient.Response{ID: req.ID, OK: true, Result: mustJSON(signerclient.Signature{Label: "l", Fingerprint: "f", Hash: signerclient.Hash, Digest: req.Digest, Format: signerclient.FormatDERLowS, Signature: hex.EncodeToString(der), LowS: true})})
++			default:
++				write(signerclient.Response{ID: req.ID, Error: &signerclient.Error{Code: signerclient.CodeUnknownOp, Message: req.Op, Hint: "h"}})
++			}
++		}
++	}
++	fmt.Fprintln(os.Stderr, "unknown scenario", scenario)
++	return 2
++}
++
++func mustJSON(v any) json.RawMessage {
++	data, err := json.Marshal(v)
++	if err != nil {
++		panic(err)
++	}
++	return data
++}
++
++func startFake(t *testing.T, scenario string) (*signerclient.Client, error) {
++	t.Helper()
++	t.Setenv("SIGNERCLIENT_FAKE_SERVER", scenario)
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	t.Cleanup(cancel)
++	client, err := signerclient.Start(ctx, signerclient.Options{Binary: os.Args[0], Address: "test/fake"})
++	if err == nil {
++		t.Cleanup(func() { _ = client.Close() })
++	}
++	return client, err
++}
++
++// Start refuses a hello that announces contract 2 or no contract at all
++// with ErrContract, a hello that is not JSON with ErrProtocol, and a
++// startup failure hello (ok=false) with the server's *Error and code; a
++// scenario that speaks contract 1 starts (positive control). None of
++// these leaves a running process: Close after a failed Start is not
++// reachable, so the process is reaped inside Start.
++func TestStartRefusesForeignContractAndSurfacesStartupErrors(t *testing.T) {
++	for _, scenario := range []string{"contract-2", "no-contract"} {
++		if _, err := startFake(t, scenario); !errors.Is(err, signerclient.ErrContract) {
++			t.Errorf("%s: %v, want ErrContract", scenario, err)
++		}
++	}
++	if _, err := startFake(t, "garbage"); !errors.Is(err, signerclient.ErrProtocol) {
++		t.Errorf("garbage: %v, want ErrProtocol", err)
++	}
++	var remote *signerclient.Error
++	if _, err := startFake(t, "startup-error"); !errors.As(err, &remote) || remote.Code != "not_found" {
++		t.Errorf("startup-error: %v, want *Error not_found", err)
++	}
++	client, err := startFake(t, "ok")
++	if err != nil {
++		t.Fatalf("positive control: %v", err)
++	}
++	if client.Hello().Label != "works.relux.mac-keyvault.key.test.fake.v1" || len(client.Hello().Ops) != 4 {
++		t.Fatalf("hello: %+v", client.Hello())
++	}
++}
++
++// A response whose id is not the pending request's is ErrProtocol and
++// the client stays broken (the next call fails without writing); a server
++// that ends the stream after the hello is ErrProtocol on the first call;
++// a server that never answers is ended by the context (ctx.Err() is
++// returned and the process is killed); a remote refusal (unknown_op from
++// the fake) is a *Error and the client stays usable.
++func TestCallProtocolViolationsAndRemoteErrors(t *testing.T) {
++	client, err := startFake(t, "id-mismatch")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := client.Call(context.Background(), signerclient.Request{Op: signerclient.OpPub}); !errors.Is(err, signerclient.ErrProtocol) {
++		t.Fatalf("id mismatch: %v", err)
++	}
++	if _, err := client.Call(context.Background(), signerclient.Request{Op: signerclient.OpPub}); !errors.Is(err, signerclient.ErrProtocol) {
++		t.Fatalf("broken client accepted a call: %v", err)
++	}
++
++	client, err = startFake(t, "exit-early")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := client.Call(context.Background(), signerclient.Request{Op: signerclient.OpPub}); !errors.Is(err, signerclient.ErrProtocol) {
++		t.Fatalf("exit-early: %v", err)
++	}
++
++	client, err = startFake(t, "silent")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
++	defer cancel()
++	if _, err := client.Call(ctx, signerclient.Request{Op: signerclient.OpPub}); !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("silent: %v, want DeadlineExceeded", err)
++	}
++
++	client, err = startFake(t, "ok")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var remote *signerclient.Error
++	if _, err := client.Describe(context.Background()); !errors.As(err, &remote) || remote.Code != signerclient.CodeUnknownOp {
++		t.Fatalf("remote error: %v", err)
++	}
++	if _, _, err := client.PublicKey(context.Background()); err != nil {
++		t.Fatalf("client unusable after a remote error: %v", err)
++	}
++}
++
++// The typed calls decode the contract's result shapes: PublicKey parses
++// the SPKI, Sign returns DER that crypto/ecdsa verifies under it, and
++// CryptoSigner signs an x509 certificate that checks against itself;
++// CryptoSigner refuses a non-SHA-256 SignerOpts and a mis-sized digest
++// before any request is sent.
++func TestTypedCallsAgainstFake(t *testing.T) {
++	client, err := startFake(t, "ok")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx := context.Background()
++	_, pub, err := client.PublicKey(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	digest := sha256.Sum256([]byte("typed calls"))
++	der, sig, err := client.Sign(ctx, digest[:], signerclient.FormatDERLowS)
++	if err != nil || sig.Digest != hex.EncodeToString(digest[:]) || !ecdsa.VerifyASN1(pub, digest[:], der) {
++		t.Fatalf("sign: %v %+v", err, sig)
++	}
++	signer, err := client.CryptoSigner(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !signer.Public().(*ecdsa.PublicKey).Equal(pub) {
++		t.Fatal("CryptoSigner public key differs from pub")
++	}
++	if _, err := signer.Sign(rand.Reader, digest[:], crypto.SHA512); err == nil {
++		t.Fatal("CryptoSigner accepted SHA-512 opts")
++	}
++	if _, err := signer.Sign(rand.Reader, digest[:31], crypto.SHA256); err == nil {
++		t.Fatal("CryptoSigner accepted a 31-byte digest")
++	}
++	certDER := selfSign(t, signer)
++	cert, err := x509.ParseCertificate(certDER)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := cert.CheckSignatureFrom(cert); err != nil {
++		t.Fatalf("self-signed certificate does not verify: %v", err)
++	}
++}
++
++func selfSign(t *testing.T, signer crypto.Signer) []byte {
++	t.Helper()
++	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "signerclient test"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
++	certDER, err := x509.CreateCertificate(rand.Reader, template, template, signer.Public(), signer)
++	if err != nil {
++		t.Fatalf("CreateCertificate through the vault signer: %v", err)
++	}
++	return certDER
++}
++
++// buildBinary compiles cmd/mac-keyvault into a temp dir: the e2e test
++// drives the real executable, not the package.
++func buildBinary(t *testing.T) string {
++	t.Helper()
++	binary := filepath.Join(t.TempDir(), "mac-keyvault")
++	build := exec.Command("go", "build", "-o", binary, "../../../cmd/mac-keyvault")
++	if out, err := build.CombinedOutput(); err != nil {
++		t.Fatalf("go build: %v\n%s", err, out)
++	}
++	return binary
++}
++
++func runCLI(t *testing.T, binary string, args ...string) (int, map[string]any) {
++	t.Helper()
++	cmd := exec.Command(binary, append([]string{"--json"}, args...)...)
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout, cmd.Stderr = &stdout, &stderr
++	err := cmd.Run()
++	code := 0
++	var exit *exec.ExitError
++	if errors.As(err, &exit) {
++		code = exit.ExitCode()
++	} else if err != nil {
++		t.Fatalf("%v: %v", args, err)
++	}
++	var envelope map[string]any
++	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
++		t.Fatalf("%v: not an envelope: %s / %s", args, stdout.String(), stderr.String())
++	}
++	return code, envelope
++}
++
++// End to end through the built mac-keyvault binary on this Mac: a key
++// under service test is created by the CLI, the client starts `signer
++// serve` against it and the hello names a test label; Describe returns
++// the record, PublicKey parses, Sign (DER and raw) verifies with
++// crypto/ecdsa under that key, Verify returns true, a tampered signature
++// is a *Error signature_invalid with Verdict.Verified false and the
++// session stays usable, CryptoSigner produces a self-signed X.509
++// certificate that checks against itself, Close returns nil (exit 0 on
++// EOF). Starting against a raw label is a *Error foreign_label from the
++// binary. The key is deleted afterwards. Stated bound: kvctl is not
++// code yet, so this Go client is the only consumer the contract is
++// proven against.
++func TestClientAgainstBuiltBinaryAndLoginKeychain(t *testing.T) {
++	if os.Getenv("MAC_KEYVAULT_SKIP_KEYCHAIN") != "" {
++		t.Skip("MAC_KEYVAULT_SKIP_KEYCHAIN set")
++	}
++	binary := buildBinary(t)
++	purpose := fmt.Sprintf("signerclient-e2e-%d", os.Getpid())
++	address := "test/" + purpose
++	if code, env := runCLI(t, binary, "init", "--service", "test", "--purpose", purpose, "--usages", "sign,verify", "--title", "signerclient e2e"); code != 0 {
++		t.Fatalf("init: %v", env)
++	}
++	t.Cleanup(func() {
++		if code, env := runCLI(t, binary, "delete", address, "--confirm"); code != 0 {
++			t.Errorf("cleanup delete: %v", env)
++		}
++	})
++	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
++	defer cancel()
++
++	var remote *signerclient.Error
++	if _, err := signerclient.Start(ctx, signerclient.Options{Binary: binary, Address: "works.relux.mac-keyvault.key.test." + purpose + ".v1"}); !errors.As(err, &remote) || remote.Code != "foreign_label" {
++		t.Fatalf("raw label: %v, want foreign_label", err)
++	}
++	if _, err := signerclient.Start(ctx, signerclient.Options{Binary: binary, Address: "test/" + purpose + "-absent"}); !errors.As(err, &remote) || remote.Code != "not_found" {
++		t.Fatalf("absent: %v, want not_found", err)
++	}
++
++	client, err := signerclient.Start(ctx, signerclient.Options{Binary: binary, Address: address, Stderr: os.Stderr})
++	if err != nil {
++		t.Fatal(err)
++	}
++	hello := client.Hello()
++	if !strings.HasPrefix(hello.Label, "works.relux.mac-keyvault.key.test.") || hello.Label != "works.relux.mac-keyvault.key.test."+purpose+".v1" || hello.Tool != "mac-keyvault" || strings.Join(hello.Ops, ",") != strings.Join(signerclient.Ops, ",") {
++		t.Fatalf("hello: %+v", hello)
++	}
++	view, err := client.Describe(ctx)
++	if err != nil || view["label"] != hello.Label || view["title"] != "signerclient e2e" || view["fingerprint"] != hello.Fingerprint {
++		t.Fatalf("describe: %v %v", err, view)
++	}
++	spki, pub, err := client.PublicKey(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(spki)
++	if base64.RawURLEncoding.EncodeToString(sum[:]) != hello.Fingerprint {
++		t.Fatal("fingerprint is not SHA-256 of the streamed SPKI")
++	}
++	pem, err := client.PublicKeyPEM(ctx)
++	if err != nil || !strings.HasPrefix(pem, "-----BEGIN PUBLIC KEY-----") {
++		t.Fatalf("pem: %v %q", err, pem)
++	}
++	digest := sha256.Sum256([]byte("e2e " + purpose))
++	der, sig, err := client.Sign(ctx, digest[:], "")
++	if err != nil || sig.Format != signerclient.FormatDERLowS || !sig.LowS || !ecdsa.VerifyASN1(pub, digest[:], der) {
++		t.Fatalf("sign: %v %+v", err, sig)
++	}
++	raw, sigRaw, err := client.Sign(ctx, digest[:], signerclient.FormatRaw)
++	if err != nil || sigRaw.Format != signerclient.FormatRaw || len(raw) != 64 || !ecdsa.Verify(pub, digest[:], new(big.Int).SetBytes(raw[:32]), new(big.Int).SetBytes(raw[32:])) {
++		t.Fatalf("sign raw: %v %+v", err, sigRaw)
++	}
++	verdict, err := client.Verify(ctx, digest[:], der, signerclient.FormatDERLowS, false)
++	if err != nil || !verdict.Verified {
++		t.Fatalf("verify: %v %+v", err, verdict)
++	}
++	tampered := append([]byte(nil), der...)
++	tampered[len(tampered)-1] ^= 0x01
++	verdict, err = client.Verify(ctx, digest[:], tampered, signerclient.FormatDERLowS, false)
++	if !errors.As(err, &remote) || remote.Code != "signature_invalid" || verdict.Verified {
++		t.Fatalf("tampered: %v %+v", err, verdict)
++	}
++	if _, err := client.Verify(ctx, digest[:31], der, signerclient.FormatDERLowS, false); !errors.As(err, &remote) || remote.Code != "invalid_digest" {
++		t.Fatalf("short digest: %v", err)
++	}
++	signer, err := client.CryptoSigner(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, err := x509.ParseCertificate(selfSign(t, signer))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := cert.CheckSignatureFrom(cert); err != nil {
++		t.Fatalf("certificate signed through the vault does not verify: %v", err)
++	}
++	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(pub) {
++		t.Fatal("certificate carries another public key")
++	}
++	if err := client.Close(); err != nil {
++		t.Fatalf("Close (exit on EOF): %v", err)
++	}
++}
+diff --git a/internal/keyvault/signerclient/wire.go b/internal/keyvault/signerclient/wire.go
+new file mode 100644
+index 0000000..e10a41c
+--- /dev/null
++++ b/internal/keyvault/signerclient/wire.go
+@@ -0,0 +1,156 @@
++// Package signerclient is the machine contract between mac-keyvault and a
++// consumer that needs signatures from a vault key without touching the
++// keychain itself (kvctl's macos-keychain backend). It has no dependency
++// outside the standard library so a consumer can vendor it verbatim.
++//
++// Wire (contract 1): `mac-keyvault signer serve --address <service>/<purpose>
++// [--kind key] [--version N]` speaks JSON lines over stdin/stdout. The
++// first line the server writes is the hello: {contract: 1, ok: true,
++// result: Hello}, or {contract: 1, ok: false, error} when the address does
++// not resolve (the process then exits with the CLI exit code). After the
++// hello every stdin line is one Request and produces exactly one Response
++// line in order: {id, ok, result} or {id, ok: false, error{code, message,
++// hint, os_status?}}; verify additionally carries result.verified on a
++// false verdict. A malformed line, an unknown op, a missing id or a
++// refused operation is answered with an error response and never ends the
++// stream; EOF on stdin ends the server with exit 0. Blank lines are
++// ignored. Requests are served sequentially in arrival order.
++package signerclient
++
++import "encoding/json"
++
++// Contract is the wire version this package speaks; the server announces
++// it in the hello line and a client refuses any other value.
++const Contract = 1
++
++// Operations of contract 1.
++const (
++	OpDescribe = "describe"
++	OpPub      = "pub"
++	OpSign     = "sign"
++	OpVerify   = "verify"
++)
++
++// Ops lists the contract-1 operations in the order the hello announces them.
++var Ops = []string{OpDescribe, OpPub, OpSign, OpVerify}
++
++// Public-key and signature representations of contract 1. They are the
++// record vocabulary of mac-keyvault; the server refuses any other value
++// with code bad_request.
++const (
++	FormatSPKIDER = "spki-der"        // pub: result.der_base64
++	FormatSPKIPEM = "spki-pem"        // pub: result.pem
++	FormatDERLowS = "ecdsa-der-low-s" // sign/verify: strict X9.62 DER, s in the low half
++	FormatRaw     = "ecdsa-raw"       // sign/verify: 64 bytes r||s
++	Hash          = "sha256"          // the only digest the contract signs
++	DigestSize    = 32
++)
++
++// Error codes the server itself produces (the operation codes — not_found,
++// usage_refused, expired, invalid_digest, invalid_signature,
++// high_s_refused, signature_invalid, metadata_unknown,
++// unsupported_primitive, security — are the mac-keyvault error contract
++// and pass through unchanged).
++const (
++	CodeBadRequest = "bad_request" // line is not one JSON object, or a parameter is malformed for the op
++	CodeMissingID  = "missing_id"  // id absent, null, or not a string/number
++	CodeUnknownOp  = "unknown_op"  // op absent or outside Ops
++)
++
++// Request is one stdin line. id is echoed verbatim in the response and must
++// be a JSON string or number. Fields that an op does not use must be
++// absent; an unknown member is bad_request.
++type Request struct {
++	ID json.RawMessage `json:"id,omitempty"`
++	Op string          `json:"op"`
++	// Format: pub takes spki-der (default) or spki-pem; sign and verify
++	// take ecdsa-der-low-s or ecdsa-raw (sign defaults to the record's
++	// format.signature, verify to ecdsa-der-low-s).
++	Format string `json:"format,omitempty"`
++	// Digest is the SHA-256 digest as 64 hex characters (sign, verify).
++	Digest string `json:"digest,omitempty"`
++	// Signature is the signature bytes as hex in the given format (verify).
++	Signature string `json:"signature,omitempty"`
++	// AllowHighS accepts a malleable (high-S) signature on verify.
++	AllowHighS bool `json:"allow_high_s,omitempty"`
++}
++
++// Response is one stdout line. Contract is set only on the hello line; ID
++// is absent on the hello, otherwise the request's id (null when the
++// request carried none).
++type Response struct {
++	Contract int             `json:"contract,omitempty"`
++	ID       json.RawMessage `json:"id,omitempty"`
++	OK       bool            `json:"ok"`
++	Result   json.RawMessage `json:"result,omitempty"`
++	Error    *Error          `json:"error,omitempty"`
++}
++
++// Error is the mac-keyvault error contract: a stable code, a message in the
++// caller's terms, a hint that says what to do next, and the OSStatus when
++// Security.framework produced the failure.
++type Error struct {
++	Code     string `json:"code"`
++	Message  string `json:"message"`
++	Hint     string `json:"hint"`
++	OSStatus int    `json:"os_status,omitempty"`
++}
++
++func (e *Error) Error() string {
++	if e.OSStatus != 0 {
++		return e.Code + ": " + e.Message + " (OSStatus " + itoa(e.OSStatus) + ")"
++	}
++	return e.Code + ": " + e.Message
++}
++
++// Hello is the result of the hello line: what the server is bound to.
++type Hello struct {
++	Tool        string   `json:"tool"`
++	ToolVersion string   `json:"tool_version"`
++	Address     string   `json:"address"`
++	Kind        string   `json:"kind"`
++	Version     int      `json:"version"` // requested generation; 0 = newest at each request
++	Label       string   `json:"label"`   // the generation resolved at start
++	Fingerprint string   `json:"fingerprint"`
++	Ops         []string `json:"ops"`
++}
++
++// PublicKey is the result of pub.
++type PublicKey struct {
++	Label       string `json:"label"`
++	Fingerprint string `json:"fingerprint"`
++	Format      string `json:"format"`
++	DERBase64   string `json:"der_base64,omitempty"`
++	PEM         string `json:"pem,omitempty"`
++}
++
++// Signature is the result of sign.
++type Signature struct {
++	Label           string `json:"label"`
++	Fingerprint     string `json:"fingerprint"`
++	Hash            string `json:"hash"`
++	Digest          string `json:"digest"`
++	Format          string `json:"format"`
++	Signature       string `json:"signature"` // hex
++	SignatureBase64 string `json:"signature_base64"`
++	LowS            bool   `json:"low_s"`
++	Normalized      bool   `json:"normalized"`
++}
++
++// Verdict is the result of verify; on a false verdict it travels next to
++// the signature_invalid error.
++type Verdict struct {
++	Label        string `json:"label,omitempty"`       // absent when the signature was refused before the key was read
++	Fingerprint  string `json:"fingerprint,omitempty"` // same
++	Hash         string `json:"hash"`
++	Digest       string `json:"digest"`
++	Format       string `json:"format"`
++	LowS         bool   `json:"low_s"`
++	HighSAllowed bool   `json:"high_s_allowed"`
++	Verified     bool   `json:"verified"`
++}
++
++func itoa(v int) string {
++	b, _ := json.Marshal(v)
++	return string(b)
++}
+diff --git a/internal/keyvault/testdata/signer-v1/expired-00-hello.json b/internal/keyvault/testdata/signer-v1/expired-00-hello.json
+new file mode 100644
+index 0000000..abc06f8
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/expired-00-hello.json
+@@ -0,0 +1,5 @@
++{
++  "session": "expired",
++  "note": "hello for a record whose validity.not_after passed",
++  "response": "{\"contract\":1,\"ok\":true,\"result\":{\"tool\":\"mac-keyvault\",\"tool_version\":\"test\",\"address\":\"test/expired\",\"kind\":\"key\",\"version\":0,\"label\":\"works.relux.mac-keyvault.key.test.expired.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"ops\":[\"describe\",\"pub\",\"sign\",\"verify\"]}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/expired-01-sign-expired.json b/internal/keyvault/testdata/signer-v1/expired-01-sign-expired.json
+new file mode 100644
+index 0000000..b20b6f0
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/expired-01-sign-expired.json
+@@ -0,0 +1,10 @@
++{
++  "session": "expired",
++  "note": "negative: expired",
++  "request": {
++    "id": 1,
++    "op": "sign",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2"
++  },
++  "response": "{\"id\":1,\"ok\":false,\"error\":{\"code\":\"expired\",\"message\":\"works.relux.mac-keyvault.key.test.expired.v1 expired at 2026-01-01T00:00:00Z (validity.not_after); ecdsa-sha256-sign is refused\",\"hint\":\"rotate creates the next generation with the same not_after; init a fresh record for a new validity\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/expired-02-describe.json b/internal/keyvault/testdata/signer-v1/expired-02-describe.json
+new file mode 100644
+index 0000000..150643a
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/expired-02-describe.json
+@@ -0,0 +1,9 @@
++{
++  "session": "expired",
++  "note": "describe reports validity_expired and no sign operation",
++  "request": {
++    "id": 2,
++    "op": "describe"
++  },
++  "response": "{\"id\":2,\"ok\":true,\"result\":{\"algorithm\":\"ec-p256\",\"created\":\"2023-11-14T22:13:20Z\",\"description\":\"signer contract v1 golden fixture\",\"exposure\":\"never\",\"extraction\":\"none\",\"findings\":[\"validity_expired\"],\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"format\":{\"public\":\"spki-der\",\"signature\":\"ecdsa-der-low-s\"},\"issuer\":null,\"kind\":\"key\",\"label\":\"works.relux.mac-keyvault.key.test.expired.v1\",\"meta\":{\"owner\":\"golden\"},\"operations\":[{\"name\":\"ecdsa-sha256-verify\",\"input\":\"sha256-digest+signature\",\"output\":\"verdict\",\"via\":\"verify\"},{\"name\":\"ecies-p256-encrypt\",\"input\":\"payload\",\"output\":\"envelope:ecies-x963-sha256-aesgcm\",\"via\":\"reserved\"},{\"name\":\"export-public\",\"input\":\"\",\"output\":\"spki-der|spki-pem|jwk\",\"via\":\"pub\"}],\"origin\":{\"host\":\"testhost\",\"source\":\"generated\",\"tool\":\"mac-keyvault/test\",\"user\":\"tester\"},\"purpose\":\"expired\",\"schema\":2,\"service\":\"test\",\"store\":\"keychain\",\"title\":\"golden expired\",\"usages\":[\"sign\",\"verify\"],\"validity\":{\"not_after\":\"2026-01-01T00:00:00Z\",\"not_before\":null},\"version\":1}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/fixture-key.json b/internal/keyvault/testdata/signer-v1/fixture-key.json
+new file mode 100644
+index 0000000..ee0078e
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/fixture-key.json
+@@ -0,0 +1,5 @@
++{
++  "digest_hex": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++  "signature_der_hex": "304402200f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a02201a2834bc8f7b827c87ccaf03f76396c9e64d21ea65138b0337b927c4ddbee652",
++  "spki_der_base64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzy1HdI63vAcAf4cUlYvWpS6iaeaI6ROZ8mBfKzQxrvlI9Q72+ezK4lkUbdhWk/LOLq9ywBPyt9SQyXupx+dllA=="
++}
+diff --git a/internal/keyvault/testdata/signer-v1/missing-00-hello.json b/internal/keyvault/testdata/signer-v1/missing-00-hello.json
+new file mode 100644
+index 0000000..23ae1bb
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/missing-00-hello.json
+@@ -0,0 +1,5 @@
++{
++  "session": "missing",
++  "note": "negative: startup failure hello with not_found; no further lines",
++  "response": "{\"contract\":1,\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"key not found: test/missing\",\"hint\":\"no version of test/missing exists for any kind; list shows every record\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-00-hello.json b/internal/keyvault/testdata/signer-v1/signer-00-hello.json
+new file mode 100644
+index 0000000..7f3729f
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-00-hello.json
+@@ -0,0 +1,5 @@
++{
++  "session": "signer",
++  "note": "hello line: contract 1, label, fingerprint, ops",
++  "response": "{\"contract\":1,\"ok\":true,\"result\":{\"tool\":\"mac-keyvault\",\"tool_version\":\"test\",\"address\":\"test/signer\",\"kind\":\"key\",\"version\":0,\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"ops\":[\"describe\",\"pub\",\"sign\",\"verify\"]}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-01-describe.json b/internal/keyvault/testdata/signer-v1/signer-01-describe.json
+new file mode 100644
+index 0000000..1bcff62
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-01-describe.json
+@@ -0,0 +1,9 @@
++{
++  "session": "signer",
++  "note": "describe returns the record view",
++  "request": {
++    "id": 1,
++    "op": "describe"
++  },
++  "response": "{\"id\":1,\"ok\":true,\"result\":{\"algorithm\":\"ec-p256\",\"created\":\"2023-11-14T22:13:20Z\",\"description\":\"signer contract v1 golden fixture\",\"exposure\":\"never\",\"extraction\":\"none\",\"findings\":[],\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"format\":{\"public\":\"spki-der\",\"signature\":\"ecdsa-der-low-s\"},\"issuer\":null,\"kind\":\"key\",\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"meta\":{\"owner\":\"golden\"},\"operations\":[{\"name\":\"ecdsa-sha256-sign\",\"input\":\"sha256-digest\",\"output\":\"ecdsa-der-low-s|ecdsa-raw\",\"via\":\"sign\"},{\"name\":\"ecdsa-sha256-verify\",\"input\":\"sha256-digest+signature\",\"output\":\"verdict\",\"via\":\"verify\"},{\"name\":\"ecies-p256-encrypt\",\"input\":\"payload\",\"output\":\"envelope:ecies-x963-sha256-aesgcm\",\"via\":\"reserved\"},{\"name\":\"export-public\",\"input\":\"\",\"output\":\"spki-der|spki-pem|jwk\",\"via\":\"pub\"}],\"origin\":{\"host\":\"testhost\",\"source\":\"generated\",\"tool\":\"mac-keyvault/test\",\"user\":\"tester\"},\"purpose\":\"signer\",\"schema\":2,\"service\":\"test\",\"store\":\"keychain\",\"title\":\"golden signer\",\"usages\":[\"sign\",\"verify\"],\"validity\":{\"not_after\":null,\"not_before\":null},\"version\":1}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-02-pub-der.json b/internal/keyvault/testdata/signer-v1/signer-02-pub-der.json
+new file mode 100644
+index 0000000..d75e042
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-02-pub-der.json
+@@ -0,0 +1,9 @@
++{
++  "session": "signer",
++  "note": "pub defaults to spki-der base64",
++  "request": {
++    "id": 2,
++    "op": "pub"
++  },
++  "response": "{\"id\":2,\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"format\":\"spki-der\",\"der_base64\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzy1HdI63vAcAf4cUlYvWpS6iaeaI6ROZ8mBfKzQxrvlI9Q72+ezK4lkUbdhWk/LOLq9ywBPyt9SQyXupx+dllA==\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-03-pub-pem.json b/internal/keyvault/testdata/signer-v1/signer-03-pub-pem.json
+new file mode 100644
+index 0000000..abcf302
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-03-pub-pem.json
+@@ -0,0 +1,10 @@
++{
++  "session": "signer",
++  "note": "pub spki-pem",
++  "request": {
++    "id": 3,
++    "op": "pub",
++    "format": "spki-pem"
++  },
++  "response": "{\"id\":3,\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"format\":\"spki-pem\",\"pem\":\"-----BEGIN PUBLIC KEY-----\\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzy1HdI63vAcAf4cUlYvWpS6iaeaI\\n6ROZ8mBfKzQxrvlI9Q72+ezK4lkUbdhWk/LOLq9ywBPyt9SQyXupx+dllA==\\n-----END PUBLIC KEY-----\\n\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-04-sign-der.json b/internal/keyvault/testdata/signer-v1/signer-04-sign-der.json
+new file mode 100644
+index 0000000..7e08077
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-04-sign-der.json
+@@ -0,0 +1,10 @@
++{
++  "session": "signer",
++  "note": "sign defaults to the record's ecdsa-der-low-s",
++  "request": {
++    "id": 4,
++    "op": "sign",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2"
++  },
++  "response": "{\"id\":4,\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"hash\":\"sha256\",\"digest\":\"e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2\",\"format\":\"ecdsa-der-low-s\",\"signature\":\"304402200f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a02201a2834bc8f7b827c87ccaf03f76396c9e64d21ea65138b0337b927c4ddbee652\",\"signature_base64\":\"MEQCIA8Exm4+pbGDSVFZY2fZmpOfYEWeXBtH5dDxoa4T55BKAiAaKDS8j3uCfIfMrwP3Y5bJ5k0h6mUTiwM3uSfE3b7mUg==\",\"low_s\":true,\"normalized\":false}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-05-sign-raw.json b/internal/keyvault/testdata/signer-v1/signer-05-sign-raw.json
+new file mode 100644
+index 0000000..442ae1b
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-05-sign-raw.json
+@@ -0,0 +1,11 @@
++{
++  "session": "signer",
++  "note": "sign ecdsa-raw",
++  "request": {
++    "id": 5,
++    "op": "sign",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "format": "ecdsa-raw"
++  },
++  "response": "{\"id\":5,\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"hash\":\"sha256\",\"digest\":\"e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2\",\"format\":\"ecdsa-raw\",\"signature\":\"0f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a1a2834bc8f7b827c87ccaf03f76396c9e64d21ea65138b0337b927c4ddbee652\",\"signature_base64\":\"DwTGbj6lsYNJUVljZ9mak59gRZ5cG0fl0PGhrhPnkEoaKDS8j3uCfIfMrwP3Y5bJ5k0h6mUTiwM3uSfE3b7mUg==\",\"low_s\":true,\"normalized\":false}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-06-verify-der-ok.json b/internal/keyvault/testdata/signer-v1/signer-06-verify-der-ok.json
+new file mode 100644
+index 0000000..c6ab864
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-06-verify-der-ok.json
+@@ -0,0 +1,11 @@
++{
++  "session": "signer",
++  "note": "verify true",
++  "request": {
++    "id": 6,
++    "op": "verify",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "signature": "304402200f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a02201a2834bc8f7b827c87ccaf03f76396c9e64d21ea65138b0337b927c4ddbee652"
++  },
++  "response": "{\"id\":6,\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"hash\":\"sha256\",\"digest\":\"e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2\",\"format\":\"ecdsa-der-low-s\",\"low_s\":true,\"high_s_allowed\":false,\"verified\":true}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-07-verify-raw-ok.json b/internal/keyvault/testdata/signer-v1/signer-07-verify-raw-ok.json
+new file mode 100644
+index 0000000..a45cfdb
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-07-verify-raw-ok.json
+@@ -0,0 +1,12 @@
++{
++  "session": "signer",
++  "note": "verify raw true",
++  "request": {
++    "id": 7,
++    "op": "verify",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "signature": "0f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a1a2834bc8f7b827c87ccaf03f76396c9e64d21ea65138b0337b927c4ddbee652",
++    "format": "ecdsa-raw"
++  },
++  "response": "{\"id\":7,\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"hash\":\"sha256\",\"digest\":\"e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2\",\"format\":\"ecdsa-raw\",\"low_s\":true,\"high_s_allowed\":false,\"verified\":true}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-08-verify-false.json b/internal/keyvault/testdata/signer-v1/signer-08-verify-false.json
+new file mode 100644
+index 0000000..e332fc8
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-08-verify-false.json
+@@ -0,0 +1,11 @@
++{
++  "session": "signer",
++  "note": "negative: signature_invalid with verified false in result",
++  "request": {
++    "id": 8,
++    "op": "verify",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "signature": "304402200f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a02201a2834bc8f7b827c87ccaf03f76396c9e64d21ea65138b0337b927c4ddbee653"
++  },
++  "response": "{\"id\":8,\"ok\":false,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"hash\":\"sha256\",\"digest\":\"e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2\",\"format\":\"ecdsa-der-low-s\",\"low_s\":true,\"high_s_allowed\":false,\"verified\":false},\"error\":{\"code\":\"signature_invalid\",\"message\":\"signature does not verify over the digest under this public key\",\"hint\":\"the digest, the signature or the key is not the one that was signed; verdict false\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-09-verify-high-s.json b/internal/keyvault/testdata/signer-v1/signer-09-verify-high-s.json
+new file mode 100644
+index 0000000..aa60651
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-09-verify-high-s.json
+@@ -0,0 +1,11 @@
++{
++  "session": "signer",
++  "note": "negative: high_s_refused before the vault is read",
++  "request": {
++    "id": 9,
++    "op": "verify",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "signature": "304502200f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a022100e5d7cb4270847d84783350fc089c6935d699d8c342041381bc00a2fe1ea43eff"
++  },
++  "response": "{\"id\":9,\"ok\":false,\"result\":{\"hash\":\"sha256\",\"digest\":\"e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2\",\"format\":\"ecdsa-der-low-s\",\"low_s\":false,\"high_s_allowed\":false,\"verified\":false},\"error\":{\"code\":\"high_s_refused\",\"message\":\"signature s is in the high half of the P-256 order (malleable form); the vault only accepts low-S signatures\",\"hint\":\"signatures made by mac-keyvault are always low-S; set allow_high_s to accept this one knowingly\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-10-verify-high-s-allowed.json b/internal/keyvault/testdata/signer-v1/signer-10-verify-high-s-allowed.json
+new file mode 100644
+index 0000000..aefd9cd
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-10-verify-high-s-allowed.json
+@@ -0,0 +1,12 @@
++{
++  "session": "signer",
++  "note": "positive control: allow_high_s accepts the twin",
++  "request": {
++    "id": 10,
++    "op": "verify",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "signature": "304502200f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a022100e5d7cb4270847d84783350fc089c6935d699d8c342041381bc00a2fe1ea43eff",
++    "allow_high_s": true
++  },
++  "response": "{\"id\":10,\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"hash\":\"sha256\",\"digest\":\"e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2\",\"format\":\"ecdsa-der-low-s\",\"low_s\":false,\"high_s_allowed\":true,\"verified\":true}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-11-malformed-line.json b/internal/keyvault/testdata/signer-v1/signer-11-malformed-line.json
+new file mode 100644
+index 0000000..529d262
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-11-malformed-line.json
+@@ -0,0 +1,6 @@
++{
++  "session": "signer",
++  "note": "negative: bad_request, id null, stream continues",
++  "request_raw": "{\"id\": 11, \"op\": ",
++  "response": "{\"id\":null,\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"line is not one JSON object: unexpected EOF\",\"hint\":\"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-12-unknown-member.json b/internal/keyvault/testdata/signer-v1/signer-12-unknown-member.json
+new file mode 100644
+index 0000000..77be62f
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-12-unknown-member.json
+@@ -0,0 +1,11 @@
++{
++  "session": "signer",
++  "note": "negative: bad_request for a member outside the contract",
++  "request": {
++    "id": 12,
++    "op": "sign",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "bogus": 1
++  },
++  "response": "{\"id\":12,\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"request has a member or shape the contract does not define: json: unknown field \\\"bogus\\\"\",\"hint\":\"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-13-missing-id.json b/internal/keyvault/testdata/signer-v1/signer-13-missing-id.json
+new file mode 100644
+index 0000000..4469f31
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-13-missing-id.json
+@@ -0,0 +1,8 @@
++{
++  "session": "signer",
++  "note": "negative: missing_id",
++  "request": {
++    "op": "describe"
++  },
++  "response": "{\"id\":null,\"ok\":false,\"error\":{\"code\":\"missing_id\",\"message\":\"id is required and must be a JSON string or number\",\"hint\":\"send {\\\"id\\\": <string|number>, \\\"op\\\": ...}; the id is echoed in the response\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-14-null-id.json b/internal/keyvault/testdata/signer-v1/signer-14-null-id.json
+new file mode 100644
+index 0000000..344d01b
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-14-null-id.json
+@@ -0,0 +1,6 @@
++{
++  "session": "signer",
++  "note": "negative: missing_id for null",
++  "request_raw": "{\"id\":null,\"op\":\"describe\"}",
++  "response": "{\"id\":null,\"ok\":false,\"error\":{\"code\":\"missing_id\",\"message\":\"id is required and must be a JSON string or number\",\"hint\":\"send {\\\"id\\\": <string|number>, \\\"op\\\": ...}; the id is echoed in the response\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-15-object-id.json b/internal/keyvault/testdata/signer-v1/signer-15-object-id.json
+new file mode 100644
+index 0000000..be3647f
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-15-object-id.json
+@@ -0,0 +1,11 @@
++{
++  "session": "signer",
++  "note": "negative: missing_id for a non-scalar id",
++  "request": {
++    "id": {
++      "a": 1
++    },
++    "op": "describe"
++  },
++  "response": "{\"id\":null,\"ok\":false,\"error\":{\"code\":\"missing_id\",\"message\":\"id is required and must be a JSON string or number\",\"hint\":\"send {\\\"id\\\": <string|number>, \\\"op\\\": ...}; the id is echoed in the response\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-16-unknown-op.json b/internal/keyvault/testdata/signer-v1/signer-16-unknown-op.json
+new file mode 100644
+index 0000000..60c2d45
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-16-unknown-op.json
+@@ -0,0 +1,9 @@
++{
++  "session": "signer",
++  "note": "negative: unknown_op",
++  "request": {
++    "id": 16,
++    "op": "export-private"
++  },
++  "response": "{\"id\":16,\"ok\":false,\"error\":{\"code\":\"unknown_op\",\"message\":\"unknown op \\\"export-private\\\"\",\"hint\":\"ops are describe, pub, sign, verify\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-17-digest-short.json b/internal/keyvault/testdata/signer-v1/signer-17-digest-short.json
+new file mode 100644
+index 0000000..54ebbb1
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-17-digest-short.json
+@@ -0,0 +1,10 @@
++{
++  "session": "signer",
++  "note": "negative: invalid_digest (wrong length)",
++  "request": {
++    "id": 17,
++    "op": "sign",
++    "digest": "abcd"
++  },
++  "response": "{\"id\":17,\"ok\":false,\"error\":{\"code\":\"invalid_digest\",\"message\":\"digest is 2 bytes; ecdsa-sha256 takes exactly a 32-byte SHA-256 digest\",\"hint\":\"digest is the SHA-256 digest of the payload as 64 hex characters; nothing was signed\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-18-digest-not-hex.json b/internal/keyvault/testdata/signer-v1/signer-18-digest-not-hex.json
+new file mode 100644
+index 0000000..5cd1d63
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-18-digest-not-hex.json
+@@ -0,0 +1,10 @@
++{
++  "session": "signer",
++  "note": "negative: bad_request (not hex)",
++  "request": {
++    "id": 18,
++    "op": "sign",
++    "digest": "zz"
++  },
++  "response": "{\"id\":18,\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"digest must be hex: encoding/hex: invalid byte: U+007A 'z'\",\"hint\":\"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-19-sign-bad-format.json b/internal/keyvault/testdata/signer-v1/signer-19-sign-bad-format.json
+new file mode 100644
+index 0000000..8882f0c
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-19-sign-bad-format.json
+@@ -0,0 +1,11 @@
++{
++  "session": "signer",
++  "note": "negative: bad_request (format)",
++  "request": {
++    "id": 19,
++    "op": "sign",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "format": "pkcs1"
++  },
++  "response": "{\"id\":19,\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"sign format must be ecdsa-der-low-s or ecdsa-raw, got \\\"pkcs1\\\"\",\"hint\":\"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-20-pub-jwk.json b/internal/keyvault/testdata/signer-v1/signer-20-pub-jwk.json
+new file mode 100644
+index 0000000..cbb4517
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-20-pub-jwk.json
+@@ -0,0 +1,10 @@
++{
++  "session": "signer",
++  "note": "negative: bad_request (pub format outside contract)",
++  "request": {
++    "id": 20,
++    "op": "pub",
++    "format": "jwk"
++  },
++  "response": "{\"id\":20,\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"pub format must be spki-der or spki-pem, got \\\"jwk\\\"\",\"hint\":\"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-21-verify-invalid-signature.json b/internal/keyvault/testdata/signer-v1/signer-21-verify-invalid-signature.json
+new file mode 100644
+index 0000000..dc8ebdf
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-21-verify-invalid-signature.json
+@@ -0,0 +1,11 @@
++{
++  "session": "signer",
++  "note": "negative: invalid_signature",
++  "request": {
++    "id": 21,
++    "op": "verify",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "signature": "3000"
++  },
++  "response": "{\"id\":21,\"ok\":false,\"error\":{\"code\":\"invalid_signature\",\"message\":\"signature is not a DER ECDSA-Sig-Value: asn1: syntax error: sequence truncated\",\"hint\":\"pass the DER SEQUENCE {r, s} the sign command produced, or --raw for r||s; nothing was verified\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-22-describe-with-params.json b/internal/keyvault/testdata/signer-v1/signer-22-describe-with-params.json
+new file mode 100644
+index 0000000..99064ad
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-22-describe-with-params.json
+@@ -0,0 +1,10 @@
++{
++  "session": "signer",
++  "note": "negative: bad_request (describe takes no parameters)",
++  "request": {
++    "id": 22,
++    "op": "describe",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2"
++  },
++  "response": "{\"id\":22,\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"describe takes no parameters\",\"hint\":\"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-23-verify-missing-signature.json b/internal/keyvault/testdata/signer-v1/signer-23-verify-missing-signature.json
+new file mode 100644
+index 0000000..da50303
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-23-verify-missing-signature.json
+@@ -0,0 +1,10 @@
++{
++  "session": "signer",
++  "note": "negative: bad_request (signature required)",
++  "request": {
++    "id": 23,
++    "op": "verify",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2"
++  },
++  "response": "{\"id\":23,\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"verify requires signature: the signature bytes as hex\",\"hint\":\"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-24-string-id.json b/internal/keyvault/testdata/signer-v1/signer-24-string-id.json
+new file mode 100644
+index 0000000..47b2424
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-24-string-id.json
+@@ -0,0 +1,9 @@
++{
++  "session": "signer",
++  "note": "a string id is echoed verbatim",
++  "request": {
++    "id": "req-24",
++    "op": "pub"
++  },
++  "response": "{\"id\":\"req-24\",\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"format\":\"spki-der\",\"der_base64\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzy1HdI63vAcAf4cUlYvWpS6iaeaI6ROZ8mBfKzQxrvlI9Q72+ezK4lkUbdhWk/LOLq9ywBPyt9SQyXupx+dllA==\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-25-op-case.json b/internal/keyvault/testdata/signer-v1/signer-25-op-case.json
+new file mode 100644
+index 0000000..d0f53e1
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-25-op-case.json
+@@ -0,0 +1,10 @@
++{
++  "session": "signer",
++  "note": "negative: unknown_op — ops are matched exactly, SIGN is not sign",
++  "request": {
++    "id": 25,
++    "op": "SIGN",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2"
++  },
++  "response": "{\"id\":25,\"ok\":false,\"error\":{\"code\":\"unknown_op\",\"message\":\"unknown op \\\"SIGN\\\"\",\"hint\":\"ops are describe, pub, sign, verify\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-26-verify-digest-short.json b/internal/keyvault/testdata/signer-v1/signer-26-verify-digest-short.json
+new file mode 100644
+index 0000000..8af5356
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-26-verify-digest-short.json
+@@ -0,0 +1,11 @@
++{
++  "session": "signer",
++  "note": "negative: invalid_digest on verify (server gate; verify does not pass through Manager.Sign)",
++  "request": {
++    "id": 26,
++    "op": "verify",
++    "digest": "abcd",
++    "signature": "304402200f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a02201a2834bc8f7b827c87ccaf03f76396c9e64d21ea65138b0337b927c4ddbee652"
++  },
++  "response": "{\"id\":26,\"ok\":false,\"error\":{\"code\":\"invalid_digest\",\"message\":\"digest is 2 bytes; ecdsa-sha256 takes exactly a 32-byte SHA-256 digest\",\"hint\":\"digest is the SHA-256 digest of the payload as 64 hex characters; nothing was verified\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/signer-27-pub-after-errors.json b/internal/keyvault/testdata/signer-v1/signer-27-pub-after-errors.json
+new file mode 100644
+index 0000000..1e7caa3
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/signer-27-pub-after-errors.json
+@@ -0,0 +1,9 @@
++{
++  "session": "signer",
++  "note": "positive control after 17 error responses: the stream never ended",
++  "request": {
++    "id": 27,
++    "op": "pub"
++  },
++  "response": "{\"id\":27,\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.signer.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"format\":\"spki-der\",\"der_base64\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzy1HdI63vAcAf4cUlYvWpS6iaeaI6ROZ8mBfKzQxrvlI9Q72+ezK4lkUbdhWk/LOLq9ywBPyt9SQyXupx+dllA==\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/verify-only-00-hello.json b/internal/keyvault/testdata/signer-v1/verify-only-00-hello.json
+new file mode 100644
+index 0000000..d1a61e8
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/verify-only-00-hello.json
+@@ -0,0 +1,5 @@
++{
++  "session": "verify-only",
++  "note": "hello for a record with usages [verify]",
++  "response": "{\"contract\":1,\"ok\":true,\"result\":{\"tool\":\"mac-keyvault\",\"tool_version\":\"test\",\"address\":\"test/verify-only\",\"kind\":\"key\",\"version\":0,\"label\":\"works.relux.mac-keyvault.key.test.verify-only.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"ops\":[\"describe\",\"pub\",\"sign\",\"verify\"]}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/verify-only-01-sign-usage-refused.json b/internal/keyvault/testdata/signer-v1/verify-only-01-sign-usage-refused.json
+new file mode 100644
+index 0000000..bbbf0e0
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/verify-only-01-sign-usage-refused.json
+@@ -0,0 +1,10 @@
++{
++  "session": "verify-only",
++  "note": "negative: usage_refused",
++  "request": {
++    "id": 1,
++    "op": "sign",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2"
++  },
++  "response": "{\"id\":1,\"ok\":false,\"error\":{\"code\":\"usage_refused\",\"message\":\"works.relux.mac-keyvault.key.test.verify-only.v1 has usages [verify]; ecdsa-sha256-sign requires usage sign\",\"hint\":\"init a record with --usages including sign; usages are fixed at creation\"}}"
++}
+diff --git a/internal/keyvault/testdata/signer-v1/verify-only-02-verify-ok.json b/internal/keyvault/testdata/signer-v1/verify-only-02-verify-ok.json
+new file mode 100644
+index 0000000..750c6be
+--- /dev/null
++++ b/internal/keyvault/testdata/signer-v1/verify-only-02-verify-ok.json
+@@ -0,0 +1,11 @@
++{
++  "session": "verify-only",
++  "note": "verify still works after the refusal",
++  "request": {
++    "id": 2,
++    "op": "verify",
++    "digest": "e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2",
++    "signature": "304402200f04c66e3ea5b1834951596367d99a939f60459e5c1b47e5d0f1a1ae13e7904a02201a2834bc8f7b827c87ccaf03f76396c9e64d21ea65138b0337b927c4ddbee652"
++  },
++  "response": "{\"id\":2,\"ok\":true,\"result\":{\"label\":\"works.relux.mac-keyvault.key.test.verify-only.v1\",\"fingerprint\":\"2nXKWMnWmV5HurpMyvnrt-tepY812lt13cG_EjD402s\",\"hash\":\"sha256\",\"digest\":\"e26be18e2d49e4df1b0ffc1b33eb909dad3e558f3b24e211270f198a733016c2\",\"format\":\"ecdsa-der-low-s\",\"low_s\":true,\"high_s_allowed\":false,\"verified\":true}}"
++}

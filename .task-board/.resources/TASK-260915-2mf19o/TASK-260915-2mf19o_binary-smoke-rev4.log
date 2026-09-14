@@ -1,0 +1,8 @@
+spelling=--json=TRUE rc=2 stdout_bytes=186 stderr_bytes=0 code=usage
+spelling=--json=1 rc=2 stdout_bytes=186 stderr_bytes=0 code=usage
+spelling=-json=t rc=2 stdout_bytes=186 stderr_bytes=0 code=usage
+spelling=-json=True rc=2 stdout_bytes=186 stderr_bytes=0 code=usage
+spelling=--json=T rc=2 stdout_bytes=186 stderr_bytes=0 code=usage
+list --kind bogus rc=3 stderr_bytes=0 code=invalid_kind
+text list --kind bogus rc=3 stdout_bytes=0 stderr=error: invalid_kind: kind "bogus" is not one of key, public-key, certificate, secret
+keychain mac-keyvault items: 0

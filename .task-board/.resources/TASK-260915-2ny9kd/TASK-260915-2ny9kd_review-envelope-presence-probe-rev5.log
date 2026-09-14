@@ -1,0 +1,4 @@
+hello-missing-ok client=false err_protocol=false remote=true err=not_found: missing
+hello-error-null client=true err_protocol=false remote=false err=<nil>
+hello-error-fields-missing client=false err_protocol=false remote=true err=not_found: 
+call-missing-ok client=true err_protocol=false remote=true err=not_found: missing

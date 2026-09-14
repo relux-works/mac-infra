@@ -1,0 +1,4 @@
+shape=--json=TRUE rc=2 stdout=186 stderr=0 code=usage
+shape=--json=1 rc=2 stdout=186 stderr=0 code=usage
+shape=-json=t rc=2 stdout=186 stderr=0 code=usage
+list-invalid-kind rc=3 stdout=239 stderr=0 code=invalid_kind

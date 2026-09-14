@@ -1,0 +1,19 @@
+M1-depth-0-only: KILLED failing_tests=['keyvault:TestDecodeRecordRefusesNestedDuplicateMembers', 'keyvault:TestSignerServeGoldenWire', 'keyvault:TestSignerServeRefusesDuplicateMembers', 'mac-keyvault:TestRunMetaJSONRejectsTrailingDocument', 'signerclient:TestCheckDocument', 'signerclient:TestClientRefusesDuplicateMembers', 'signerclient:TestDecodeObject'] failing_subtests=18
+M2-arrays-not-entered: KILLED failing_tests=['keyvault:TestSignerServeGoldenWire', 'keyvault:TestSignerServeRefusesDuplicateMembers', 'signerclient:TestCheckDocument', 'signerclient:TestClientRefusesDuplicateMembers', 'signerclient:TestDecodeObject'] failing_subtests=9
+M3-first-array-element-only: KILLED failing_tests=['keyvault:TestSignerServeGoldenWire', 'keyvault:TestSignerServeRefusesDuplicateMembers', 'signerclient:TestCheckDocument', 'signerclient:TestClientRefusesDuplicateMembers'] failing_subtests=6
+M4-adjacent-repeats-only: KILLED failing_tests=['keyvault:TestDecodeRecordRefusesNestedDuplicateMembers', 'signerclient:TestCheckDocument', 'signerclient:TestClientRefusesDuplicateMembers', 'signerclient:TestDecodeObject'] failing_subtests=16
+M5-nested-escaped-repeat-admitted: KILLED failing_tests=['keyvault:TestDecodeRecordRefusesNestedDuplicateMembers', 'keyvault:TestSignerServeGoldenWire', 'keyvault:TestSignerServeRefusesDuplicateMembers', 'signerclient:TestCheckDocument', 'signerclient:TestClientRefusesDuplicateMembers', 'signerclient:TestDecodeObject'] failing_subtests=10
+M6-detached-from-DecodeSingleJSON: KILLED failing_tests=['keyvault:TestDecodeRecordRefusesNestedDuplicateMembers', 'mac-keyvault:TestRunMetaJSONRejectsTrailingDocument', 'signerclient:TestCheckDocument'] failing_subtests=7
+M7-detached-from-DecodeObject: KILLED failing_tests=['keyvault:TestSignerServeGoldenWire', 'keyvault:TestSignerServeRefusesDuplicateMembers', 'signerclient:TestDecodeObject'] failing_subtests=4
+M8-second-document-admitted: KILLED failing_tests=['keyvault:TestSignerServeGoldenWire', 'signerclient:TestCheckDocument', 'signerclient:TestDecodeObject'] failing_subtests=4
+
+| mutant | status | failing tests (top-level) | failing subtests |
+|---|---|---|---|
+| M1-depth-0-only | KILLED | keyvault:TestDecodeRecordRefusesNestedDuplicateMembers, keyvault:TestSignerServeGoldenWire, keyvault:TestSignerServeRefusesDuplicateMembers, mac-keyvault:TestRunMetaJSONRejectsTrailingDocument, signerclient:TestCheckDocument, signerclient:TestClientRefusesDuplicateMembers, signerclient:TestDecodeObject | 18 |
+| M2-arrays-not-entered | KILLED | keyvault:TestSignerServeGoldenWire, keyvault:TestSignerServeRefusesDuplicateMembers, signerclient:TestCheckDocument, signerclient:TestClientRefusesDuplicateMembers, signerclient:TestDecodeObject | 9 |
+| M3-first-array-element-only | KILLED | keyvault:TestSignerServeGoldenWire, keyvault:TestSignerServeRefusesDuplicateMembers, signerclient:TestCheckDocument, signerclient:TestClientRefusesDuplicateMembers | 6 |
+| M4-adjacent-repeats-only | KILLED | keyvault:TestDecodeRecordRefusesNestedDuplicateMembers, signerclient:TestCheckDocument, signerclient:TestClientRefusesDuplicateMembers, signerclient:TestDecodeObject | 16 |
+| M5-nested-escaped-repeat-admitted | KILLED | keyvault:TestDecodeRecordRefusesNestedDuplicateMembers, keyvault:TestSignerServeGoldenWire, keyvault:TestSignerServeRefusesDuplicateMembers, signerclient:TestCheckDocument, signerclient:TestClientRefusesDuplicateMembers, signerclient:TestDecodeObject | 10 |
+| M6-detached-from-DecodeSingleJSON | KILLED | keyvault:TestDecodeRecordRefusesNestedDuplicateMembers, mac-keyvault:TestRunMetaJSONRejectsTrailingDocument, signerclient:TestCheckDocument | 7 |
+| M7-detached-from-DecodeObject | KILLED | keyvault:TestSignerServeGoldenWire, keyvault:TestSignerServeRefusesDuplicateMembers, signerclient:TestDecodeObject | 4 |
+| M8-second-document-admitted | KILLED | keyvault:TestSignerServeGoldenWire, signerclient:TestCheckDocument, signerclient:TestDecodeObject | 4 |

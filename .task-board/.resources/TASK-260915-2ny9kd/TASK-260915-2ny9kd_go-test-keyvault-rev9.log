@@ -1,0 +1,4 @@
+ok  	github.com/relux-works/mac-infra/internal/keyvault	5.787s
+?   	github.com/relux-works/mac-infra/internal/keyvault/recordtest	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/keyvault/signerclient	7.275s
+?   	github.com/relux-works/mac-infra/internal/keyvault/signertest	[no test files]

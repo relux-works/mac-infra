@@ -1,0 +1,29 @@
+M14 GuardedStore.Sign guard admits the key.kvctl.* class: rc=1 KILLED
+    --- FAIL: TestGuardedStoreRefusesNonTestLabels (0.00s)
+M15 GuardedStore.Sign override deleted (existence only): rc=1 KILLED
+    --- FAIL: TestGuardedStoreRefusesNonTestLabels (0.00s)
+M16 high-S refusal moved after key resolution (rev1 order): rc=1 KILLED
+    --- FAIL: TestRunVerifyVerdicts (0.02s)
+    --- FAIL: TestRunVerifyVerdicts/high-s_der_by_label (0.00s)
+    --- FAIL: TestRunVerifyVerdicts/high-s_raw_by_label (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/der_by_label (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/raw_by_label (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/der_by_label_@file (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/der_by_absent_label (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/der_by_absent_--spki (0.00s)
+M17 early refusal only for DER; raw high-S reaches List: rc=1 KILLED
+    --- FAIL: TestRunVerifyVerdicts (0.01s)
+    --- FAIL: TestRunVerifyVerdicts/high-s_raw_by_label (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/raw_by_label (0.00s)
+M18 early refusal only for --spki; label high-S reaches List: rc=1 KILLED
+    --- FAIL: TestRunVerifyVerdicts (0.01s)
+    --- FAIL: TestRunVerifyVerdicts/high-s_der_by_label (0.00s)
+    --- FAIL: TestRunVerifyVerdicts/high-s_raw_by_label (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/der_by_label (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/raw_by_label (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/der_by_label_@file (0.00s)
+    --- FAIL: TestRunVerifyHighSRefusedBeforeStore/der_by_absent_label (0.00s)
+survivors: 0

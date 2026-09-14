@@ -1,0 +1,5 @@
+call_error=<nil> err_protocol=false remote_error=false response_error_code="self_minted"
+second_call_error=<nil> second_err_protocol=false
+close_error=<nil>
+exit status 1
+probe_exit=1

@@ -1,0 +1,31 @@
+M1-unmarshal-not-closed: KILLED exit=1 failing_rows=['describe-operation-undefined-member', 'describe-undefined-member']
+M2-schema-untyped: KILLED exit=1 failing_rows=['describe-schema-0', 'describe-schema-3', 'describe-schema-string']
+M3-version-untyped: KILLED exit=1 failing_rows=['describe-version-0', 'describe-version-2', 'describe-version-float', 'describe-version-object', 'describe-version-string']
+M4-kind-untyped: KILLED exit=1 failing_rows=['describe-kind-certificate', 'describe-kind-object', 'describe-kind-unknown']
+M5-service-untyped: KILLED exit=1 failing_rows=['describe-service-array', 'describe-service-other', 'describe-service-uppercase']
+M6-purpose-untyped: KILLED exit=1 failing_rows=['describe-purpose-bool', 'describe-purpose-empty', 'describe-purpose-other']
+M7-invariants-skipped: KILLED exit=1 failing_rows=['describe-algorithm-ed25519', 'describe-control-invalid-record', 'describe-created-null', 'describe-extraction-other', 'describe-invalid-record-unreported', 'describe-issuer-on-key', 'describe-meta-reserved', 'describe-not-before-on-key', 'describe-origin-empty', 'describe-store-other', 'describe-title-too-long']
+M8-finding-vocab-open: KILLED exit=1 failing_rows=['describe-finding-unknown']
+M9-exposure-vocab-open: KILLED exit=1 failing_rows=['describe-exposure-empty', 'describe-exposure-other']
+M10-exposure-unknown-unbound: KILLED exit=1 failing_rows=['describe-exposure-unknown-with-row', 'describe-no-primitive-with-exposure']
+M11-operations-unchecked: KILLED exit=1 failing_rows=['describe-operation-without-via']
+M12-expired-unbound: KILLED exit=1 failing_rows=['describe-expired-without-not-after']
+M13-schema-value-unbound: SURVIVED exit=0 failing_rows=[]
+M14-label-derivation-unbound: SURVIVED exit=0 failing_rows=[]
+
+| mutant | narrows the gate to | status | failing rows |
+|---|---|---|---|
+| M1-unmarshal-not-closed | | KILLED | describe-operation-undefined-member, describe-undefined-member |
+| M2-schema-untyped | | KILLED | describe-schema-0, describe-schema-3, describe-schema-string |
+| M3-version-untyped | | KILLED | describe-version-0, describe-version-2, describe-version-float, describe-version-object, describe-version-string |
+| M4-kind-untyped | | KILLED | describe-kind-certificate, describe-kind-object, describe-kind-unknown |
+| M5-service-untyped | | KILLED | describe-service-array, describe-service-other, describe-service-uppercase |
+| M6-purpose-untyped | | KILLED | describe-purpose-bool, describe-purpose-empty, describe-purpose-other |
+| M7-invariants-skipped | | KILLED | describe-algorithm-ed25519, describe-control-invalid-record, describe-created-null, describe-extraction-other, describe-invalid-record-unreported, describe-issuer-on-key, describe-meta-reserved, describe-not-before-on-key, describe-origin-empty, describe-store-other, describe-title-too-long |
+| M8-finding-vocab-open | | KILLED | describe-finding-unknown |
+| M9-exposure-vocab-open | | KILLED | describe-exposure-empty, describe-exposure-other |
+| M10-exposure-unknown-unbound | | KILLED | describe-exposure-unknown-with-row, describe-no-primitive-with-exposure |
+| M11-operations-unchecked | | KILLED | describe-operation-without-via |
+| M12-expired-unbound | | KILLED | describe-expired-without-not-after |
+| M13-schema-value-unbound | | SURVIVED |  |
+| M14-label-derivation-unbound | | SURVIVED |  |

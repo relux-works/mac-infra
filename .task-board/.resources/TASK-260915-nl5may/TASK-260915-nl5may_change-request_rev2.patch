@@ -1,0 +1,2462 @@
+diff --git a/LOGBOOK.md b/LOGBOOK.md
+index 3e05d20..ee11630 100644
+--- a/LOGBOOK.md
++++ b/LOGBOOK.md
+@@ -5,6 +5,18 @@
+ 
+ ## 2026-09-15
+ 
++### 2010 — mac-keyvault T2 rev2: an embedded interface method is a guard bypass, and a bytes-only policy check belongs before the backend boundary
++- FINDING (review rev1 F1): `GuardedStore` embeds `Backend` and overrode `Create`/`Delete`/`UpdateTag` only; Go promoted `Backend.Sign` unchanged, so the integration guard that keeps tests inside `works.relux.mac-keyvault.key.test.*` did not cover the private-key operation added in T2 — the rev1 results artifact claimed it did. Fix: `(*GuardedStore).Sign` calls `guard` first; `TestGuardedStoreRefusesNonTestLabels` now drives `Sign` with a signing-capable production label (a leak would return a real signature, not `ErrNotFound`) and a test-label positive control. Rule recorded in the type comment: every mutating or private-key-using `Backend` method must be overridden on the guard; embedding is where bypasses come from.
++- FINDING (review rev1 F2): `runVerify` refused high-S after `Manager.PublicKeyFor` → `Backend.List`, so a malleable signature by label caused a Security call before the policy refusal, against the T1 "no backend call before validation" guard. The check only needs the parsed `(r, s)`, so it now sits directly after `ParseSignature`, before the `--spki` file read and before the address is resolved; the refusal envelope carries the digest/format/low_s inputs but no key fields. `TestRunVerifyHighSRefusedBeforeStore` prepares signatures with `crypto/ecdsa` (never via `run(sign)`), uses a fresh recording store holding the key, and asserts zero calls plus two ordering witnesses (absent address and absent `--spki` path are still `high_s_refused`, not `not_found`/usage). Mutants M16 (rev1 order), M17 (early gate DER-only), M18 (early gate `--spki`-only) are all killed; M4 from rev1 only proved the raw refusal existed.
++- SCOPE: `TASK-260915-nl5may` rev2, files `internal/keyvault/security_darwin_test.go`, `cmd/mac-keyvault/main.go` (`runVerify`), `cmd/mac-keyvault/sign_test.go`, README, SKILL.
++
++### 1930 — mac-keyvault T2: sign/verify go through the same trust gate as rotate, and the low-S rule is applied on the way out, not assumed from the bridge
++- FINDING: `SecKeyCreateSignature(kSecKeyAlgorithmECDSASignatureDigestX962SHA256)` signs the given 32 bytes as the digest (no re-hash: the DER verifies with `crypto/ecdsa` and `openssl dgst -sha256 -verify` over the original payload) and returns X9.62 DER that Go's `encoding/asn1` parses strictly; whether corecrypto folds s into the low half is not documented, so the vault does not assume it: every signature is parsed, folded to low-S (`normalized: true` when it was high), and re-verified under the record's own SPKI before it is emitted. The same non-assumption holds for `crypto/ecdsa`, which demonstrably emits high-S about half the time; the test fakes therefore pick the half deterministically instead of trusting the library.
++- DECISION: The operations gate is derived from the registry (`Operations()`), not re-implemented: `Manager.authorize` requires the operation to be in what `describe` prints and names the reason of a miss by its own code (`usage_refused`, `expired`, `unsupported_primitive` exit 1). Before that it runs the rev6/rev7 trust gate (`RecordProblem`, schema, `ValidateStored`), so a rev1 tag or a forged persisted field never reaches the private key (`metadata_unknown`) — the forgery table in `invariants_test.go` now drives `Sign` and `PublicKeyFor` as well as rotate/meta.
++- DECISION: `verify` has three outcomes with three exit codes: 0 verified; 1 `signature_invalid` (well-formed, does not match — the verdict is in `result.verified`, the error contract still carries code/hint); 3 `invalid_signature` (not strict DER / not 64 raw bytes / r,s outside [1,n-1]) or `high_s_refused` (valid but malleable; `--allow-high-s` opts in, needed for openssl-made signatures). A `@FILE` argument is always raw bytes, never hex-decoded, so a 32-byte digest that happens to look like ASCII hex is not misread (mutant M10).
++- FINDING: Two mutants survive and state bounds, not gaps: M3 (strict re-encode check removed) survives because `encoding/asn1` already refuses non-minimal integers and long-form lengths one layer down — the re-encode check is defence in depth; M12 (CLI digest-length check removed) survives because `Manager.Sign` validates the digest before listing — the combined M12c (both gates after the listing) is killed by the CLI store-untouched assertion.
++- SCOPE: `TASK-260915-nl5may`: `internal/keyvault/ecdsa.go` (new), `keyvault.go` (`Backend.Sign`, `authorize`, `Sign`, `PublicKeyFor`), `registry.go` (via sign/verify), `security_darwin.{c,h,go}` + `security_unsupported.go` (bridge), `cmd/mac-keyvault/main.go` (`sign`, `verify`), tests, README, SKILL. kvctl's verifier is not in this repository; interop is proven against Go `crypto/ecdsa` and openssl 3.6 instead (stated bound).
++
+ ### 1845 — mac-keyvault rev7: a validator can only judge what the decoder kept — the persisted record decoder is strict about unknown members
+ - FINDING: Review rev6 (F14) reproduced the F4/F8/F12/F13 class one layer earlier: `DecodeSingleJSON` decoded a schema-2 tag without `DisallowUnknownFields`, so a persisted member the schema does not define (`future_top_level_policy`, `format.future_format_policy`) was erased by `encoding/json` before `ValidateStored` ran; `Manager.Rotate` reproduced the record minus the member (`creates=1`) and `MetaSet` rewrote the tag without it. The one-row-per-field invariant table reflects over the decoded Go struct and is blind to JSON members that never reach the struct — the reviewer's control named exactly that blind spot.
+ - DECISION: The strictness lives in the decoder, not in another table row. `DecodeSingleJSON` now sets `DisallowUnknownFields` next to `UseNumber` and the EOF gate, so the one JSON boundary rule (rev5) covers members as well as documents; unknown top-level and nested struct members make the tag an unreadable record (schema 0, `record_unreadable` finding, `rotate`/`meta set|unset` refuse with `metadata_unknown`, zero creates/updates, old tag byte-identical). `Record.Meta`, `--meta-json` (`map[string]any`) and `--json-value` (`any`) are open targets and unaffected — the positive controls store the same member names inside `meta` and still rotate. A field that starts driving behaviour is added to the struct with a schema bump, as model v2 §2–§3 say; until then it cannot be silently downgraded.
+diff --git a/README.md b/README.md
+index 2ed6098..66eaf9e 100644
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
+ | `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected and sanitized `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no cookies, browser storage, authorization material, or cursor/session state |
+ | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
+ | `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
+-| `mac-keyvault` | Create, list, describe, export, rotate, annotate, and delete non-extractable P-256 key pairs in the login keychain; every item is a schema-2 record addressed as `<service>/<purpose>` (+ `--kind`, `--version`) under the derived label `works.relux.mac-keyvault.<kind>.<service>.<purpose>.v<N>`; `--enclave` fails explicitly on an unprovisioned binary | `mac-keyvault [--json] init --service S --purpose P [--title T] [--usages sign,verify] [--extraction none\|human\|agent] [--meta k=v]`, `list [--service S] [--kind K]`, `describe S/P [--version N]`, `pub S/P [--out FILE] [--format spki-der\|spki-pem\|jwk]`, `rotate S/P`, `meta get\|set\|unset S/P ...`, `delete S/P --confirm [--version N]` | keychain items only; `pub --out` writes a `0600` file; `~/Library/Application Support/mac-infra/keyvault/init.lock` serialises creates |
++| `mac-keyvault` | Create, list, describe, export, sign with, verify against, rotate, annotate, and delete non-extractable P-256 key pairs in the login keychain; every item is a schema-2 record addressed as `<service>/<purpose>` (+ `--kind`, `--version`) under the derived label `works.relux.mac-keyvault.<kind>.<service>.<purpose>.v<N>`; `--enclave` fails explicitly on an unprovisioned binary | `mac-keyvault [--json] init --service S --purpose P [--title T] [--usages sign,verify] [--extraction none\|human\|agent] [--meta k=v]`, `list [--service S] [--kind K]`, `describe S/P [--version N]`, `pub S/P [--out FILE] [--format spki-der\|spki-pem\|jwk]`, `sign S/P --digest HEX\|@FILE \| --data-file F \| --stdin [--raw] [--out FILE]`, `verify S/P \| --spki FILE --digest ... --sig HEX\|@FILE [--raw] [--allow-high-s]`, `rotate S/P`, `meta get\|set\|unset S/P ...`, `delete S/P --confirm [--version N]` | keychain items only; `pub --out` writes a `0600` file; `~/Library/Application Support/mac-infra/keyvault/init.lock` serialises creates |
+ | `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
+ | `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
+ | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
+@@ -298,6 +298,10 @@ mac-keyvault init --service kvctl --purpose pki-root --title "bsim test PKI root
+ mac-keyvault --json list --service kvctl        # full records + label, fingerprint, exposure, operations, findings
+ mac-keyvault --json describe kvctl/pki-root     # newest generation; --version 1 for one version
+ mac-keyvault pub kvctl/pki-root --out .temp/pki-root.pem   # .pem -> PEM, .jwk/.json -> JWK, else SPKI DER; --format spki-der|spki-pem|jwk overrides
++mac-keyvault sign kvctl/pki-root --digest "$(shasum -a 256 payload.bin | cut -c1-64)" --out .temp/payload.sig   # strict DER, low-S; --raw for 64-byte r||s
++mac-keyvault --json sign kvctl/pki-root --data-file payload.bin   # the tool hashes with SHA-256 and reports hash, digest, digest_source
++mac-keyvault verify kvctl/pki-root --data-file payload.bin --sig @.temp/payload.sig    # exit 0 verified, 1 signature_invalid, 3 high_s_refused
++mac-keyvault verify --spki .temp/pki-root.pem --digest HEX --sig HEX [--raw] [--allow-high-s]   # no vault access: any P-256 SPKI DER/PEM
+ mac-keyvault meta set kvctl/pki-root ticket MI-7           # meta get/set/unset; reserved record names are refused
+ mac-keyvault rotate kvctl/pki-root              # creates ...key.kvctl.pki-root.v2 with the record copied; the old key stays until deleted
+ mac-keyvault delete kvctl/pki-root --confirm --version 1   # refused without --confirm; without --version the newest generation goes
+@@ -307,6 +311,8 @@ Error contract: every failure is `{code, message, hint, os_status}` in `--json`
+ 
+ Model rules the tool enforces (`STORY-260915-3r0ys5_key-record-model-v2.md`): `service` and `purpose` are `[a-z0-9-]{1,40}`; `algorithm` is `ec-p256` (`ec-p384`/`rsa-3072` are reserved and refused, `ed25519` is refused explicitly, `aes-256-gcm`/`opaque` belong to kind `secret`; nothing is mapped to another algorithm); `usages` is a subset of `sign, verify, wrap, encrypt, decrypt, attest`; `format` keys are validated per kind (a key carries `public` and `signature`, never `envelope`); `extraction` is `none` unless `--extraction human|agent` is typed literally (it is persisted in the record; the split export ACL and `export-private` land with T7, so in this revision every key stays non-extractable at the keychain level and `describe` shows the recorded policy honestly as policy, not capability); `--generate` is refused for a key; only kind `key` is created in this revision (`public-key`, `certificate`, `secret` are validated and refused as `unsupported_kind`). `describe`, `list --json` and `pub --json` derive `operations` from a primitive registry — one row today, `(key, ec-p256, keychain)` — filtered by `usages`, `validity.not_after` and `extraction`; a record with no registry row reports `operations: []`, `exposure: unknown` and the `unsupported_primitive` finding instead of a guess. Items written by the first revision (`mac-keyvault/1 store=... created=...` tags) are reported as `schema: 1` with `service`/`purpose`/`kind`/`algorithm` `unknown`; they are never upgraded and `rotate`/`meta set` refuse them with `metadata_unknown`. The persisted record tag obeys the same single-document rule as `--meta-json`: a schema-2 record followed by a second JSON document, token or garbage is an unreadable record (`describe` reports the problem, `rotate` refuses with `metadata_unknown` and creates nothing, the old item is left untouched); only whitespace around the one document is tolerated. The same decoder is strict about members: a persisted record carrying a JSON field the schema-2 struct does not define — at the top level or inside `format`, `origin`, `issuer`, `validity` — is an unreadable record too (`record_unreadable` finding; `rotate` and `meta set|unset` refuse with `metadata_unknown`, zero creates or updates, old tag byte-identical), never a readable record with the field silently erased before the invariant table runs; `meta` stays an open map and accepts any non-reserved name. Every record field has exactly one row in a per-kind invariant table (`internal/keyvault/invariants.go`): `init` runs it before any Security call; `rotate` and `meta set|unset` run it plus label agreement on the stored record and refuse with `metadata_unknown` (zero creates, old tag untouched) when any field is forged — a non-null `issuer` or `validity.not_before` on a key, a null `created`, an `origin.source` that is neither `generated` nor `imported:<sha256>`, a `version` below 1, an extraction policy on public material, a format key of another kind, …; `describe`/`list --json` report the same violation as a `record_invalid:<code>` finding so the item stays visible for `delete`. `validity.not_before` is certificate-derived and always null on a key or secret; only `--not-after` is caller-supplied.
+ 
++Signing (`sign`, T2) is ECDSA P-256 over a caller-supplied SHA-256 digest: `--digest` takes 64 hex characters or `@FILE` with the 32 raw bytes (a file is never hex-decoded), `--data-file`/`--stdin` make the tool hash the bytes itself and the output says so (`hash: sha256`, `digest`, `digest_source: digest|file|stdin`). The bridge signs with `kSecKeyAlgorithmECDSASignatureDigestX962SHA256`, so the digest is signed as given and the private key never leaves Security.framework; the DER corecrypto returns is parsed strictly, normalised to low-S (`normalized: true` in the output when s was in the high half) and re-checked under the record's own public key before it is emitted. Output is strict DER (`ecdsa-der-low-s`, the record's `format.signature` default) or 64-byte `r||s` (`--raw` / `--format ecdsa-raw`); `--out FILE` writes the bytes `0600`, text mode prints hex. Gates run in this order, every one before the keychain is touched: digest length (`invalid_digest`, exit 3), address inside the namespace (`foreign_label`), a readable and invariant-valid record (`metadata_unknown` — a rev1 tag or a forged field never reaches the private key), a registry row (`unsupported_primitive`, exit 1), `usages ∋ sign` (`usage_refused`, exit 3, the hint names the record's usages), `validity.not_after` unexpired (`expired`, exit 3, the hint names the timestamp). `verify` judges a signature over the same digest inputs against a vault address (its readable public half; no usage or validity gate, since verification is always allowed) or any P-256 SPKI file with `--spki` (DER or PEM, no vault access): exit 0 `verified: true`; exit 1 `signature_invalid` with `verified: false` for a well-formed signature that does not match (tampered bytes, another digest, another key); exit 3 `invalid_signature` for a signature that is not strict DER (non-minimal integer or length, trailing bytes, r or s outside `[1, n-1]`) or not exactly 64 raw bytes; exit 3 `high_s_refused` for a valid signature whose s is in the high half unless `--allow-high-s` is typed (the verdict is then computed and `low_s: false` reported); like the strict-DER check, the high-S refusal is judged on the signature bytes alone and happens before the `--spki` file is read or the vault is listed, so a malleable signature never causes a Security call. Signatures made here verify with Go `crypto/ecdsa` and `openssl dgst -sha256 -verify`, and signatures made by both verify here (an openssl signature may need `--allow-high-s`; openssl does not normalise). `describe` now lists `ecdsa-sha256-sign` via `sign` and `ecdsa-sha256-verify` via `verify`; ECDH, ECIES and `export-private` stay `reserved`.
++
+ Duplicate refusal is atomic across processes: `init`, `rotate` and `meta set` hold an exclusive `flock` on `~/Library/Application Support/mac-infra/keyvault/init.lock` across one listing and the create, because the legacy keychain itself accepts duplicate labels.
+ 
+ Store decision (recorded on `EPIC-260915-1g0e1c_secure-enclave-probe.md` and re-verified while building the tool): an ad-hoc signed CLI gets `-34018 errSecMissingEntitlement` for a permanent Secure Enclave key, for any `kSecAttrAccessControl`-based ACL (it routes the item into the Data Protection keychain), and for `kSecAccessControlUserPresence`. `--enclave` and `--user-presence` therefore try the real Security call and fail with `missing_entitlement`; there is no silent keychain fallback. Persisting Secure Enclave keys needs a signed helper with a provisioning profile and is a separate follow-up. The Security.framework bridge is a small cgo C file (`internal/keyvault/security_darwin.c`): the `security` CLI cannot express `SecKey` ACLs or the Enclave shape, and a separate Swift helper would add a second binary to sign and trust in the ACL.
+diff --git a/agents/skills/mac-infra/SKILL.md b/agents/skills/mac-infra/SKILL.md
+index ee16f8e..ac019dc 100644
+--- a/agents/skills/mac-infra/SKILL.md
++++ b/agents/skills/mac-infra/SKILL.md
+@@ -495,6 +495,10 @@ mac-keyvault --json init --service kvctl --purpose pki-root --title "test PKI ro
+ mac-keyvault --json list --service kvctl          # records + label, fingerprint, exposure, operations, findings
+ mac-keyvault --json describe kvctl/pki-root       # newest generation; --version 1 selects one
+ mac-keyvault pub kvctl/pki-root --out .temp/pki-root.pem   # --format spki-der|spki-pem|jwk
++mac-keyvault --json sign kvctl/pki-root --digest "$(shasum -a 256 payload.bin | cut -c1-64)"   # strict DER low-S in result.signature (hex); --raw for r||s; --out FILE writes bytes
++mac-keyvault --json sign kvctl/pki-root --data-file payload.bin        # tool hashes with SHA-256; result.hash/digest/digest_source say so
++mac-keyvault --json verify kvctl/pki-root --data-file payload.bin --sig @payload.sig   # exit 0 verified; 1 signature_invalid; 3 high_s_refused / invalid_signature
++mac-keyvault --json verify --spki pki-root.pem --digest HEX --sig HEX   # any P-256 SPKI DER/PEM, no vault access
+ mac-keyvault --json meta set kvctl/pki-root ticket MI-7
+ mac-keyvault --json rotate kvctl/pki-root         # ...v2, record copied, old key kept
+ mac-keyvault --json delete kvctl/pki-root --confirm --version 1
+@@ -502,7 +506,8 @@ mac-keyvault --json delete kvctl/pki-root --confirm --version 1
+ 
+ - Read `error.code` and `error.hint` in `--json` mode; every outcome, usage errors included, is a `{ok, command, result|error{code, message, hint, os_status}}` envelope on stdout with an empty stderr. Exit 2 is `usage`, exit 3 is a policy refusal, exit 1 is an operational failure (`not_found`, `missing_entitlement`, `security`).
+ - Invalid `service`/`purpose`/`kind`/`algorithm`/`usages`/`format`/`extraction`, `--generate` on a key, reserved names inside `meta`, a duplicate `(kind, service, purpose)` and any input that is not a `<service>/<purpose>` address (raw labels included) are refused with exit 3 before Security.framework is called. Do not retry these; fix the input.
+-- `operations` in `describe`/`list --json` is derived from the primitive registry and the record's `usages`/`validity`/`extraction`; `via: reserved` means no command performs it yet, and `findings: ["unsupported_primitive"]` means the tool does not know the primitive. Select an operation by its `name`/`input`/`output`, never by guessing from `algorithm`.
++- `sign` takes a SHA-256 digest (`--digest` 64 hex or `@FILE` of 32 raw bytes, never hex-decoded) or hashes `--data-file`/`--stdin` itself and reports that; it refuses before any keychain call with `invalid_digest` (wrong length, exit 3), `usage_refused` (record without usage `sign`, exit 3), `expired` (`validity.not_after` passed, exit 3), `metadata_unknown` (rev1 tag or forged record) and `unsupported_primitive` (no registry row, exit 1). Output is strict DER with low-S, or `--raw` 64-byte `r||s`; `normalized: true` means the keychain returned a high-S value that was folded. `verify` returns exit 0 (`verified: true`), exit 1 `signature_invalid` (well-formed but not matching: `verified: false`), exit 3 `invalid_signature` (not strict DER / not 64 raw bytes) or `high_s_refused` (pass `--allow-high-s` only when the signer is known not to normalise, e.g. openssl); both are decided on the signature bytes before the vault or the `--spki` file is touched. An agent verifies foreign signatures with `--spki FILE` (no vault access) and never passes `--allow-high-s` by default.
++- `operations` in `describe`/`list --json` is derived from the primitive registry and the record's `usages`/`validity`/`extraction`; `via: sign`/`via: verify` name the commands that perform `ecdsa-sha256-sign`/`ecdsa-sha256-verify`, `via: reserved` means no command performs it yet, and `findings: ["unsupported_primitive"]` means the tool does not know the primitive. Select an operation by its `name`/`input`/`output`, never by guessing from `algorithm`.
+ - `rotate` refuses a record whose store or schema is unknown (`metadata_unknown`, first-revision tags included) rather than assuming the keychain; delete such items with `--confirm --version N` and recreate them.
+ - Every record field is checked against a per-kind invariant table on `init`, `rotate` and `meta set|unset` (a forged stored field — non-null `issuer` or `validity.not_before` on a key, null `created`, bad `origin.source`, … — is `metadata_unknown`, nothing created or rewritten); `describe`/`list --json` show the same violation as `findings: ["record_invalid:<code>"]`. Treat that finding as "delete and recreate", never as a record to reproduce.
+ - A persisted record carrying a JSON member the schema does not define (top-level or inside `format`/`origin`/`issuer`/`validity`) is an unreadable record (`findings: ["record_unreadable"]`); `rotate` and `meta set|unset` refuse it with `metadata_unknown` and write nothing. Only `meta` is an open map; a field that must drive behaviour is added to the schema, never smuggled in and silently dropped.
+diff --git a/cmd/mac-keyvault/main.go b/cmd/mac-keyvault/main.go
+index 9d2a929..db8c358 100644
+--- a/cmd/mac-keyvault/main.go
++++ b/cmd/mac-keyvault/main.go
+@@ -3,14 +3,18 @@
+ // meta) in its application tag and is addressed as <service>/<purpose>.
+ //
+ // Exit codes: 0 success, 1 operational failure (Security.framework error,
+-// unknown address, I/O), 2 usage error, 3 policy refusal (invalid record,
+-// duplicate, missing --confirm, label outside the tool namespace, Secure
+-// Enclave or user-presence unavailable, unknown metadata on rotate).
++// unknown address, I/O, a signature that does not verify), 2 usage error,
++// 3 policy refusal (invalid record, duplicate, missing --confirm, label
++// outside the tool namespace, Secure Enclave or user-presence unavailable,
++// unknown metadata on rotate, usage or validity gate on sign, a mis-sized
++// digest or malformed signature, a high-S signature without --allow-high-s).
+ package main
+ 
+ import (
+ 	"bytes"
++	"crypto/sha256"
+ 	"encoding/base64"
++	"encoding/hex"
+ 	"encoding/json"
+ 	"errors"
+ 	"flag"
+@@ -69,6 +73,8 @@ var usageLines = map[string]string{
+ 	"list":       "mac-keyvault [--json] list [--service S] [--kind K]",
+ 	"describe":   "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
+ 	"pub":        "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk]",
++	"sign":       "mac-keyvault [--json] sign <service>/<purpose> (--digest <hex|@file> | --data-file FILE | --stdin) [--raw | --format ecdsa-der-low-s|ecdsa-raw] [--out FILE] [--kind K] [--version N]",
++	"verify":     "mac-keyvault [--json] verify (<service>/<purpose> [--kind K] [--version N] | --spki FILE) (--digest <hex|@file> | --data-file FILE | --stdin) --sig <hex|@file> [--raw] [--allow-high-s]",
+ 	"rotate":     "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
+ 	"delete":     "mac-keyvault [--json] delete <service>/<purpose> --confirm [--kind K] [--version N]",
+ 	"meta":       "mac-keyvault [--json] meta get|set|unset <service>/<purpose> [key] [value] [--kind K] [--version N] [--json-value]",
+@@ -129,6 +135,21 @@ func (o output) fail(err error) int {
+ 	return code
+ }
+ 
++// failWith is fail with a result attached: a verify verdict of false is an
++// error by the contract (exit 1 or 3, code, message, hint) and also carries
++// the verdict fields so a consumer sees what was judged.
++func (o output) failWith(result any, err error) int {
++	code, respErr := o.classify(err)
++	if o.json {
++		encodeJSON(o.stdout, response{OK: false, Command: o.command, Result: result, Error: respErr})
++		return code
++	}
++	fmt.Fprintln(o.stdout, "verified: false")
++	fmt.Fprintf(o.stderr, "error: %s: %s\n", respErr.Code, respErr.Message)
++	fmt.Fprintf(o.stderr, "hint: %s\n", respErr.Hint)
++	return code
++}
++
+ type hinter interface{ Hint() string }
+ 
+ func (o output) classify(err error) (int, *responseError) {
+@@ -139,7 +160,7 @@ func (o output) classify(err error) (int, *responseError) {
+ 			hint = usageLines[strings.SplitN(o.command, " ", 2)[0]]
+ 		}
+ 		if hint == "" {
+-			hint = "mac-keyvault help lists the commands: init, list, describe, pub, rotate, delete, meta, version"
++			hint = "mac-keyvault help lists the commands: init, list, describe, pub, sign, verify, rotate, delete, meta, version"
+ 		}
+ 		return exitUsage, &responseError{Code: "usage", Message: usage.msg, Hint: hint}
+ 	}
+@@ -232,6 +253,10 @@ func run(args []string, stdout, stderr io.Writer) int {
+ 		return runDescribe(rest, out)
+ 	case "pub":
+ 		return runPub(rest, out)
++	case "sign":
++		return runSign(rest, out)
++	case "verify":
++		return runVerify(rest, out)
+ 	case "rotate":
+ 		return runRotate(rest, out)
+ 	case "delete":
+@@ -283,7 +308,11 @@ func newManager() (*keyvault.Manager, error) {
+ 	if err != nil {
+ 		return nil, fmt.Errorf("lock path: %w", err)
+ 	}
+-	return keyvault.NewManager(newBackend(), keyvault.FileLock{Path: path}, localOrigin()), nil
++	manager := keyvault.NewManager(newBackend(), keyvault.FileLock{Path: path}, localOrigin())
++	// One clock for created stamps, the validity gate of sign and the
++	// operations describe prints.
++	manager.SetClock(now)
++	return manager, nil
+ }
+ 
+ func localOrigin() keyvault.Origin {
+@@ -656,6 +685,251 @@ func encodePublic(spki []byte, encoding string) ([]byte, error) {
+ 	}
+ }
+ 
++// digestFlags are the three ways a command takes its SHA-256 digest:
++// --digest (the caller hashed; the tool signs exactly those 32 bytes),
++// --data-file or --stdin (the tool hashes with SHA-256 and says so in the
++// output). Exactly one must be given.
++type digestFlags struct {
++	digest, dataFile *string
++	stdin            *bool
++}
++
++func addDigestFlags(fs *flag.FlagSet) digestFlags {
++	return digestFlags{
++		digest:   fs.String("digest", "", "SHA-256 digest to sign/verify: 64 hex chars, or @FILE holding the 32 raw bytes"),
++		dataFile: fs.String("data-file", "", "hash FILE with SHA-256 and use that digest"),
++		stdin:    fs.Bool("stdin", false, "hash stdin with SHA-256 and use that digest"),
++	}
++}
++
++// stdinReader is swapped by tests.
++var stdinReader io.Reader = os.Stdin
++
++// resolve returns the digest bytes and the source name (digest, file,
++// stdin). Length is judged by keyvault.ValidateDigest so a mis-sized
++// caller digest is refused with invalid_digest before any store exists.
++func (d digestFlags) resolve() ([]byte, string, error) {
++	given := 0
++	for _, set := range []bool{*d.digest != "", *d.dataFile != "", *d.stdin} {
++		if set {
++			given++
++		}
++	}
++	if given != 1 {
++		return nil, "", usagef("exactly one of --digest, --data-file or --stdin is required")
++	}
++	switch {
++	case *d.digest != "":
++		digest, err := bytesArg("--digest", *d.digest)
++		if err != nil {
++			return nil, "", err
++		}
++		if err := keyvault.ValidateDigest(digest); err != nil {
++			return nil, "", err
++		}
++		return digest, "digest", nil
++	case *d.dataFile != "":
++		data, err := os.ReadFile(*d.dataFile)
++		if err != nil {
++			return nil, "", usagef("--data-file: %v", err)
++		}
++		sum := sha256.Sum256(data)
++		return sum[:], "file", nil
++	default:
++		data, err := io.ReadAll(stdinReader)
++		if err != nil {
++			return nil, "", fmt.Errorf("stdin: %w", err)
++		}
++		sum := sha256.Sum256(data)
++		return sum[:], "stdin", nil
++	}
++}
++
++// bytesArg decodes a hex string, or the raw bytes of @FILE (files are never
++// hex-decoded, so a raw digest that happens to look like hex is not
++// misread). A value the parser cannot read is a usage error.
++func bytesArg(flagName, value string) ([]byte, error) {
++	if strings.HasPrefix(value, "@") {
++		data, err := os.ReadFile(value[1:])
++		if err != nil {
++			return nil, usagef("%s: %v", flagName, err)
++		}
++		return data, nil
++	}
++	decoded, err := hex.DecodeString(strings.TrimSpace(value))
++	if err != nil {
++		return nil, usagef("%s must be hex or @FILE: %v", flagName, err)
++	}
++	return decoded, nil
++}
++
++// signatureFormat resolves --raw / --format against the record default.
++func signatureFormat(raw bool, format, recordDefault string) (string, error) {
++	switch {
++	case raw && format != "" && format != keyvault.FormatSignatureRaw:
++		return "", usagef("--raw contradicts --format %s", format)
++	case raw:
++		return keyvault.FormatSignatureRaw, nil
++	case format == keyvault.FormatSignatureDERLowS || format == keyvault.FormatSignatureRaw:
++		return format, nil
++	case format != "":
++		return "", usagef("--format must be %s or %s, got %q", keyvault.FormatSignatureDERLowS, keyvault.FormatSignatureRaw, format)
++	case recordDefault == keyvault.FormatSignatureRaw:
++		return recordDefault, nil
++	default:
++		return keyvault.FormatSignatureDERLowS, nil
++	}
++}
++
++func runSign(args []string, out output) int {
++	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
++	kind, version := addressFlags(fs)
++	digestIn := addDigestFlags(fs)
++	raw := fs.Bool("raw", false, "emit raw r||s (64 bytes) instead of DER")
++	format := fs.String("format", "", "ecdsa-der-low-s or ecdsa-raw; default is the record's format.signature")
++	outPath := fs.String("out", "", "write the signature bytes to PATH")
++	positional, err := parseFlags(fs, args)
++	if err != nil {
++		return out.fail(err)
++	}
++	// Gates before the store exists: flag shape, digest length, address.
++	if _, err := signatureFormat(*raw, *format, ""); err != nil {
++		return out.fail(err)
++	}
++	digest, source, err := digestIn.resolve()
++	if err != nil {
++		return out.fail(err)
++	}
++	addr, err := singleAddress(fs, positional, *kind, *version)
++	if err != nil {
++		return out.fail(err)
++	}
++	manager, err := newManager()
++	if err != nil {
++		return out.fail(err)
++	}
++	signed, err := manager.Sign(addr, digest)
++	if err != nil {
++		return out.fail(err)
++	}
++	encoding, _ := signatureFormat(*raw, *format, signed.Key.Record.Format.Signature)
++	payload, err := signed.Signature.Encode(encoding)
++	if err != nil {
++		return out.fail(err)
++	}
++	result := keyView(signed.Key)
++	result["hash"] = "sha256"
++	result["digest"] = hex.EncodeToString(digest)
++	result["digest_source"] = source
++	result["format"] = encoding
++	result["signature"] = hex.EncodeToString(payload)
++	result["signature_base64"] = base64.StdEncoding.EncodeToString(payload)
++	result["low_s"] = true
++	result["normalized"] = signed.Normalized
++	if *outPath != "" {
++		if err := os.WriteFile(*outPath, payload, 0o600); err != nil {
++			return out.fail(err)
++		}
++		result["out"] = *outPath
++		return out.success(result, func(w io.Writer) {
++			fmt.Fprintf(w, "signed sha256 %s with %s: wrote %s (%d bytes) to %s\n", hex.EncodeToString(digest), signed.Key.Label, encoding, len(payload), *outPath)
++		})
++	}
++	return out.success(result, func(w io.Writer) { fmt.Fprintln(w, hex.EncodeToString(payload)) })
++}
++
++func runVerify(args []string, out output) int {
++	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
++	kind, version := addressFlags(fs)
++	digestIn := addDigestFlags(fs)
++	spkiPath := fs.String("spki", "", "verify under this SPKI DER or PEM file instead of a vault address")
++	sigIn := fs.String("sig", "", "signature: hex, or @FILE with the raw bytes")
++	raw := fs.Bool("raw", false, "the signature is raw r||s (64 bytes), not DER")
++	allowHighS := fs.Bool("allow-high-s", false, "accept a signature whose s is in the high half (malleable form)")
++	positional, err := parseFlags(fs, args)
++	if err != nil {
++		return out.fail(err)
++	}
++	switch {
++	case *spkiPath != "" && len(positional) != 0:
++		return out.fail(usagef("verify takes either a <service>/<purpose> address or --spki FILE, not both"))
++	case *spkiPath == "" && len(positional) != 1:
++		return out.fail(usagef("verify requires a <service>/<purpose> address or --spki FILE"))
++	case *sigIn == "":
++		return out.fail(usagef("verify requires --sig <hex|@file>"))
++	}
++	digest, source, err := digestIn.resolve()
++	if err != nil {
++		return out.fail(err)
++	}
++	encoding := keyvault.FormatSignatureDERLowS
++	if *raw {
++		encoding = keyvault.FormatSignatureRaw
++	}
++	sigBytes, err := bytesArg("--sig", *sigIn)
++	if err != nil {
++		return out.fail(err)
++	}
++	sig, err := keyvault.ParseSignature(sigBytes, encoding)
++	if err != nil {
++		return out.fail(err)
++	}
++	// The high-S policy is judged on the signature bytes alone, so it is
++	// refused here, before the SPKI file is read and before the vault is
++	// listed: a malleable signature never causes a Security call (rev1 F2).
++	inputs := map[string]any{"hash": "sha256", "digest": hex.EncodeToString(digest), "digest_source": source, "format": encoding, "low_s": sig.IsLowS(), "high_s_allowed": *allowHighS}
++	if !sig.IsLowS() && !*allowHighS {
++		inputs["verified"] = false
++		return out.failWith(inputs, &keyvault.Refusal{Code: keyvault.CodeHighSRefused, Message: "signature s is in the high half of the P-256 order (malleable form); the vault only accepts low-S signatures", Hint: "signatures made by mac-keyvault sign are always low-S; pass --allow-high-s to accept this one knowingly"})
++	}
++	// The public key: from the file, or from the vault after the record
++	// gate (readable record, registry row, readable public half).
++	var spki []byte
++	result := map[string]any{}
++	if *spkiPath != "" {
++		data, err := os.ReadFile(*spkiPath)
++		if err != nil {
++			return out.fail(usagef("--spki: %v", err))
++		}
++		der, _, err := keyvault.ParseSPKI(data)
++		if err != nil {
++			return out.fail(err)
++		}
++		spki = der
++		result["by"] = "spki"
++		result["spki"] = *spkiPath
++		result["fingerprint"] = keyvault.Key{SPKI: der}.Fingerprint()
++	} else {
++		addr, err := singleAddress(fs, positional, *kind, *version)
++		if err != nil {
++			return out.fail(err)
++		}
++		manager, err := newManager()
++		if err != nil {
++			return out.fail(err)
++		}
++		key, err := manager.PublicKeyFor(addr)
++		if err != nil {
++			return out.fail(err)
++		}
++		spki = key.SPKI
++		result = keyView(key)
++		result["by"] = "label"
++	}
++	for k, v := range inputs {
++		result[k] = v
++	}
++	verified, err := keyvault.VerifyDigest(spki, digest, sig)
++	if err != nil {
++		return out.fail(err)
++	}
++	result["verified"] = verified
++	if !verified {
++		return out.failWith(result, &keyvault.Refusal{Code: keyvault.CodeSignatureInvalid, Failure: true, Message: "signature does not verify over the digest under this public key", Hint: "the digest, the signature or the key is not the one that was signed; verdict false"})
++	}
++	return out.success(result, func(w io.Writer) { fmt.Fprintln(w, "verified: true") })
++}
++
+ func runRotate(args []string, out output) int {
+ 	fs := flag.NewFlagSet("rotate", flag.ContinueOnError)
+ 	kind := fs.String("kind", keyvault.KindKey, "record kind: key, public-key, certificate or secret")
+@@ -787,12 +1061,17 @@ Usage:
+   %s
+   %s
+   %s
++  %s
++  %s
+ 
++sign takes a SHA-256 digest (--digest) or hashes --data-file/--stdin itself and says so;
++it emits strict DER with low-S (or --raw r||s). verify judges the digest, the signature
++and a key (vault address or --spki FILE): exit 0 verified, 1 not, 3 high-S refused.
+ Raw labels are refused as foreign_label. --enclave and --user-presence fail with
+ missing_entitlement (OSStatus -34018) when the binary has no provisioning profile;
+ there is no silent fallback. --extraction agent must be typed literally.
+ 
+ Exit codes: 0 ok, 1 failure, 2 usage, 3 refused by a policy gate. Every error is
+ {code, message, hint, os_status}; text mode prints "error: <code>: <message>" and "hint: <hint>".
+-`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["version"])
++`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["version"])
+ }
+diff --git a/cmd/mac-keyvault/main_test.go b/cmd/mac-keyvault/main_test.go
+index 6f73e77..638b90e 100644
+--- a/cmd/mac-keyvault/main_test.go
++++ b/cmd/mac-keyvault/main_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"encoding/pem"
+ 	"errors"
+ 	"fmt"
++	"math/big"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+@@ -38,6 +39,10 @@ type memStore struct {
+ 	updates []string
+ 	lists   int
+ 	createE error
++	signs   []string
++	signE   error
++	// signHighS makes Sign return the high-S twin of every signature.
++	signHighS bool
+ }
+ 
+ func newMemStore(labels ...string) *memStore {
+@@ -102,7 +107,7 @@ func (s *memStore) UpdateTag(label string, tag []byte) error {
+ }
+ 
+ func (s *memStore) touched() bool {
+-	return len(s.creates)+len(s.deletes)+len(s.updates)+s.lists != 0
++	return len(s.creates)+len(s.deletes)+len(s.updates)+len(s.signs)+s.lists != 0
+ }
+ 
+ func (s *memStore) record(t *testing.T, label string) keyvault.Record {
+@@ -120,11 +125,13 @@ func (s *memStore) record(t *testing.T, label string) keyvault.Record {
+ 
+ var (
+ 	spkiCache   = map[byte][]byte{}
++	signerCache = map[string]*ecdsa.PrivateKey{} // by SPKI bytes
+ 	spkiCacheMu sync.Mutex
+ )
+ 
+ // generatorSPKI returns a real P-256 SPKI per salt so fingerprints differ
+-// per key and every representation (DER, PEM, JWK) parses.
++// per key and every representation (DER, PEM, JWK) parses; the private
++// half is kept so memStore.Sign can produce real signatures under it.
+ func generatorSPKI(salt byte) []byte {
+ 	spkiCacheMu.Lock()
+ 	defer spkiCacheMu.Unlock()
+@@ -140,9 +147,51 @@ func generatorSPKI(salt byte) []byte {
+ 		panic(err)
+ 	}
+ 	spkiCache[salt] = spki
++	signerCache[string(spki)] = key
+ 	return spki
+ }
+ 
++// signerFor returns the private key behind a generatorSPKI SPKI.
++func signerFor(spki []byte) *ecdsa.PrivateKey {
++	spkiCacheMu.Lock()
++	defer spkiCacheMu.Unlock()
++	return signerCache[string(spki)]
++}
++
++// Sign records the call and signs with the private half behind the item's
++// SPKI (crypto/ecdsa, DER out, the shape the bridge returns), low-S unless
++// signHighS asks for the high-S twin so the CLI's normalisation is
++// exercised; signE stands in for a Security.framework failure.
++func (s *memStore) Sign(label string, digest []byte) ([]byte, error) {
++	s.signs = append(s.signs, label)
++	if s.signE != nil {
++		return nil, s.signE
++	}
++	item, ok := s.keys[label]
++	if !ok {
++		return nil, keyvault.ErrNotFound
++	}
++	priv := signerFor(item.SPKI)
++	if priv == nil {
++		return nil, fmt.Errorf("memStore: no private key behind %s", label)
++	}
++	der, err := ecdsa.SignASN1(rand.Reader, priv, digest)
++	if err != nil {
++		return nil, err
++	}
++	// crypto/ecdsa does not normalise, so the fake decides the half
++	// deterministically: low-S by default, the high-S twin on request.
++	sig, err := keyvault.ParseSignature(der, keyvault.FormatSignatureDERLowS)
++	if err != nil {
++		return nil, err
++	}
++	sig = sig.LowS()
++	if s.signHighS {
++		sig = keyvault.Signature{R: sig.R, S: new(big.Int).Sub(elliptic.P256().Params().N, sig.S)}
++	}
++	return sig.Encode(keyvault.FormatSignatureDERLowS)
++}
++
+ func useStore(t *testing.T, store keyvault.Backend) {
+ 	t.Helper()
+ 	previousBackend, previousLock := newBackend, lockPath
+@@ -703,8 +752,8 @@ func TestRunRecordRoundTrip(t *testing.T) {
+ }
+ 
+ // describe derives operations from the primitive registry: the ec-p256
+-// keychain key lists export-public via pub and the reserved sign/verify
+-// operations, a record whose (kind, algorithm, store) has no row reports []
++// keychain key lists export-public via pub, ecdsa-sha256-sign via sign and
++// ecdsa-sha256-verify via verify (T2), the rest reserved, a record whose (kind, algorithm, store) has no row reports []
+ // with unsupported_primitive (plus the invariant finding) and exposure
+ // unknown, and a rev1 tag under a
+ // parseable label is schema 1 with service and purpose unknown, no
+@@ -727,7 +776,7 @@ func TestRunDescribeOperationsAndLegacy(t *testing.T) {
+ 	for _, op := range ops {
+ 		names[op.(map[string]any)["name"].(string)] = op.(map[string]any)["via"].(string)
+ 	}
+-	if names["export-public"] != "pub" || names["ecdsa-sha256-sign"] != "reserved" || names["ecdsa-sha256-verify"] != "reserved" || names["ecdh-p256"] != "" || names["ecies-p256-decrypt"] != "" || names["export-private"] != "" || len(view["findings"].([]any)) != 0 || view["exposure"] != "never" {
++	if names["export-public"] != "pub" || names["ecdsa-sha256-sign"] != "sign" || names["ecdsa-sha256-verify"] != "verify" || names["ecdh-p256"] != "" || names["ecies-p256-decrypt"] != "" || names["export-private"] != "" || len(view["findings"].([]any)) != 0 || view["exposure"] != "never" {
+ 		t.Fatalf("operations = %s", raw)
+ 	}
+ 
+@@ -1184,6 +1233,13 @@ func (g *guardedBackend) UpdateTag(label string, tag []byte) error {
+ 	return g.inner.UpdateTag(label, tag)
+ }
+ 
++func (g *guardedBackend) Sign(label string, digest []byte) ([]byte, error) {
++	if err := g.guard(label); err != nil {
++		return nil, err
++	}
++	return g.inner.Sign(label, digest)
++}
++
+ // End-to-end against the login keychain on this Mac through the production
+ // SecurityStore: init with a full record, the duplicate refusal, the
+ // explicit --enclave refusal with -34018, list, describe, pub, meta set/get,
+diff --git a/cmd/mac-keyvault/sign_test.go b/cmd/mac-keyvault/sign_test.go
+new file mode 100644
+index 0000000..e3c9e7f
+--- /dev/null
++++ b/cmd/mac-keyvault/sign_test.go
+@@ -0,0 +1,721 @@
++package main
++
++import (
++	"bytes"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/sha256"
++	"crypto/x509"
++	"encoding/asn1"
++	"encoding/hex"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"math/big"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/relux-works/mac-infra/internal/keyvault"
++)
++
++func digestHex(seed string) string {
++	sum := sha256.Sum256([]byte(seed))
++	return hex.EncodeToString(sum[:])
++}
++
++func hexBytes(t *testing.T, s string) []byte {
++	t.Helper()
++	b, err := hex.DecodeString(s)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return b
++}
++
++func writeTemp(t *testing.T, name string, data []byte) string {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), name)
++	if err := os.WriteFile(path, data, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
++
++// highSTwin returns (r, n-s) of a low-S signature as strict DER.
++func highSTwin(t *testing.T, der []byte) []byte {
++	t.Helper()
++	sig, err := keyvault.ParseSignature(der, keyvault.FormatSignatureDERLowS)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !sig.IsLowS() {
++		t.Fatal("premise: sign output must be low-S")
++	}
++	twin := keyvault.Signature{R: sig.R, S: new(big.Int).Sub(elliptic.P256().Params().N, sig.S)}
++	out, _ := twin.Encode(keyvault.FormatSignatureDERLowS)
++	return out
++}
++
++// run(sign) over a 32-byte digest emits strict DER (re-encodes to itself,
++// asn1 parses it) with low-S that verifies with crypto/ecdsa under the
++// key's SPKI (interop, this -> Go); --raw emits 64 bytes r||s carrying the
++// same integers; --out writes the bytes 0600; text mode prints hex;
++// --data-file and --stdin hash with SHA-256 and report digest_source and
++// the exact digest; a record whose format.signature is ecdsa-raw defaults
++// to raw and --format ecdsa-der-low-s overrides it; a backend that hands
++// back a high-S value is normalised (low_s true, normalized true, same
++// r) and the emitted signature still verifies.
++func TestRunSignFormatsAndInterop(t *testing.T) {
++	store := newMemStore(tl("sig", 1))
++	useStore(t, store)
++	label := tl("sig", 1)
++	pub := signerFor(store.keys[label].SPKI).PublicKey
++	digest := digestHex("sign formats")
++
++	code, resp, raw := runJSON(t, "sign", "test/sig", "--digest", digest)
++	if code != exitOK {
++		t.Fatalf("sign: %s", raw)
++	}
++	result := resultMap(t, resp)
++	if result["format"] != keyvault.FormatSignatureDERLowS || result["hash"] != "sha256" || result["digest"] != digest || result["digest_source"] != "digest" || result["low_s"] != true || result["normalized"] != false || result["label"] != label || len(store.signs) != 1 {
++		t.Fatalf("result: %s", raw)
++	}
++	der := hexBytes(t, result["signature"].(string))
++	var parsed struct{ R, S *big.Int }
++	rest, err := asn1.Unmarshal(der, &parsed)
++	if err != nil || len(rest) != 0 {
++		t.Fatalf("not DER: %v", err)
++	}
++	if again, _ := asn1.Marshal(parsed); !bytes.Equal(again, der) {
++		t.Fatal("DER is not strict")
++	}
++	if parsed.S.Cmp(new(big.Int).Rsh(elliptic.P256().Params().N, 1)) > 0 {
++		t.Fatal("s is in the high half")
++	}
++	if !ecdsa.VerifyASN1(&pub, hexBytes(t, digest), der) {
++		t.Fatal("crypto/ecdsa rejects the DER signature")
++	}
++
++	code, resp, raw = runJSON(t, "sign", "test/sig", "--digest", digest, "--raw")
++	if code != exitOK {
++		t.Fatalf("raw: %s", raw)
++	}
++	rawSig := hexBytes(t, resultMap(t, resp)["signature"].(string))
++	if len(rawSig) != 64 || resultMap(t, resp)["format"] != keyvault.FormatSignatureRaw {
++		t.Fatalf("raw: %s", raw)
++	}
++	if !ecdsa.Verify(&pub, hexBytes(t, digest), new(big.Int).SetBytes(rawSig[:32]), new(big.Int).SetBytes(rawSig[32:])) {
++		t.Fatal("crypto/ecdsa rejects the raw signature")
++	}
++
++	outPath := filepath.Join(t.TempDir(), "sig.der")
++	code, resp, raw = runJSON(t, "sign", "test/sig", "--digest", digest, "--out", outPath)
++	if code != exitOK || resultMap(t, resp)["out"] != outPath {
++		t.Fatalf("out: %s", raw)
++	}
++	written, err := os.ReadFile(outPath)
++	if err != nil || !ecdsa.VerifyASN1(&pub, hexBytes(t, digest), written) {
++		t.Fatalf("written signature: %v", err)
++	}
++	if info, _ := os.Stat(outPath); info.Mode().Perm() != 0o600 {
++		t.Fatalf("mode %v", info.Mode())
++	}
++
++	var stdout, stderr bytes.Buffer
++	if code := run([]string{"sign", "test/sig", "--digest", digest}, &stdout, &stderr); code != exitOK || stderr.Len() != 0 {
++		t.Fatalf("text: %d %s", code, stderr.String())
++	}
++	if !ecdsa.VerifyASN1(&pub, hexBytes(t, digest), hexBytes(t, strings.TrimSpace(stdout.String()))) {
++		t.Fatalf("text output is not a hex signature: %q", stdout.String())
++	}
++
++	data := []byte("the quick brown fox")
++	dataPath := writeTemp(t, "data.bin", data)
++	want := hex.EncodeToString(func() []byte { s := sha256.Sum256(data); return s[:] }())
++	code, resp, raw = runJSON(t, "sign", "test/sig", "--data-file", dataPath)
++	if code != exitOK || resultMap(t, resp)["digest"] != want || resultMap(t, resp)["digest_source"] != "file" {
++		t.Fatalf("data-file: %s", raw)
++	}
++	if !ecdsa.VerifyASN1(&pub, hexBytes(t, want), hexBytes(t, resultMap(t, resp)["signature"].(string))) {
++		t.Fatal("data-file signature does not verify over sha256(data)")
++	}
++	stdinReader = bytes.NewReader(data)
++	t.Cleanup(func() { stdinReader = os.Stdin })
++	code, resp, raw = runJSON(t, "sign", "test/sig", "--stdin")
++	if code != exitOK || resultMap(t, resp)["digest"] != want || resultMap(t, resp)["digest_source"] != "stdin" {
++		t.Fatalf("stdin: %s", raw)
++	}
++
++	// Record default ecdsa-raw, and the explicit override.
++	rawLabel := tl("rawdefault", 1)
++	item := memItem(rawLabel, 9)
++	rec, _ := keyvault.DecodeRecord(item.Tag)
++	rec.Format.Signature = keyvault.FormatSignatureRaw
++	item.Tag, _ = keyvault.EncodeRecord(rec)
++	store.keys[rawLabel] = item
++	if _, resp, raw = runJSON(t, "sign", "test/rawdefault", "--digest", digest); resultMap(t, resp)["format"] != keyvault.FormatSignatureRaw || len(hexBytes(t, resultMap(t, resp)["signature"].(string))) != 64 {
++		t.Fatalf("record default raw: %s", raw)
++	}
++	if _, resp, raw = runJSON(t, "sign", "test/rawdefault", "--digest", digest, "--format", keyvault.FormatSignatureDERLowS); resultMap(t, resp)["format"] != keyvault.FormatSignatureDERLowS {
++		t.Fatalf("override: %s", raw)
++	}
++
++	store.signHighS = true
++	code, resp, raw = runJSON(t, "sign", "test/sig", "--digest", digest)
++	if code != exitOK || resultMap(t, resp)["low_s"] != true || resultMap(t, resp)["normalized"] != true {
++		t.Fatalf("high-S backend: %s", raw)
++	}
++	normalised := hexBytes(t, resultMap(t, resp)["signature"].(string))
++	sig, err := keyvault.ParseSignature(normalised, keyvault.FormatSignatureDERLowS)
++	if err != nil || !sig.IsLowS() || !ecdsa.VerifyASN1(&pub, hexBytes(t, digest), normalised) {
++		t.Fatalf("normalised signature: %v", err)
++	}
++	store.signHighS = false
++}
++
++// run(verify) judges a signature over a digest: by label (exit 0, ok true,
++// verified true, by label, the key view) and by --spki DER or PEM (no store
++// call at all); a Go crypto/ecdsa signature over the same digest verifies
++// through --spki (interop, Go -> this); a raw signature verifies with
++// --raw. Verdict false is exit 1 signature_invalid with verified false in
++// the result: a tampered r byte, another digest, another key's SPKI. A
++// high-S signature (DER or raw) is exit 3 high_s_refused without
++// --allow-high-s (verdict not computed), and verifies with exit 0, low_s
++// false, when the flag is given. Text mode prints "verified: true|false".
++func TestRunVerifyVerdicts(t *testing.T) {
++	store := newMemStore(tl("ver", 1))
++	useStore(t, store)
++	label := tl("ver", 1)
++	spki := store.keys[label].SPKI
++	priv := signerFor(spki)
++	digest := digestHex("verify verdicts")
++
++	_, resp, raw := runJSON(t, "sign", "test/ver", "--digest", digest)
++	sigHex := resultMap(t, resp)["signature"].(string)
++	der := hexBytes(t, sigHex)
++	_, resp, _ = runJSON(t, "sign", "test/ver", "--digest", digest, "--raw")
++	rawHex := resultMap(t, resp)["signature"].(string)
++
++	code, resp, raw := runJSON(t, "verify", "test/ver", "--digest", digest, "--sig", sigHex)
++	if code != exitOK || !resp.OK || resultMap(t, resp)["verified"] != true || resultMap(t, resp)["by"] != "label" || resultMap(t, resp)["label"] != label || resultMap(t, resp)["low_s"] != true {
++		t.Fatalf("by label: %s", raw)
++	}
++	if len(store.signs) != 2 {
++		t.Fatalf("verify signed: %v", store.signs)
++	}
++	if code, resp, raw = runJSON(t, "verify", "test/ver", "--digest", digest, "--sig", rawHex, "--raw"); code != exitOK || resultMap(t, resp)["verified"] != true || resultMap(t, resp)["format"] != keyvault.FormatSignatureRaw {
++		t.Fatalf("raw by label: %s", raw)
++	}
++
++	derPath := writeTemp(t, "pub.der", spki)
++	pemPath := writeTemp(t, "pub.pem", keyvault.EncodePEM(spki))
++	sigPath := writeTemp(t, "sig.der", der)
++	for _, spkiPath := range []string{derPath, pemPath} {
++		fresh := newMemStore()
++		useStore(t, fresh)
++		code, resp, raw = runJSON(t, "verify", "--spki", spkiPath, "--digest", "@"+writeTemp(t, "digest.bin", hexBytes(t, digest)), "--sig", "@"+sigPath)
++		if code != exitOK || resultMap(t, resp)["verified"] != true || resultMap(t, resp)["by"] != "spki" || resultMap(t, resp)["fingerprint"] != (keyvault.Key{SPKI: spki}).Fingerprint() {
++			t.Fatalf("by spki %s: %s", spkiPath, raw)
++		}
++		if fresh.touched() {
++			t.Fatal("verify --spki touched the store")
++		}
++	}
++	useStore(t, store)
++
++	// Go -> this: a crypto/ecdsa signature verifies here.
++	goSig, err := ecdsa.SignASN1(rand.Reader, priv, hexBytes(t, digest))
++	if err != nil {
++		t.Fatal(err)
++	}
++	goLow, _ := keyvault.ParseSignature(goSig, keyvault.FormatSignatureDERLowS)
++	goLowDER, _ := goLow.LowS().Encode(keyvault.FormatSignatureDERLowS)
++	if code, resp, raw = runJSON(t, "verify", "--spki", pemPath, "--digest", digest, "--sig", hex.EncodeToString(goLowDER)); code != exitOK || resultMap(t, resp)["verified"] != true {
++		t.Fatalf("go signature: %s", raw)
++	}
++	if code, resp, raw = runJSON(t, "verify", "test/ver", "--digest", digest, "--sig", hex.EncodeToString(goLowDER)); code != exitOK || resultMap(t, resp)["verified"] != true {
++		t.Fatalf("go signature by label: %s", raw)
++	}
++
++	// Verdict false.
++	tampered := append([]byte(nil), der...)
++	tampered[5] ^= 0x01 // inside r
++	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	otherSPKI, _ := x509.MarshalPKIXPublicKey(&other.PublicKey)
++	falseCases := map[string][]string{
++		"tampered r":   {"verify", "test/ver", "--digest", digest, "--sig", hex.EncodeToString(tampered)},
++		"other digest": {"verify", "test/ver", "--digest", digestHex("other"), "--sig", sigHex},
++		"other key":    {"verify", "--spki", writeTemp(t, "other.der", otherSPKI), "--digest", digest, "--sig", sigHex},
++		"raw tampered": {"verify", "test/ver", "--digest", digest, "--sig", hex.EncodeToString(func() []byte { b := hexBytes(t, rawHex); b[40] ^= 0x80; return b }()), "--raw"},
++	}
++	for name, args := range falseCases {
++		t.Run(name, func(t *testing.T) {
++			code, resp, raw := runJSON(t, args...)
++			if code != exitFailure || resp.OK || resp.Error.Code != keyvault.CodeSignatureInvalid || resultMap(t, resp)["verified"] != false {
++				t.Fatalf("%s", raw)
++			}
++		})
++	}
++
++	// High-S.
++	high := highSTwin(t, der)
++	if !ecdsa.VerifyASN1(&priv.PublicKey, hexBytes(t, digest), high) {
++		t.Fatal("premise: the high-S twin is a valid ECDSA signature")
++	}
++	highRaw, _ := func() ([]byte, error) {
++		s, _ := keyvault.ParseSignature(high, keyvault.FormatSignatureDERLowS)
++		return s.Encode(keyvault.FormatSignatureRaw)
++	}()
++	for name, args := range map[string][]string{
++		"der by label": {"verify", "test/ver", "--digest", digest, "--sig", hex.EncodeToString(high)},
++		"der by spki":  {"verify", "--spki", pemPath, "--digest", digest, "--sig", hex.EncodeToString(high)},
++		"raw by label": {"verify", "test/ver", "--digest", digest, "--sig", hex.EncodeToString(highRaw), "--raw"},
++	} {
++		t.Run("high-s "+name, func(t *testing.T) {
++			fresh := newMemStore(tl("ver", 1))
++			fresh.keys[label] = store.keys[label]
++			useStore(t, fresh)
++			code, resp, raw := runJSON(t, args...)
++			if code != exitRefused || resp.OK || resp.Error.Code != keyvault.CodeHighSRefused || resultMap(t, resp)["verified"] != false || resultMap(t, resp)["low_s"] != false {
++				t.Fatalf("%s", raw)
++			}
++			if fresh.touched() {
++				t.Fatalf("high-S refusal touched the store: lists=%d signs=%v", fresh.lists, fresh.signs)
++			}
++			code, resp, raw = runJSON(t, append(args, "--allow-high-s")...)
++			if code != exitOK || resultMap(t, resp)["verified"] != true || resultMap(t, resp)["low_s"] != false || resultMap(t, resp)["high_s_allowed"] != true {
++				t.Fatalf("allowed: %s", raw)
++			}
++		})
++	}
++
++	var stdout, stderr bytes.Buffer
++	if code := run([]string{"verify", "test/ver", "--digest", digest, "--sig", sigHex}, &stdout, &stderr); code != exitOK || stdout.String() != "verified: true\n" || stderr.Len() != 0 {
++		t.Fatalf("text true: %d %q %q", code, stdout.String(), stderr.String())
++	}
++	stdout.Reset()
++	if code := run([]string{"verify", "test/ver", "--digest", digest, "--sig", hex.EncodeToString(tampered)}, &stdout, &stderr); code != exitFailure || stdout.String() != "verified: false\n" || !strings.Contains(stderr.String(), "error: signature_invalid:") {
++		t.Fatalf("text false: %d %q %q", code, stdout.String(), stderr.String())
++	}
++}
++
++// Regression for review rev1 F2 (high-S refusal ordered after the backend
++// read): a high-S signature without --allow-high-s is refused on the
++// signature bytes alone, before the vault is listed and before the --spki
++// file is read. The signatures are prepared independently with
++// crypto/ecdsa (never through run(sign)); the backend is a fresh recording
++// store that holds the addressed key with a signer behind it, so a leaked
++// List would succeed rather than fail for another reason, and the test
++// asserts zero backend calls. Ordering witnesses: an address with no item
++// and a --spki path that does not exist are still high_s_refused, not
++// not_found / usage — the key is never resolved. Positive control: the
++// low-S form of the same signature does reach the store and verifies.
++func TestRunVerifyHighSRefusedBeforeStore(t *testing.T) {
++	label := tl("hs", 1)
++	digest := digestHex("high-s before store")
++	seed := newMemStore(label)
++	priv := signerFor(seed.keys[label].SPKI)
++	goDER, err := ecdsa.SignASN1(rand.Reader, priv, hexBytes(t, digest))
++	if err != nil {
++		t.Fatal(err)
++	}
++	parsed, err := keyvault.ParseSignature(goDER, keyvault.FormatSignatureDERLowS)
++	if err != nil {
++		t.Fatal(err)
++	}
++	lowDER, _ := parsed.LowS().Encode(keyvault.FormatSignatureDERLowS)
++	highDER := highSTwin(t, lowDER)
++	highRaw, _ := keyvault.Signature{R: parsed.R, S: new(big.Int).Sub(elliptic.P256().Params().N, parsed.LowS().S)}.Encode(keyvault.FormatSignatureRaw)
++	if !ecdsa.VerifyASN1(&priv.PublicKey, hexBytes(t, digest), highDER) {
++		t.Fatal("premise: the high-S twin is a valid ECDSA signature")
++	}
++	missingSPKI := filepath.Join(t.TempDir(), "absent.pem")
++	cases := map[string][]string{
++		"der by label":         {"verify", "test/hs", "--digest", digest, "--sig", hex.EncodeToString(highDER)},
++		"raw by label":         {"verify", "test/hs", "--digest", digest, "--sig", hex.EncodeToString(highRaw), "--raw"},
++		"der by label @file":   {"verify", "test/hs", "--digest", "@" + writeTemp(t, "digest.bin", hexBytes(t, digest)), "--sig", "@" + writeTemp(t, "sig.der", highDER)},
++		"der by absent label":  {"verify", "test/nothere", "--digest", digest, "--sig", hex.EncodeToString(highDER)},
++		"der by absent --spki": {"verify", "--spki", missingSPKI, "--digest", digest, "--sig", hex.EncodeToString(highDER)},
++	}
++	for name, args := range cases {
++		t.Run(name, func(t *testing.T) {
++			fresh := newMemStore(label)
++			fresh.keys[label] = seed.keys[label]
++			useStore(t, fresh)
++			code, resp, raw := runJSON(t, args...)
++			if code != exitRefused || resp.OK || resp.Error.Code != keyvault.CodeHighSRefused {
++				t.Fatalf("%s", raw)
++			}
++			res := resultMap(t, resp)
++			if res["verified"] != false || res["low_s"] != false || res["high_s_allowed"] != false || res["digest"] != digest {
++				t.Fatalf("result: %s", raw)
++			}
++			if _, leaked := res["label"]; leaked {
++				t.Fatalf("key resolved before the refusal: %s", raw)
++			}
++			if fresh.touched() {
++				t.Fatalf("high-S refusal touched the store: lists=%d signs=%v", fresh.lists, fresh.signs)
++			}
++		})
++	}
++	t.Run("control low-S reaches the store", func(t *testing.T) {
++		fresh := newMemStore(label)
++		fresh.keys[label] = seed.keys[label]
++		useStore(t, fresh)
++		code, resp, raw := runJSON(t, "verify", "test/hs", "--digest", digest, "--sig", hex.EncodeToString(lowDER))
++		if code != exitOK || resultMap(t, resp)["verified"] != true || resultMap(t, resp)["label"] != label {
++			t.Fatalf("%s", raw)
++		}
++		if fresh.lists != 1 || len(fresh.signs) != 0 {
++			t.Fatalf("control: lists=%d signs=%v", fresh.lists, fresh.signs)
++		}
++	})
++}
++
++// Malformed input is refused before any store call (zero lists, zero
++// signs): a digest of 31, 33 or 0 bytes as hex or @file (invalid_digest,
++// exit 3), no or two digest sources / non-hex / unreadable files / --raw
++// against --format DER / address plus --spki / missing --sig (usage, exit
++// 2), a raw signature of 63 or 65 bytes, non-strict DER (padded integer,
++// trailing byte), r = 0 (invalid_signature, exit 3), an SPKI that is not
++// P-256 or not a key (invalid_public_key, exit 3), and a raw label in
++// place of an address (foreign_label, exit 3) on both commands. A @file
++// digest is taken as raw bytes even when its 32 bytes look like hex text
++// (positive control: it signs and reports those bytes).
++func TestRunSignVerifyRefuseBadInputBeforeStore(t *testing.T) {
++	digest := digestHex("bad input")
++	sig := func() string {
++		store := newMemStore(tl("bad", 1))
++		useStore(t, store)
++		_, resp, _ := runJSON(t, "sign", "test/bad", "--digest", digest)
++		return resultMap(t, resp)["signature"].(string)
++	}()
++	der := hexBytes(t, sig)
++	var parsed struct{ R, S *big.Int }
++	if _, err := asn1.Unmarshal(der, &parsed); err != nil {
++		t.Fatal(err)
++	}
++	type rawInts struct{ R, S asn1.RawValue }
++	padded, _ := asn1.Marshal(rawInts{R: asn1.RawValue{Tag: asn1.TagInteger, Bytes: append([]byte{0, 0}, parsed.R.Bytes()...)}, S: asn1.RawValue{Tag: asn1.TagInteger, Bytes: parsed.S.Bytes()}})
++	zeroR, _ := asn1.Marshal(struct{ R, S *big.Int }{big.NewInt(0), parsed.S})
++	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
++	spki384, _ := x509.MarshalPKIXPublicKey(&p384.PublicKey)
++	spkiPath := writeTemp(t, "p384.der", spki384)
++	notKey := writeTemp(t, "not.pem", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{1, 2, 3}}))
++	short := writeTemp(t, "short.bin", make([]byte, 31))
++	long := writeTemp(t, "long.bin", make([]byte, 33))
++	rawSig := func(n int) string { return strings.Repeat("11", n) }
++	cases := map[string]struct {
++		args    []string
++		code    int
++		errCode string
++	}{
++		"sign digest 31 hex":      {[]string{"sign", "test/bad", "--digest", digest[:62]}, exitRefused, keyvault.CodeInvalidDigest},
++		"sign digest 33 hex":      {[]string{"sign", "test/bad", "--digest", digest + "aa"}, exitRefused, keyvault.CodeInvalidDigest},
++		"sign digest empty file":  {[]string{"sign", "test/bad", "--digest", "@" + writeTemp(t, "empty", nil)}, exitRefused, keyvault.CodeInvalidDigest},
++		"sign digest 31 file":     {[]string{"sign", "test/bad", "--digest", "@" + short}, exitRefused, keyvault.CodeInvalidDigest},
++		"sign digest 33 file":     {[]string{"sign", "test/bad", "--digest", "@" + long}, exitRefused, keyvault.CodeInvalidDigest},
++		"verify digest 31":        {[]string{"verify", "test/bad", "--digest", digest[:62], "--sig", sig}, exitRefused, keyvault.CodeInvalidDigest},
++		"verify spki digest 33":   {[]string{"verify", "--spki", spkiPath, "--digest", digest + "00", "--sig", sig}, exitRefused, keyvault.CodeInvalidDigest},
++		"sign no source":          {[]string{"sign", "test/bad"}, exitUsage, "usage"},
++		"sign two sources":        {[]string{"sign", "test/bad", "--digest", digest, "--stdin"}, exitUsage, "usage"},
++		"sign non-hex":            {[]string{"sign", "test/bad", "--digest", "zz" + digest[2:]}, exitUsage, "usage"},
++		"sign missing file":       {[]string{"sign", "test/bad", "--digest", "@" + filepath.Join(t.TempDir(), "nope")}, exitUsage, "usage"},
++		"sign data-file missing":  {[]string{"sign", "test/bad", "--data-file", filepath.Join(t.TempDir(), "nope")}, exitUsage, "usage"},
++		"sign raw vs format":      {[]string{"sign", "test/bad", "--digest", digest, "--raw", "--format", keyvault.FormatSignatureDERLowS}, exitUsage, "usage"},
++		"sign bad format":         {[]string{"sign", "test/bad", "--digest", digest, "--format", "p1363"}, exitUsage, "usage"},
++		"sign no address":         {[]string{"sign", "--digest", digest}, exitUsage, "usage"},
++		"sign raw label":          {[]string{"sign", tl("bad", 1), "--digest", digest}, exitRefused, keyvault.CodeForeignLabel},
++		"sign bad kind":           {[]string{"sign", "test/bad", "--digest", digest, "--kind", "cert"}, exitRefused, keyvault.CodeInvalidKind},
++		"verify no sig":           {[]string{"verify", "test/bad", "--digest", digest}, exitUsage, "usage"},
++		"verify address and spki": {[]string{"verify", "test/bad", "--spki", spkiPath, "--digest", digest, "--sig", sig}, exitUsage, "usage"},
++		"verify neither":          {[]string{"verify", "--digest", digest, "--sig", sig}, exitUsage, "usage"},
++		"verify raw label":        {[]string{"verify", tl("bad", 1), "--digest", digest, "--sig", sig}, exitRefused, keyvault.CodeForeignLabel},
++		"verify raw 63":           {[]string{"verify", "test/bad", "--digest", digest, "--sig", rawSig(63), "--raw"}, exitRefused, keyvault.CodeInvalidSignature},
++		"verify raw 65":           {[]string{"verify", "test/bad", "--digest", digest, "--sig", rawSig(65), "--raw"}, exitRefused, keyvault.CodeInvalidSignature},
++		"verify der as raw":       {[]string{"verify", "test/bad", "--digest", digest, "--sig", sig, "--raw"}, exitRefused, keyvault.CodeInvalidSignature},
++		"verify padded der":       {[]string{"verify", "test/bad", "--digest", digest, "--sig", hex.EncodeToString(padded)}, exitRefused, keyvault.CodeInvalidSignature},
++		"verify trailing byte":    {[]string{"verify", "test/bad", "--digest", digest, "--sig", sig + "00"}, exitRefused, keyvault.CodeInvalidSignature},
++		"verify zero r":           {[]string{"verify", "test/bad", "--digest", digest, "--sig", hex.EncodeToString(zeroR)}, exitRefused, keyvault.CodeInvalidSignature},
++		"verify sig non-hex":      {[]string{"verify", "test/bad", "--digest", digest, "--sig", "xyz"}, exitUsage, "usage"},
++		"verify spki p384":        {[]string{"verify", "--spki", spkiPath, "--digest", digest, "--sig", sig}, exitRefused, keyvault.CodeInvalidPublicKey},
++		"verify spki not key":     {[]string{"verify", "--spki", notKey, "--digest", digest, "--sig", sig}, exitRefused, keyvault.CodeInvalidPublicKey},
++		"verify spki missing":     {[]string{"verify", "--spki", filepath.Join(t.TempDir(), "nope"), "--digest", digest, "--sig", sig}, exitUsage, "usage"},
++	}
++	for name, tc := range cases {
++		t.Run(name, func(t *testing.T) {
++			store := newMemStore(tl("bad", 1))
++			useStore(t, store)
++			code, resp, raw := runJSON(t, tc.args...)
++			if code != tc.code || resp.OK || resp.Error == nil || resp.Error.Code != tc.errCode {
++				t.Fatalf("code %d, want %d %s: %s", code, tc.code, tc.errCode, raw)
++			}
++			if store.touched() {
++				t.Fatalf("store touched: lists=%d signs=%v", store.lists, store.signs)
++			}
++		})
++	}
++	t.Run("hex-looking file is raw bytes", func(t *testing.T) {
++		store := newMemStore(tl("bad", 1))
++		useStore(t, store)
++		text := []byte("0123456789abcdef0123456789abcdef") // 32 ASCII bytes
++		code, resp, raw := runJSON(t, "sign", "test/bad", "--digest", "@"+writeTemp(t, "hexlike.bin", text))
++		if code != exitOK || resultMap(t, resp)["digest"] != hex.EncodeToString(text) {
++			t.Fatalf("%s", raw)
++		}
++	})
++}
++
++// The sign policy gates run through run(sign) with the manager clock fixed
++// at 2026-09-15T12:00Z: usages without sign is exit 3 usage_refused, a
++// not_after one hour in the past is exit 3 expired, a not_after exactly
++// now is expired, a rev1 tag is exit 3 metadata_unknown, a record with no
++// registry row (store enclave) is exit 1 unsupported_primitive, a forged
++// record (title too long) is exit 3 metadata_unknown, an unknown address
++// is exit 1 not_found — each with zero backend signs. Controls: usages
++// sign with a not_after one hour ahead signs; verify by label still works
++// for the verify-only and the expired key (verification needs no usage
++// and no validity), and describe shows sign/verify via their commands.
++func TestRunSignPolicyGates(t *testing.T) {
++	fixed := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
++	now = func() time.Time { return fixed }
++	t.Cleanup(func() { now = time.Now })
++	digest := digestHex("policy")
++	stored := func(purpose string, mutate func(*keyvault.Record)) *memStore {
++		label := tl(purpose, 1)
++		store := newMemStore(label)
++		item := store.keys[label]
++		rec, _ := keyvault.DecodeRecord(item.Tag)
++		mutate(&rec)
++		item.Tag, _ = keyvault.EncodeRecord(rec)
++		store.keys[label] = item
++		return store
++	}
++	past, exact, future := keyvault.NewTime(fixed.Add(-time.Hour)), keyvault.NewTime(fixed), keyvault.NewTime(fixed.Add(time.Hour))
++	cases := map[string]struct {
++		mutate  func(*keyvault.Record)
++		code    int
++		errCode string
++	}{
++		"verify only":     {func(r *keyvault.Record) { r.Usages = []string{"verify"} }, exitRefused, keyvault.CodeUsageRefused},
++		"wrap only":       {func(r *keyvault.Record) { r.Usages = []string{"wrap"} }, exitRefused, keyvault.CodeUsageRefused},
++		"expired":         {func(r *keyvault.Record) { r.Validity.NotAfter = &past }, exitRefused, keyvault.CodeExpired},
++		"expires now":     {func(r *keyvault.Record) { r.Validity.NotAfter = &exact }, exitRefused, keyvault.CodeExpired},
++		"no registry row": {func(r *keyvault.Record) { r.Store = keyvault.StoreEnclave }, exitFailure, keyvault.CodeUnsupportedPrimitive},
++		"forged title":    {func(r *keyvault.Record) { r.Title = strings.Repeat("x", 81) }, exitRefused, keyvault.CodeMetadataUnknown},
++	}
++	for name, tc := range cases {
++		t.Run(name, func(t *testing.T) {
++			store := stored("gate", tc.mutate)
++			useStore(t, store)
++			code, resp, raw := runJSON(t, "sign", "test/gate", "--digest", digest)
++			if code != tc.code || resp.Error == nil || resp.Error.Code != tc.errCode {
++				t.Fatalf("code %d want %d %s: %s", code, tc.code, tc.errCode, raw)
++			}
++			if len(store.signs) != 0 {
++				t.Fatalf("backend signed: %v", store.signs)
++			}
++		})
++	}
++	t.Run("rev1 tag", func(t *testing.T) {
++		label := tl("legacy", 1)
++		store := newMemStore()
++		store.keys[label] = keyvault.Item{Label: label, Tag: []byte("mac-keyvault/1 store=keychain created=2026-09-15T08:00:00Z"), SPKI: generatorSPKI(5)}
++		useStore(t, store)
++		if code, resp, raw := runJSON(t, "sign", "test/legacy", "--digest", digest); code != exitRefused || resp.Error.Code != keyvault.CodeMetadataUnknown || len(store.signs) != 0 {
++			t.Fatalf("%s", raw)
++		}
++	})
++	t.Run("not found", func(t *testing.T) {
++		store := newMemStore(tl("present", 1))
++		useStore(t, store)
++		if code, resp, raw := runJSON(t, "sign", "test/absent", "--digest", digest); code != exitFailure || resp.Error.Code != "not_found" || len(store.signs) != 0 {
++			t.Fatalf("%s", raw)
++		}
++	})
++	t.Run("control future not_after signs", func(t *testing.T) {
++		store := stored("gate", func(r *keyvault.Record) { r.Validity.NotAfter = &future })
++		useStore(t, store)
++		if code, _, raw := runJSON(t, "sign", "test/gate", "--digest", digest); code != exitOK || len(store.signs) != 1 {
++			t.Fatalf("%s", raw)
++		}
++	})
++	for name, mutate := range map[string]func(*keyvault.Record){
++		"verify only": func(r *keyvault.Record) { r.Usages = []string{"verify"} },
++		"expired":     func(r *keyvault.Record) { r.Validity.NotAfter = &past },
++	} {
++		t.Run("verify by label "+name, func(t *testing.T) {
++			store := stored("gate", mutate)
++			useStore(t, store)
++			priv := signerFor(store.keys[tl("gate", 1)].SPKI)
++			goSig, _ := ecdsa.SignASN1(rand.Reader, priv, hexBytes(t, digest))
++			low, _ := keyvault.ParseSignature(goSig, keyvault.FormatSignatureDERLowS)
++			lowDER, _ := low.LowS().Encode(keyvault.FormatSignatureDERLowS)
++			if code, resp, raw := runJSON(t, "verify", "test/gate", "--digest", digest, "--sig", hex.EncodeToString(lowDER)); code != exitOK || resultMap(t, resp)["verified"] != true {
++				t.Fatalf("%s", raw)
++			}
++			if len(store.signs) != 0 {
++				t.Fatal("verify signed")
++			}
++		})
++	}
++	t.Run("verify by label no registry row", func(t *testing.T) {
++		store := stored("gate", func(r *keyvault.Record) { r.Store = keyvault.StoreEnclave })
++		useStore(t, store)
++		if code, resp, raw := runJSON(t, "verify", "test/gate", "--digest", digest, "--sig", strings.Repeat("11", 64), "--raw"); code != exitFailure || resp.Error.Code != keyvault.CodeUnsupportedPrimitive {
++			t.Fatalf("%s", raw)
++		}
++	})
++	t.Run("describe via", func(t *testing.T) {
++		store := newMemStore(tl("via", 1))
++		useStore(t, store)
++		_, resp, raw := runJSON(t, "describe", "test/via")
++		via := map[string]string{}
++		for _, op := range resultMap(t, resp)["operations"].([]any) {
++			via[op.(map[string]any)["name"].(string)] = op.(map[string]any)["via"].(string)
++		}
++		if via["ecdsa-sha256-sign"] != "sign" || via["ecdsa-sha256-verify"] != "verify" {
++			t.Fatalf("%s", raw)
++		}
++	})
++}
++
++// A Security.framework failure from the bridge on sign is exit 1 security
++// with the OSStatus attached, after the gates passed.
++func TestRunSignSecurityFailure(t *testing.T) {
++	store := newMemStore(tl("os", 1))
++	store.signE = &keyvault.StatusError{Op: "sign", Status: -25293}
++	useStore(t, store)
++	code, resp, raw := runJSON(t, "sign", "test/os", "--digest", digestHex("os"))
++	if code != exitFailure || resp.Error.Code != keyvault.CodeSecurity || resp.Error.Status != -25293 || len(store.signs) != 1 {
++		t.Fatalf("%s", raw)
++	}
++}
++
++// End-to-end through the production SecurityStore on this Mac: a key
++// created by run(init) signs through run(sign); the DER verifies with
++// crypto/ecdsa under run(pub)'s SPKI and with `openssl dgst -sha256
++// -verify` (skipped when openssl is absent); a signature `openssl dgst
++// -sign` made with a Go-generated key verifies through run(verify --spki)
++// (interop both ways); run(verify) by label returns exit 0, a tampered
++// signature exit 1 and a high-S twin exit 3; a key created with --usages
++// verify refuses sign with usage_refused and a key with --not-after in the
++// past refuses with expired, both without a bridge signature. Every label
++// is under service test and deleted in cleanup.
++func TestRunSignVerifyAgainstLoginKeychain(t *testing.T) {
++	if os.Getenv("MAC_KEYVAULT_SKIP_KEYCHAIN") != "" {
++		t.Skip("MAC_KEYVAULT_SKIP_KEYCHAIN set")
++	}
++	guard := &guardedBackend{t: t, inner: keyvault.NewSecurityStore()}
++	useStore(t, guard)
++	t.Cleanup(func() {
++		for _, label := range guard.touched {
++			if err := guard.inner.Delete(label); err != nil && !errors.Is(err, keyvault.ErrNotFound) {
++				t.Errorf("cleanup %s: %v", label, err)
++			}
++		}
++	})
++	purpose := fmt.Sprintf("sign-e2e-%d", os.Getpid())
++	addr := "test/" + purpose
++	if code, _, raw := runJSON(t, initArgs(purpose, "--usages", "sign,verify")...); code != exitOK {
++		t.Fatalf("init: %s", raw)
++	}
++	data := []byte("interop payload " + purpose)
++	dataPath := writeTemp(t, "data.bin", data)
++	digest := sha256.Sum256(data)
++	sigPath := filepath.Join(t.TempDir(), "sig.der")
++	code, resp, raw := runJSON(t, "sign", addr, "--data-file", dataPath, "--out", sigPath)
++	if code != exitOK || resultMap(t, resp)["digest"] != hex.EncodeToString(digest[:]) {
++		t.Fatalf("sign: %s", raw)
++	}
++	der, err := os.ReadFile(sigPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pemPath := filepath.Join(t.TempDir(), "pub.pem")
++	if code, _, raw := runJSON(t, "pub", addr, "--out", pemPath); code != exitOK {
++		t.Fatalf("pub: %s", raw)
++	}
++	pemBytes, _ := os.ReadFile(pemPath)
++	spki, pubKey, err := keyvault.ParseSPKI(pemBytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !ecdsa.VerifyASN1(pubKey, digest[:], der) {
++		t.Fatal("crypto/ecdsa rejects the keychain signature")
++	}
++	if sig, _ := keyvault.ParseSignature(der, keyvault.FormatSignatureDERLowS); !sig.IsLowS() {
++		t.Fatal("emitted signature is not low-S")
++	}
++	_ = spki
++
++	if code, resp, raw := runJSON(t, "verify", addr, "--data-file", dataPath, "--sig", "@"+sigPath); code != exitOK || resultMap(t, resp)["verified"] != true {
++		t.Fatalf("verify by label: %s", raw)
++	}
++	tampered := append([]byte(nil), der...)
++	tampered[len(tampered)-1] ^= 0x01
++	if code, resp, raw := runJSON(t, "verify", addr, "--digest", hex.EncodeToString(digest[:]), "--sig", hex.EncodeToString(tampered)); code != exitFailure || resp.Error.Code != keyvault.CodeSignatureInvalid {
++		t.Fatalf("tampered: %s", raw)
++	}
++	if code, resp, raw := runJSON(t, "verify", "--spki", pemPath, "--digest", hex.EncodeToString(digest[:]), "--sig", hex.EncodeToString(highSTwin(t, der))); code != exitRefused || resp.Error.Code != keyvault.CodeHighSRefused {
++		t.Fatalf("high-S: %s", raw)
++	}
++
++	openssl, err := exec.LookPath("openssl")
++	if err != nil {
++		t.Log("openssl not on PATH; openssl interop not run")
++	} else {
++		out, err := exec.Command(openssl, "dgst", "-sha256", "-verify", pemPath, "-signature", sigPath, dataPath).CombinedOutput()
++		if err != nil || !strings.Contains(string(out), "Verified OK") {
++			t.Fatalf("openssl verify: %v %s", err, out)
++		}
++		// openssl -> this: sign with a Go-generated key through openssl,
++		// verify through run(verify --spki).
++		goKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++		pkcs8, _ := x509.MarshalPKCS8PrivateKey(goKey)
++		goPriv := writeTemp(t, "go.key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}))
++		goSPKI, _ := x509.MarshalPKIXPublicKey(&goKey.PublicKey)
++		goPub := writeTemp(t, "go.pem", keyvault.EncodePEM(goSPKI))
++		osslSig := filepath.Join(t.TempDir(), "ossl.der")
++		if out, err := exec.Command(openssl, "dgst", "-sha256", "-sign", goPriv, "-out", osslSig, dataPath).CombinedOutput(); err != nil {
++			t.Fatalf("openssl sign: %v %s", err, out)
++		}
++		osslDER, _ := os.ReadFile(osslSig)
++		sig, err := keyvault.ParseSignature(osslDER, keyvault.FormatSignatureDERLowS)
++		if err != nil {
++			t.Fatalf("openssl DER: %v", err)
++		}
++		args := []string{"verify", "--spki", goPub, "--data-file", dataPath, "--sig", "@" + osslSig}
++		if !sig.IsLowS() {
++			args = append(args, "--allow-high-s") // openssl does not normalise
++		}
++		if code, resp, raw := runJSON(t, args...); code != exitOK || resultMap(t, resp)["verified"] != true {
++			t.Fatalf("openssl signature: %s", raw)
++		}
++	}
++
++	verifyOnly := purpose + "-vo"
++	if code, _, raw := runJSON(t, initArgs(verifyOnly, "--usages", "verify")...); code != exitOK {
++		t.Fatalf("init verify-only: %s", raw)
++	}
++	if code, resp, raw := runJSON(t, "sign", "test/"+verifyOnly, "--digest", hex.EncodeToString(digest[:])); code != exitRefused || resp.Error.Code != keyvault.CodeUsageRefused {
++		t.Fatalf("usage_refused: %s", raw)
++	}
++	expired := purpose + "-exp"
++	if code, _, raw := runJSON(t, initArgs(expired, "--usages", "sign", "--not-after", "2026-01-01T00:00:00Z")...); code != exitOK {
++		t.Fatalf("init expired: %s", raw)
++	}
++	if code, resp, raw := runJSON(t, "sign", "test/"+expired, "--digest", hex.EncodeToString(digest[:])); code != exitRefused || resp.Error.Code != keyvault.CodeExpired {
++		t.Fatalf("expired: %s", raw)
++	}
++	for _, touched := range guard.touched {
++		if !keyvault.IsTestLabel(touched) {
++			t.Fatalf("non-test label touched: %s", touched)
++		}
++	}
++}
+diff --git a/internal/keyvault/ecdsa.go b/internal/keyvault/ecdsa.go
+new file mode 100644
+index 0000000..63216b8
+--- /dev/null
++++ b/internal/keyvault/ecdsa.go
+@@ -0,0 +1,168 @@
++package keyvault
++
++import (
++	"bytes"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/x509"
++	"encoding/asn1"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"math/big"
++)
++
++// DigestSize is the only digest length ecdsa-sha256-sign and -verify take:
++// the caller supplies a SHA-256 digest; the vault hashes bytes itself only
++// when it is asked to (--data-file / --stdin), and then says so.
++const DigestSize = 32
++
++// RawSignatureSize is r||s of a P-256 signature, 32 bytes each.
++const RawSignatureSize = 64
++
++// Error-contract codes of the sign/verify paths.
++const (
++	CodeInvalidDigest    = "invalid_digest"
++	CodeInvalidSignature = "invalid_signature"
++	CodeSignatureInvalid = "signature_invalid"
++	CodeHighSRefused     = "high_s_refused"
++	CodeUsageRefused     = "usage_refused"
++	CodeExpired          = "expired"
++	CodeInvalidPublicKey = "invalid_public_key"
++)
++
++// ValidateDigest refuses anything but exactly DigestSize bytes. It is the
++// first gate of sign and verify and runs before the address is resolved, so
++// no Security call happens for a mis-sized digest.
++func ValidateDigest(digest []byte) error {
++	if len(digest) != DigestSize {
++		return &Refusal{Code: CodeInvalidDigest, Message: fmt.Sprintf("digest is %d bytes; ecdsa-sha256 takes exactly a %d-byte SHA-256 digest", len(digest), DigestSize), Hint: "pass --digest <64 hex chars|@file with 32 bytes>, or let the tool hash with --data-file FILE / --stdin; nothing was signed"}
++	}
++	return nil
++}
++
++// Signature is one ECDSA signature as its two integers.
++type Signature struct {
++	R, S *big.Int
++}
++
++// ecdsaSignatureASN1 is the X9.62 SEQUENCE { r INTEGER, s INTEGER }.
++type ecdsaSignatureASN1 struct {
++	R, S *big.Int
++}
++
++var p256Order = elliptic.P256().Params().N
++var p256HalfOrder = new(big.Int).Rsh(p256Order, 1)
++
++// ParseSignature decodes DER (ecdsa-der-low-s) or raw r||s (ecdsa-raw). DER
++// is strict: the bytes must re-encode to themselves (no non-minimal
++// lengths or integers, no trailing bytes, no negative values). Both
++// integers must lie in [1, n-1]. Low-S is not judged here; see IsLowS.
++func ParseSignature(data []byte, format string) (Signature, error) {
++	var sig Signature
++	switch format {
++	case FormatSignatureRaw:
++		if len(data) != RawSignatureSize {
++			return Signature{}, &Refusal{Code: CodeInvalidSignature, Message: fmt.Sprintf("raw signature is %d bytes; ecdsa-raw is exactly %d bytes (r||s)", len(data), RawSignatureSize), Hint: "pass the 64-byte r||s signature, or drop --raw for DER; nothing was verified"}
++		}
++		sig = Signature{R: new(big.Int).SetBytes(data[:32]), S: new(big.Int).SetBytes(data[32:])}
++	case FormatSignatureDERLowS:
++		var decoded ecdsaSignatureASN1
++		rest, err := asn1.Unmarshal(data, &decoded)
++		if err != nil {
++			return Signature{}, &Refusal{Code: CodeInvalidSignature, Message: "signature is not a DER ECDSA-Sig-Value: " + err.Error(), Hint: "pass the DER SEQUENCE {r, s} the sign command produced, or --raw for r||s; nothing was verified"}
++		}
++		if len(rest) != 0 {
++			return Signature{}, &Refusal{Code: CodeInvalidSignature, Message: fmt.Sprintf("signature carries %d trailing bytes after the DER SEQUENCE", len(rest)), Hint: "strict DER has nothing after the SEQUENCE; nothing was verified"}
++		}
++		if decoded.R == nil || decoded.S == nil {
++			return Signature{}, &Refusal{Code: CodeInvalidSignature, Message: "signature DER lacks r or s", Hint: "pass the DER SEQUENCE {r, s} the sign command produced; nothing was verified"}
++		}
++		sig = Signature{R: decoded.R, S: decoded.S}
++		canonical, err := asn1.Marshal(ecdsaSignatureASN1{R: sig.R, S: sig.S})
++		if err != nil || !bytes.Equal(canonical, data) {
++			return Signature{}, &Refusal{Code: CodeInvalidSignature, Message: "signature DER is not strict (non-minimal length or integer encoding)", Hint: "strict DER re-encodes to the same bytes; re-issue the signature; nothing was verified"}
++		}
++	default:
++		return Signature{}, &Refusal{Code: CodeInvalidFormat, Message: fmt.Sprintf("signature format %q is not one of %s, %s", format, FormatSignatureDERLowS, FormatSignatureRaw), Hint: hintFixInputNoSecurityCal}
++	}
++	if sig.R.Sign() <= 0 || sig.S.Sign() <= 0 || sig.R.Cmp(p256Order) >= 0 || sig.S.Cmp(p256Order) >= 0 {
++		return Signature{}, &Refusal{Code: CodeInvalidSignature, Message: "signature r or s is outside [1, n-1] of P-256", Hint: "the value is not a P-256 ECDSA signature; nothing was verified"}
++	}
++	return sig, nil
++}
++
++// IsLowS reports whether s <= n/2 (the non-malleable half).
++func (s Signature) IsLowS() bool {
++	return s.S.Cmp(p256HalfOrder) <= 0
++}
++
++// LowS returns the signature with s replaced by n-s when it is in the high
++// half; (r, n-s) verifies for the same digest and key.
++func (s Signature) LowS() Signature {
++	if s.IsLowS() {
++		return s
++	}
++	return Signature{R: s.R, S: new(big.Int).Sub(p256Order, s.S)}
++}
++
++// Encode renders the signature as strict DER or raw r||s.
++func (s Signature) Encode(format string) ([]byte, error) {
++	switch format {
++	case FormatSignatureRaw:
++		out := make([]byte, RawSignatureSize)
++		s.R.FillBytes(out[:32])
++		s.S.FillBytes(out[32:])
++		return out, nil
++	case FormatSignatureDERLowS:
++		return asn1.Marshal(ecdsaSignatureASN1{R: s.R, S: s.S})
++	default:
++		return nil, &Refusal{Code: CodeInvalidFormat, Message: fmt.Sprintf("signature format %q is not one of %s, %s", format, FormatSignatureDERLowS, FormatSignatureRaw), Hint: hintFixInputNoSecurityCal}
++	}
++}
++
++// ParseSPKI reads a P-256 public key from DER or PEM SubjectPublicKeyInfo
++// and returns its DER form (the fingerprint input) with the parsed key.
++func ParseSPKI(data []byte) ([]byte, *ecdsa.PublicKey, error) {
++	der := data
++	if block, rest := pem.Decode(data); block != nil {
++		if block.Type != "PUBLIC KEY" {
++			return nil, nil, &Refusal{Code: CodeInvalidPublicKey, Message: fmt.Sprintf("PEM block is %q, not PUBLIC KEY", block.Type), Hint: "pass the SPKI DER or PEM that pub produced; nothing was verified"}
++		}
++		if len(bytes.TrimSpace(rest)) != 0 {
++			return nil, nil, &Refusal{Code: CodeInvalidPublicKey, Message: "PEM input carries data after the PUBLIC KEY block", Hint: "pass exactly one SPKI PEM block; nothing was verified"}
++		}
++		der = block.Bytes
++	}
++	pub, err := parseP256SPKI(der)
++	if err != nil {
++		return nil, nil, &Refusal{Code: CodeInvalidPublicKey, Message: "public key is not a P-256 SPKI: " + err.Error(), Hint: "pass the SPKI DER or PEM that pub produced; nothing was verified"}
++	}
++	return der, pub, nil
++}
++
++func parseP256SPKI(der []byte) (*ecdsa.PublicKey, error) {
++	parsed, err := x509.ParsePKIXPublicKey(der)
++	if err != nil {
++		return nil, err
++	}
++	pub, ok := parsed.(*ecdsa.PublicKey)
++	if !ok || pub.Curve != elliptic.P256() {
++		return nil, errors.New("not an EC P-256 key")
++	}
++	return pub, nil
++}
++
++// VerifyDigest checks sig over digest under the P-256 SPKI with
++// crypto/ecdsa. The verdict is false, not an error, for a well-formed
++// signature that does not match; an unparsable SPKI is an error.
++func VerifyDigest(spki, digest []byte, sig Signature) (bool, error) {
++	if err := ValidateDigest(digest); err != nil {
++		return false, err
++	}
++	_, pub, err := ParseSPKI(spki)
++	if err != nil {
++		return false, err
++	}
++	return ecdsa.Verify(pub, digest, sig.R, sig.S), nil
++}
+diff --git a/internal/keyvault/ecdsa_test.go b/internal/keyvault/ecdsa_test.go
+new file mode 100644
+index 0000000..58aa6e9
+--- /dev/null
++++ b/internal/keyvault/ecdsa_test.go
+@@ -0,0 +1,337 @@
++package keyvault
++
++import (
++	"bytes"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/sha256"
++	"crypto/x509"
++	"encoding/asn1"
++	"errors"
++	"math/big"
++	"strings"
++	"testing"
++	"time"
++)
++
++func testDigest(seed string) []byte {
++	sum := sha256.Sum256([]byte(seed))
++	return sum[:]
++}
++
++// ParseSignature admits exactly strict DER (re-encodes to itself) with r, s
++// in [1, n-1], and exactly 64 raw bytes; every other shape is
++// invalid_signature. Positive controls: a crypto/ecdsa DER signature and
++// its raw form parse to the same integers. The low-S judgement is
++// separate: a high-S twin parses and IsLowS reports false.
++func TestParseSignatureStrictness(t *testing.T) {
++	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	digest := testDigest("strict")
++	der, err := ecdsa.SignASN1(rand.Reader, priv, digest)
++	if err != nil {
++		t.Fatal(err)
++	}
++	sig, err := ParseSignature(der, FormatSignatureDERLowS)
++	if err != nil {
++		t.Fatalf("control DER: %v", err)
++	}
++	raw, _ := sig.Encode(FormatSignatureRaw)
++	if len(raw) != RawSignatureSize {
++		t.Fatalf("raw is %d bytes", len(raw))
++	}
++	fromRaw, err := ParseSignature(raw, FormatSignatureRaw)
++	if err != nil || fromRaw.R.Cmp(sig.R) != 0 || fromRaw.S.Cmp(sig.S) != 0 {
++		t.Fatalf("raw round trip: %v %+v vs %+v", err, fromRaw, sig)
++	}
++	if back, _ := sig.Encode(FormatSignatureDERLowS); !bytes.Equal(back, der) {
++		t.Fatal("DER round trip differs")
++	}
++	if !ecdsa.Verify(&priv.PublicKey, digest, sig.R, sig.S) {
++		t.Fatal("control does not verify")
++	}
++	highS := Signature{R: sig.LowS().R, S: new(big.Int).Sub(p256Order, sig.LowS().S)}
++	highDER, _ := highS.Encode(FormatSignatureDERLowS)
++	parsedHigh, err := ParseSignature(highDER, FormatSignatureDERLowS)
++	if err != nil || parsedHigh.IsLowS() || !parsedHigh.LowS().IsLowS() || parsedHigh.LowS().S.Cmp(sig.LowS().S) != 0 {
++		t.Fatalf("high-S twin: %v low=%v", err, parsedHigh.IsLowS())
++	}
++	if !ecdsa.Verify(&priv.PublicKey, digest, parsedHigh.R, parsedHigh.S) {
++		t.Fatal("high-S twin is a valid ECDSA signature by construction; the test premise is wrong")
++	}
++
++	// Non-minimal integer: r with a redundant leading zero.
++	type sigASN1 struct{ R, S *big.Int }
++	type sigRaw struct {
++		R, S asn1.RawValue
++	}
++	rBytes := sig.R.Bytes()
++	padded := append([]byte{0x00, 0x00}, rBytes...)
++	if rBytes[0]&0x80 != 0 {
++		padded = append([]byte{0x00}, rBytes...)
++		padded = append([]byte{0x00}, padded...)
++	}
++	nonMinimal, _ := asn1.Marshal(sigRaw{R: asn1.RawValue{Tag: asn1.TagInteger, Bytes: padded}, S: asn1.RawValue{Tag: asn1.TagInteger, Bytes: sig.S.Bytes()}})
++	negative, _ := asn1.Marshal(sigASN1{R: new(big.Int).Neg(sig.R), S: sig.S})
++	zeroR, _ := asn1.Marshal(sigASN1{R: big.NewInt(0), S: sig.S})
++	overN, _ := asn1.Marshal(sigASN1{R: sig.R, S: new(big.Int).Set(p256Order)})
++	longForm := append([]byte{0x30, 0x81, byte(len(der) - 2)}, der[2:]...) // long-form length for a short SEQUENCE
++	cases := map[string]struct {
++		data   []byte
++		format string
++	}{
++		"trailing byte":       {append(append([]byte(nil), der...), 0x00), FormatSignatureDERLowS},
++		"truncated":           {der[:len(der)-1], FormatSignatureDERLowS},
++		"empty":               {nil, FormatSignatureDERLowS},
++		"non-minimal integer": {nonMinimal, FormatSignatureDERLowS},
++		"long-form length":    {longForm, FormatSignatureDERLowS},
++		"negative r":          {negative, FormatSignatureDERLowS},
++		"zero r":              {zeroR, FormatSignatureDERLowS},
++		"s equals n":          {overN, FormatSignatureDERLowS},
++		"raw 63 bytes":        {raw[:63], FormatSignatureRaw},
++		"raw 65 bytes":        {append(append([]byte(nil), raw...), 0), FormatSignatureRaw},
++		"raw zero s":          {append(append([]byte(nil), raw[:32]...), make([]byte, 32)...), FormatSignatureRaw},
++		"DER given as raw":    {der, FormatSignatureRaw},
++	}
++	for name, tc := range cases {
++		t.Run(name, func(t *testing.T) {
++			_, err := ParseSignature(tc.data, tc.format)
++			if got := refusalCode(t, err); got != CodeInvalidSignature {
++				t.Fatalf("code %s, want %s", got, CodeInvalidSignature)
++			}
++		})
++	}
++	if _, err := ParseSignature(der, "ecdsa-p1363"); refusalCode(t, err) != CodeInvalidFormat {
++		t.Fatalf("unknown format: %v", err)
++	}
++}
++
++// ParseSPKI takes P-256 SPKI as DER or PEM and refuses another curve, a
++// non-PUBLIC KEY block, trailing PEM data and garbage as
++// invalid_public_key.
++func TestParseSPKI(t *testing.T) {
++	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	der, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
++	for name, input := range map[string][]byte{"der": der, "pem": EncodePEM(der), "pem with whitespace": append([]byte("\n"), EncodePEM(der)...)} {
++		got, pub, err := ParseSPKI(input)
++		if err != nil || !bytes.Equal(got, der) || pub.X.Cmp(priv.PublicKey.X) != 0 {
++			t.Fatalf("%s: %v", name, err)
++		}
++	}
++	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
++	der384, _ := x509.MarshalPKIXPublicKey(&p384.PublicKey)
++	bad := map[string][]byte{
++		"p-384":             der384,
++		"garbage":           []byte("not a key"),
++		"wrong block type":  []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"),
++		"trailing pem data": append(EncodePEM(der), []byte("extra\n")...),
++		"truncated der":     der[:len(der)-3],
++	}
++	for name, input := range bad {
++		t.Run(name, func(t *testing.T) {
++			_, _, err := ParseSPKI(input)
++			if refusalCode(t, err) != CodeInvalidPublicKey {
++				t.Fatalf("%v", err)
++			}
++		})
++	}
++}
++
++// Manager.Sign runs its gates before the backend signs: a mis-sized digest
++// (31 and 33 bytes) is invalid_digest with zero store calls of any kind;
++// a record without usage sign is usage_refused (an empty usages list is an
++// invariant violation and stays metadata_unknown, see the forgery table); an elapsed not_after is expired (one hour
++// past, judged by the manager clock); a rev1 tag is metadata_unknown; a
++// record with no registry row is unsupported_primitive (failure class);
++// an address with no key is ErrNotFound. None of those reach Sign.
++// Positive controls: a valid record signs once, the result is low-S and
++// verifies with crypto/ecdsa; a high-S value from the backend is
++// normalised (same r, s -> n-s) and still verifies; a not_after one hour
++// ahead signs. Faults after the gate: ErrNotFound from the backend maps to
++// not found, an OSStatus maps to security (failure), and a signature that
++// does not verify under the record's own public key is refused as
++// security instead of emitted.
++func TestManagerSignGates(t *testing.T) {
++	now := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
++	digest := testDigest("gates")
++	addr := func(purpose string) Address { return Address{Kind: KindKey, Service: TestService, Purpose: purpose} }
++
++	setup := func(t *testing.T, purpose string, mutate func(*Record)) (*fakeStore, *Manager, *ecdsa.PrivateKey) {
++		t.Helper()
++		label := tl(purpose, 1)
++		store := newFakeStore(label)
++		priv := store.installSigner(t, label)
++		if mutate != nil {
++			rec := testRecord(label)
++			mutate(&rec)
++			item := store.keys[label]
++			item.Tag, _ = EncodeRecord(rec)
++			store.keys[label] = item
++		}
++		m := newTestManager(t, store)
++		m.SetClock(func() time.Time { return now })
++		return store, m, priv
++	}
++
++	t.Run("control signs low-S and verifies", func(t *testing.T) {
++		store, m, priv := setup(t, "ok", nil)
++		signed, err := m.Sign(addr("ok"), digest)
++		if err != nil || len(store.signs) != 1 || store.signs[0] != tl("ok", 1) || signed.Normalized {
++			t.Fatalf("%v signs=%v normalized=%v", err, store.signs, signed.Normalized)
++		}
++		if !signed.Signature.IsLowS() || !ecdsa.Verify(&priv.PublicKey, digest, signed.Signature.R, signed.Signature.S) {
++			t.Fatal("signature is not low-S or does not verify")
++		}
++	})
++	t.Run("high-S from the backend is normalised", func(t *testing.T) {
++		store, m, priv := setup(t, "hs", nil)
++		store.signHighS = true
++		signed, err := m.Sign(addr("hs"), digest)
++		if err != nil || !signed.Normalized || !signed.Signature.IsLowS() {
++			t.Fatalf("%v normalized=%v", err, signed.Normalized)
++		}
++		if !ecdsa.Verify(&priv.PublicKey, digest, signed.Signature.R, signed.Signature.S) {
++			t.Fatal("normalised signature does not verify")
++		}
++	})
++	t.Run("future not_after signs", func(t *testing.T) {
++		_, m, _ := setup(t, "future", func(r *Record) { na := NewTime(now.Add(time.Hour)); r.Validity.NotAfter = &na })
++		if _, err := m.Sign(addr("future"), digest); err != nil {
++			t.Fatal(err)
++		}
++	})
++	t.Run("mis-sized digest before any call", func(t *testing.T) {
++		store, m, _ := setup(t, "len", nil)
++		for _, n := range []int{0, 31, 33, 64} {
++			_, err := m.Sign(addr("len"), make([]byte, n))
++			if refusalCode(t, err) != CodeInvalidDigest {
++				t.Fatalf("%d bytes: %v", n, err)
++			}
++		}
++		if c, d, u, l := store.calls(); c+d+u+l != 0 || len(store.signs) != 0 {
++			t.Fatalf("store touched: %d %d %d %d signs=%d", c, d, u, l, len(store.signs))
++		}
++	})
++	refused := map[string]struct {
++		mutate  func(*Record)
++		code    string
++		failure bool
++	}{
++		"usages without sign": {func(r *Record) { r.Usages = []string{"verify"} }, CodeUsageRefused, false},
++		"expired one hour":    {func(r *Record) { na := NewTime(now.Add(-time.Hour)); r.Validity.NotAfter = &na }, CodeExpired, false},
++		"expired exactly now": {func(r *Record) { na := NewTime(now); r.Validity.NotAfter = &na }, CodeExpired, false},
++		"no registry row":     {func(r *Record) { r.Store = StoreEnclave }, CodeUnsupportedPrimitive, true},
++	}
++	for name, tc := range refused {
++		t.Run(name, func(t *testing.T) {
++			store, m, _ := setup(t, "gate", tc.mutate)
++			_, err := m.Sign(addr("gate"), digest)
++			var refusal *Refusal
++			if !errors.As(err, &refusal) || refusal.Code != tc.code || refusal.Failure != tc.failure {
++				t.Fatalf("%v (want %s failure=%v)", err, tc.code, tc.failure)
++			}
++			if len(store.signs) != 0 {
++				t.Fatal("backend signed despite the gate")
++			}
++		})
++	}
++	t.Run("rev1 tag is metadata_unknown", func(t *testing.T) {
++		store, m, _ := setup(t, "legacy", nil)
++		item := store.keys[tl("legacy", 1)]
++		item.Tag = []byte("mac-keyvault/1 store=keychain created=2026-09-15T08:00:00Z")
++		store.keys[item.Label] = item
++		if _, err := m.Sign(addr("legacy"), digest); refusalCode(t, err) != CodeMetadataUnknown || len(store.signs) != 0 {
++			t.Fatalf("%v signs=%d", err, len(store.signs))
++		}
++	})
++	t.Run("missing key", func(t *testing.T) {
++		store, m, _ := setup(t, "present", nil)
++		if _, err := m.Sign(addr("absent"), digest); !errors.Is(err, ErrNotFound) || len(store.signs) != 0 {
++			t.Fatalf("%v", err)
++		}
++	})
++	t.Run("backend not found after gate", func(t *testing.T) {
++		store, m, _ := setup(t, "gone", nil)
++		delete(store.signers, tl("gone", 1))
++		if _, err := m.Sign(addr("gone"), digest); !errors.Is(err, ErrNotFound) {
++			t.Fatalf("%v", err)
++		}
++	})
++	t.Run("backend OSStatus is security failure", func(t *testing.T) {
++		store, m, _ := setup(t, "os", nil)
++		store.signE = &StatusError{Op: "sign", Status: -25293}
++		_, err := m.Sign(addr("os"), digest)
++		var refusal *Refusal
++		if !errors.As(err, &refusal) || refusal.Code != CodeSecurity || !refusal.Failure || refusal.Status != -25293 || !strings.Contains(refusal.Message, "errSecAuthFailed") {
++			t.Fatalf("%v", err)
++		}
++	})
++	t.Run("signature under another key is refused", func(t *testing.T) {
++		store, m, _ := setup(t, "mismatch", nil)
++		other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++		store.signers[tl("mismatch", 1)] = other
++		_, err := m.Sign(addr("mismatch"), digest)
++		var refusal *Refusal
++		if !errors.As(err, &refusal) || refusal.Code != CodeSecurity || !refusal.Failure || !strings.Contains(refusal.Message, "does not verify") {
++			t.Fatalf("%v", err)
++		}
++	})
++}
++
++// PublicKeyFor (the verify address path) needs a readable, trusted record
++// with a registry row and a readable SPKI; it does not need usage sign or
++// an unexpired validity (verification is always allowed for a readable
++// public half), and it never calls Sign.
++func TestManagerPublicKeyFor(t *testing.T) {
++	now := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
++	label := tl("pk", 1)
++	build := func(t *testing.T, mutate func(*Record), spki bool) (*fakeStore, *Manager) {
++		store := newFakeStore(label)
++		store.installSigner(t, label)
++		rec := testRecord(label)
++		if mutate != nil {
++			mutate(&rec)
++		}
++		item := store.keys[label]
++		item.Tag, _ = EncodeRecord(rec)
++		if !spki {
++			item.SPKI = nil
++		}
++		store.keys[label] = item
++		m := newTestManager(t, store)
++		m.SetClock(func() time.Time { return now })
++		return store, m
++	}
++	a := Address{Kind: KindKey, Service: TestService, Purpose: "pk"}
++	for name, mutate := range map[string]func(*Record){
++		"sign and verify": nil,
++		"verify only":     func(r *Record) { r.Usages = []string{"verify"} },
++		"expired":         func(r *Record) { na := NewTime(now.Add(-time.Hour)); r.Validity.NotAfter = &na },
++	} {
++		t.Run(name, func(t *testing.T) {
++			store, m := build(t, mutate, true)
++			key, err := m.PublicKeyFor(a)
++			if err != nil || len(key.SPKI) == 0 || len(store.signs) != 0 {
++				t.Fatalf("%v", err)
++			}
++		})
++	}
++	t.Run("no registry row", func(t *testing.T) {
++		_, m := build(t, func(r *Record) { r.Store = StoreEnclave }, true)
++		_, err := m.PublicKeyFor(a)
++		var refusal *Refusal
++		if !errors.As(err, &refusal) || refusal.Code != CodeUnsupportedPrimitive || !refusal.Failure {
++			t.Fatalf("%v", err)
++		}
++	})
++	t.Run("unreadable public half", func(t *testing.T) {
++		_, m := build(t, nil, false)
++		var refusal *Refusal
++		if _, err := m.PublicKeyFor(a); !errors.As(err, &refusal) || refusal.Code != CodeSecurity || !refusal.Failure {
++			t.Fatalf("%v", err)
++		}
++	})
++}
+diff --git a/internal/keyvault/invariants_test.go b/internal/keyvault/invariants_test.go
+index ccbf7e8..4d17508 100644
+--- a/internal/keyvault/invariants_test.go
++++ b/internal/keyvault/invariants_test.go
+@@ -2,6 +2,11 @@ package keyvault_test
+ 
+ import (
+ 	"bytes"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/sha256"
++	"crypto/x509"
+ 	"errors"
+ 	"path/filepath"
+ 	"reflect"
+@@ -20,11 +25,23 @@ type recordingStore struct {
+ 	keys    map[string]keyvault.Item
+ 	creates int
+ 	updates int
++	signs   int
++	// priv signs for every stored item (storeWith installs its SPKI).
++	priv *ecdsa.PrivateKey
++}
++
++func (s *recordingStore) Sign(label string, digest []byte) ([]byte, error) {
++	s.signs++
++	if _, ok := s.keys[label]; !ok {
++		return nil, keyvault.ErrNotFound
++	}
++	return ecdsa.SignASN1(rand.Reader, s.priv, digest)
+ }
+ 
+ func (s *recordingStore) Create(opts keyvault.CreateOptions) (keyvault.Item, error) {
+ 	s.creates++
+-	item := keyvault.Item{Label: opts.Label, Tag: opts.Tag, SPKI: []byte{0x30, 0x59, byte(s.creates)}}
++	spki, _ := x509.MarshalPKIXPublicKey(&s.priv.PublicKey)
++	item := keyvault.Item{Label: opts.Label, Tag: opts.Tag, SPKI: spki}
+ 	s.keys[opts.Label] = item
+ 	return item, nil
+ }
+@@ -56,6 +73,9 @@ func (s *recordingStore) UpdateTag(label string, tag []byte) error {
+ 	return nil
+ }
+ 
++// digest32 is a fixed SHA-256-sized digest for the sign gate rows.
++var digest32 = sha256.Sum256([]byte("forgery table digest"))
++
+ var origin = keyvault.Origin{User: "tester", Host: "testhost", Tool: "mac-keyvault/test", Source: keyvault.SourceGenerated}
+ 
+ // storedKey is a valid schema-2 key record for key/test/<purpose> v1.
+@@ -73,7 +93,15 @@ func storeWith(t *testing.T, label string, rec keyvault.Record) (*recordingStore
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	store := &recordingStore{keys: map[string]keyvault.Item{label: {Label: label, Tag: tag, SPKI: []byte{0x30, 0x59, 1}}}}
++	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	spki, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	store := &recordingStore{keys: map[string]keyvault.Item{label: {Label: label, Tag: tag, SPKI: spki}}, priv: priv}
+ 	manager := keyvault.NewManager(store, keyvault.FileLock{Path: filepath.Join(t.TempDir(), "lock")}, origin)
+ 	manager.SetClock(func() time.Time { return time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC) })
+ 	return store, manager, label
+@@ -144,8 +172,16 @@ func TestForgedStoredRecordRefusedEverywhere(t *testing.T) {
+ 			if _, err := manager.MetaUnset(a, "owner"); code(t, err) != keyvault.CodeMetadataUnknown {
+ 				t.Fatalf("meta unset: %v", err)
+ 			}
+-			if store.creates != 0 || store.updates != 0 || len(store.keys) != 1 || !bytes.Equal(store.keys[label].Tag, before) {
+-				t.Fatalf("a gate touched the store: creates=%d updates=%d keys=%d tag-equal=%v", store.creates, store.updates, len(store.keys), bytes.Equal(store.keys[label].Tag, before))
++			// Sign (T2) runs the same trust gate: a forged record never
++			// reaches the private key, and verify never trusts its SPKI.
++			if _, err := manager.Sign(a, digest32[:]); code(t, err) != keyvault.CodeMetadataUnknown {
++				t.Fatalf("sign: %v", err)
++			}
++			if _, err := manager.PublicKeyFor(a); code(t, err) != keyvault.CodeMetadataUnknown {
++				t.Fatalf("verify key: %v", err)
++			}
++			if store.creates != 0 || store.updates != 0 || store.signs != 0 || len(store.keys) != 1 || !bytes.Equal(store.keys[label].Tag, before) {
++				t.Fatalf("a gate touched the store: creates=%d updates=%d signs=%d keys=%d tag-equal=%v", store.creates, store.updates, store.signs, len(store.keys), bytes.Equal(store.keys[label].Tag, before))
+ 			}
+ 			key, err := manager.Describe(a)
+ 			if err != nil {
+@@ -188,6 +224,13 @@ func TestForgedStoredRecordRefusedEverywhere(t *testing.T) {
+ 			if _, ok := store.keys[label]; !ok {
+ 				t.Fatal("old generation removed")
+ 			}
++			signed, err := manager.Sign(a, digest32[:])
++			if err != nil || store.signs != 1 || !signed.Signature.IsLowS() {
++				t.Fatalf("control sign: %v signs=%d", err, store.signs)
++			}
++			if ok, err := keyvault.VerifyDigest(signed.Key.SPKI, digest32[:], signed.Signature); err != nil || !ok {
++				t.Fatalf("control signature does not verify: %v %v", ok, err)
++			}
+ 		})
+ 	}
+ }
+diff --git a/internal/keyvault/keyvault.go b/internal/keyvault/keyvault.go
+index 9f751f1..9c6ff58 100644
+--- a/internal/keyvault/keyvault.go
++++ b/internal/keyvault/keyvault.go
+@@ -132,6 +132,11 @@ type Backend interface {
+ 	Delete(label string) error
+ 	// UpdateTag replaces the application tag under label or returns ErrNotFound.
+ 	UpdateTag(label string, tag []byte) error
++	// Sign produces an ECDSA signature over a SHA-256 digest with the
++	// private half under label, encoded as DER (X9.62), or ErrNotFound.
++	// It is the only operation that uses private material and the
++	// material never leaves Security.framework.
++	Sign(label string, digest []byte) ([]byte, error)
+ }
+ 
+ // ErrNotFound reports an address with no key pair behind it.
+@@ -591,6 +596,128 @@ func (m *Manager) updateMeta(addr Address, change func(map[string]any)) (Key, er
+ 	return key, nil
+ }
+ 
++// OperationSign and OperationVerify are the registry names sign and
++// verify are gated on.
++const (
++	OperationSign   = "ecdsa-sha256-sign"
++	OperationVerify = "ecdsa-sha256-verify"
++)
++
++// authorize is the operations gate (model §6): the named operation must be
++// in what the record can do right now, judged by the same registry
++// derivation describe prints. The reason of a miss is reported by its own
++// code: no registry row is unsupported_primitive (exit 1), a missing usage
++// is usage_refused, an elapsed validity.not_after is expired. A record that
++// is unreadable or violates its invariants is refused as metadata_unknown
++// before any of that: the vault never operates on a record it cannot trust.
++func (m *Manager) authorize(key Key, operation string) error {
++	rec := key.Record
++	if key.RecordProblem != "" || rec.Schema != SchemaVersion {
++		return &Refusal{Code: CodeMetadataUnknown, Message: fmt.Sprintf("%s does not carry a readable schema-%d record; its policy is unknown, so %s is not performed", key.Label, SchemaVersion, operation), Hint: "describe shows the findings; delete --confirm and init a fresh record"}
++	}
++	if err := ValidateStored(key.Label, rec); err != nil {
++		return &Refusal{Code: CodeMetadataUnknown, Message: fmt.Sprintf("%s carries a record this revision cannot trust (%v); %s is not performed", key.Label, err, operation), Hint: "describe shows the findings; delete --confirm --version N and init a fresh record"}
++	}
++	primitive, ok := LookupPrimitive(rec)
++	if !ok {
++		return &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("%s is (%s, %s, %s), a primitive this revision has no registry row for", key.Label, rec.Kind, rec.Algorithm, rec.Store), Hint: "only (key, ec-p256, keychain) performs operations in this revision"}
++	}
++	var row *Operation
++	for i := range primitive.Operations {
++		if primitive.Operations[i].Name == operation {
++			row = &primitive.Operations[i]
++		}
++	}
++	if row == nil {
++		return &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("%s does not support %s", key.Label, operation), Hint: "describe lists the operations of the record"}
++	}
++	ops, _ := Operations(rec, m.now())
++	for _, op := range ops {
++		if op.Name == operation {
++			return nil
++		}
++	}
++	if row.requires != "" && !contains(rec.Usages, row.requires) {
++		return &Refusal{Code: CodeUsageRefused, Message: fmt.Sprintf("%s has usages [%s]; %s requires usage %s", key.Label, strings.Join(rec.SortedUsages(), ", "), operation, row.requires), Hint: "init a record with --usages including " + row.requires + "; usages are fixed at creation"}
++	}
++	if row.expires && rec.Validity.NotAfter != nil {
++		return &Refusal{Code: CodeExpired, Message: fmt.Sprintf("%s expired at %s (validity.not_after); %s is refused", key.Label, rec.Validity.NotAfter.UTC().Format(time.RFC3339), operation), Hint: "rotate creates the next generation with the same not_after; init a fresh record for a new validity"}
++	}
++	return &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("%s cannot perform %s under its policy", key.Label, operation), Hint: "describe lists the operations of the record"}
++}
++
++// SignResult is one signature with the key that produced it.
++type SignResult struct {
++	Key       Key
++	Signature Signature
++	// Normalized reports that Security.framework produced a high-S value
++	// and the vault replaced s by n-s.
++	Normalized bool
++}
++
++// Sign produces a low-S ECDSA signature over a 32-byte SHA-256 digest with
++// the newest generation the address names. Gates, in order and all before
++// the backend signs: digest length, address inside the namespace, readable
++// and valid record, registry row, usages ∋ sign, validity unexpired.
++func (m *Manager) Sign(addr Address, digest []byte) (SignResult, error) {
++	if err := ValidateDigest(digest); err != nil {
++		return SignResult{}, err
++	}
++	if err := RequireOwnLabel(addr.Label()); err != nil {
++		return SignResult{}, err
++	}
++	key, err := m.resolve(addr)
++	if err != nil {
++		return SignResult{}, err
++	}
++	if err := m.authorize(key, OperationSign); err != nil {
++		return SignResult{}, err
++	}
++	if err := RequireOwnLabel(key.Label); err != nil {
++		return SignResult{}, err
++	}
++	der, err := m.backend.Sign(key.Label, digest)
++	if err != nil {
++		if errors.Is(err, ErrNotFound) {
++			return SignResult{}, &NotFoundError{Address: addr}
++		}
++		return SignResult{}, Translate("sign", err)
++	}
++	sig, err := ParseSignature(der, FormatSignatureDERLowS)
++	if err != nil {
++		return SignResult{}, &Refusal{Code: CodeSecurity, Failure: true, Message: fmt.Sprintf("Security.framework returned a signature the vault cannot parse for %s: %v", key.Label, err), Hint: "nothing was emitted; rerun and report the bridge output"}
++	}
++	result := SignResult{Key: key, Signature: sig.LowS(), Normalized: !sig.IsLowS()}
++	if len(key.SPKI) != 0 {
++		// The public half is known: refuse to emit a signature that
++		// does not verify under it (a bridge or keychain fault, never a
++		// caller error).
++		if ok, err := VerifyDigest(key.SPKI, digest, result.Signature); err != nil || !ok {
++			return SignResult{}, &Refusal{Code: CodeSecurity, Failure: true, Message: fmt.Sprintf("the signature Security.framework produced for %s does not verify under its own public key", key.Label), Hint: "nothing was emitted; the keychain item may be damaged, describe and rotate it"}
++		}
++	}
++	return result, nil
++}
++
++// PublicKeyFor resolves the address for verify: the key must carry a
++// readable public half and its record must admit ecdsa-sha256-verify.
++func (m *Manager) PublicKeyFor(addr Address) (Key, error) {
++	if err := RequireOwnLabel(addr.Label()); err != nil {
++		return Key{}, err
++	}
++	key, err := m.resolve(addr)
++	if err != nil {
++		return Key{}, err
++	}
++	if err := m.authorize(key, OperationVerify); err != nil {
++		return Key{}, err
++	}
++	if len(key.SPKI) == 0 {
++		return Key{}, &Refusal{Code: CodeSecurity, Failure: true, Message: fmt.Sprintf("public key of %s is unreadable; nothing can be verified against it", key.Label), Hint: "describe reports the fingerprint as unknown; pass --spki with a saved public key instead"}
++	}
++	return key, nil
++}
++
+ // spkiFromPoint converts an uncompressed X9.63 P-256 point into DER SPKI.
+ func spkiFromPoint(point []byte) ([]byte, error) {
+ 	pub, err := ecdh.P256().NewPublicKey(point)
+diff --git a/internal/keyvault/keyvault_test.go b/internal/keyvault/keyvault_test.go
+index 93a1860..f002b9a 100644
+--- a/internal/keyvault/keyvault_test.go
++++ b/internal/keyvault/keyvault_test.go
+@@ -2,8 +2,13 @@ package keyvault
+ 
+ import (
+ 	"bytes"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/x509"
+ 	"encoding/json"
+ 	"errors"
++	"math/big"
+ 	"path/filepath"
+ 	"strings"
+ 	"sync"
+@@ -17,15 +22,19 @@ import (
+ // duplicate-race regression uses to force both Inits into the
+ // check-then-create window at once.
+ type fakeStore struct {
+-	mu       sync.Mutex
+-	keys     map[string]Item
+-	creates  []CreateOptions
+-	deletes  []string
+-	updates  []string
+-	lists    int
+-	createE  error
+-	listGate *barrier
+-	listDone *barrier
++	mu        sync.Mutex
++	keys      map[string]Item
++	creates   []CreateOptions
++	deletes   []string
++	updates   []string
++	lists     int
++	createE   error
++	signs     []string
++	signE     error
++	signHighS bool
++	signers   map[string]*ecdsa.PrivateKey
++	listGate  *barrier
++	listDone  *barrier
+ 	// createGate, when set, holds Create until both callers have taken
+ 	// their List snapshot (or a short timeout): with the lock held across
+ 	// check-and-create the peer cannot list, the gate times out and the
+@@ -166,6 +175,61 @@ func (s *fakeStore) UpdateTag(label string, tag []byte) error {
+ 	return nil
+ }
+ 
++// Sign records the call; it signs with the real P-256 key registered for
++// the label by installSigner (so Manager.Sign's self-check passes), low-S,
++// and is ErrNotFound otherwise. signHighS makes it hand back the high-S
++// twin, the shape corecrypto may emit, to drive normalisation.
++func (s *fakeStore) Sign(label string, digest []byte) ([]byte, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.signs = append(s.signs, label)
++	if s.signE != nil {
++		return nil, s.signE
++	}
++	priv, ok := s.signers[label]
++	if !ok {
++		return nil, ErrNotFound
++	}
++	der, err := ecdsa.SignASN1(rand.Reader, priv, digest)
++	if err != nil {
++		return nil, err
++	}
++	// crypto/ecdsa does not normalise; the fake picks the half itself.
++	sig, err := ParseSignature(der, FormatSignatureDERLowS)
++	if err != nil {
++		return nil, err
++	}
++	sig = sig.LowS()
++	if s.signHighS {
++		sig = Signature{R: sig.R, S: new(big.Int).Sub(p256Order, sig.S)}
++	}
++	return sig.Encode(FormatSignatureDERLowS)
++}
++
++// installSigner gives the item under label a real key pair: the SPKI the
++// store lists and the private key its Sign uses.
++func (s *fakeStore) installSigner(t *testing.T, label string) *ecdsa.PrivateKey {
++	t.Helper()
++	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	spki, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.signers == nil {
++		s.signers = map[string]*ecdsa.PrivateKey{}
++	}
++	s.signers[label] = priv
++	item := s.keys[label]
++	item.SPKI = spki
++	s.keys[label] = item
++	return priv
++}
++
+ func (s *fakeStore) calls() (creates, deletes, updates, lists int) {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+@@ -1048,8 +1112,16 @@ func TestOperationsRegistry(t *testing.T) {
+ 		if op.Name == "export-public" && op.Via != "pub" {
+ 			t.Fatalf("export-public via %s", op.Via)
+ 		}
+-		if op.Name == "ecdsa-sha256-sign" && op.Via != ViaReserved {
+-			t.Fatalf("sign is not implemented yet but is advertised via %s", op.Via)
++		// T2 implements sign and verify; every other crypto operation of
++		// the row is still reserved so a consumer never assumes it works.
++		if op.Name == OperationSign && op.Via != "sign" {
++			t.Fatalf("sign advertised via %s", op.Via)
++		}
++		if op.Name == OperationVerify && op.Via != "verify" {
++			t.Fatalf("verify advertised via %s", op.Via)
++		}
++		if (op.Name == "ecdh-p256" || op.Name == "ecies-p256-encrypt" || op.Name == "ecies-p256-decrypt") && op.Via != ViaReserved {
++			t.Fatalf("%s advertised via %s before it is implemented", op.Name, op.Via)
+ 		}
+ 		if op.Name == "export-private" {
+ 			t.Fatal("export-private advertised for extraction none")
+diff --git a/internal/keyvault/registry.go b/internal/keyvault/registry.go
+index 1b1ad56..f7f9423 100644
+--- a/internal/keyvault/registry.go
++++ b/internal/keyvault/registry.go
+@@ -43,8 +43,8 @@ var registry = map[PrimitiveKey]Primitive{
+ 	{Kind: KindKey, Algorithm: AlgorithmECP256, Store: StoreKeychain}: {
+ 		Exposure: ExposureNever,
+ 		Operations: []Operation{
+-			{Name: "ecdsa-sha256-sign", Input: "sha256-digest", Output: "ecdsa-der-low-s|ecdsa-raw", Via: ViaReserved, requires: "sign", expires: true},
+-			{Name: "ecdsa-sha256-verify", Input: "sha256-digest+signature", Output: "verdict", Via: ViaReserved},
++			{Name: OperationSign, Input: "sha256-digest", Output: "ecdsa-der-low-s|ecdsa-raw", Via: "sign", requires: "sign", expires: true},
++			{Name: OperationVerify, Input: "sha256-digest+signature", Output: "verdict", Via: "verify"},
+ 			{Name: "ecdh-p256", Input: "peer-spki", Output: "shared-secret", Via: ViaReserved, requires: "wrap"},
+ 			{Name: "ecies-p256-encrypt", Input: "payload", Output: "envelope:ecies-x963-sha256-aesgcm", Via: ViaReserved},
+ 			{Name: "ecies-p256-decrypt", Input: "envelope:ecies-x963-sha256-aesgcm", Output: "payload", Via: ViaReserved, requires: "decrypt", expires: true},
+diff --git a/internal/keyvault/security_darwin.c b/internal/keyvault/security_darwin.c
+index 7d00dc9..f8aba2b 100644
+--- a/internal/keyvault/security_darwin.c
++++ b/internal/keyvault/security_darwin.c
+@@ -294,6 +294,37 @@ int MacKeyVaultUpdateTag(const char *label, const char *tag) {
+     return (int)status;
+ }
+ 
++// Signs a SHA-256 digest with the private half under label. The digest
++// algorithm variant is used so Security.framework signs the given bytes as
++// the digest instead of hashing them again; the output is X9.62 DER.
++int MacKeyVaultSign(const char *label, const unsigned char *digest, size_t digestLen,
++                    unsigned char **out, size_t *outLen) {
++    SecKeyRef key = NULL;
++    OSStatus status = MacKeyVaultCopyPrivateKey(label, &key);
++    if (status != errSecSuccess) return (int)status;
++    CFDataRef digestData = CFDataCreate(kCFAllocatorDefault, digest, (CFIndex)digestLen);
++    CFErrorRef error = NULL;
++    CFDataRef signature = SecKeyCreateSignature(key, kSecKeyAlgorithmECDSASignatureDigestX962SHA256, digestData, &error);
++    CFRelease(digestData);
++    CFRelease(key);
++    if (signature == NULL) {
++        int code = MacKeyVaultErrorCode(error);
++        if (error != NULL) CFRelease(error);
++        return code;
++    }
++    size_t length = (size_t)CFDataGetLength(signature);
++    unsigned char *buffer = malloc(length);
++    if (buffer == NULL) {
++        CFRelease(signature);
++        return MacKeyVaultUnknownError;
++    }
++    memcpy(buffer, CFDataGetBytePtr(signature), length);
++    CFRelease(signature);
++    *out = buffer;
++    *outLen = length;
++    return 0;
++}
++
+ // Attestation probe: tries both private-material export paths on the item and
+ // reports their statuses verbatim. 0 from either would mean the private key
+ // left the keychain; the tests require the documented refusals instead.
+diff --git a/internal/keyvault/security_darwin.go b/internal/keyvault/security_darwin.go
+index e178869..4470131 100644
+--- a/internal/keyvault/security_darwin.go
++++ b/internal/keyvault/security_darwin.go
+@@ -129,6 +129,31 @@ func (s *SecurityStore) UpdateTag(label string, tag []byte) error {
+ 	return nil
+ }
+ 
++// Sign asks Security.framework for an ECDSA signature over digest with the
++// private half under label (kSecKeyAlgorithmECDSASignatureDigestX962SHA256:
++// the digest is signed as given, never re-hashed). The result is X9.62 DER
++// as corecrypto emits it; low-S normalisation is the Manager's job.
++func (s *SecurityStore) Sign(label string, digest []byte) ([]byte, error) {
++	if len(digest) != DigestSize {
++		// Belt and braces: the Manager gate runs first, but the bridge
++		// never signs a mis-sized digest either.
++		return nil, ValidateDigest(digest)
++	}
++	cLabel := C.CString(label)
++	defer C.free(unsafe.Pointer(cLabel))
++	var out *C.uchar
++	var outLen C.size_t
++	status := int(C.MacKeyVaultSign(cLabel, (*C.uchar)(unsafe.Pointer(&digest[0])), C.size_t(len(digest)), &out, &outLen))
++	if status == errSecItemNotFound {
++		return nil, ErrNotFound
++	}
++	if status != 0 {
++		return nil, &StatusError{Op: "sign", Status: status}
++	}
++	defer C.free(unsafe.Pointer(out))
++	return C.GoBytes(unsafe.Pointer(out), C.int(outLen)), nil
++}
++
+ // ExportProbe is the outcome of trying to pull private material out of a
+ // keychain item through both Security.framework export paths.
+ type ExportProbe struct {
+diff --git a/internal/keyvault/security_darwin.h b/internal/keyvault/security_darwin.h
+index 1d46dff..869f671 100644
+--- a/internal/keyvault/security_darwin.h
++++ b/internal/keyvault/security_darwin.h
+@@ -16,6 +16,8 @@ int MacKeyVaultList(const char *prefix, char **out, size_t *outLen);
+ int MacKeyVaultDelete(const char *label);
+ int MacKeyVaultUpdateTag(const char *label, const char *tag);
+ int MacKeyVaultProbeExport(const char *label, int *repStatus, int *exportStatus, size_t *leaked);
++int MacKeyVaultSign(const char *label, const unsigned char *digest, size_t digestLen,
++                    unsigned char **out, size_t *outLen);
+ int MacKeyVaultCopyACL(const char *label, char **out, size_t *outLen);
+ 
+ #endif
+diff --git a/internal/keyvault/security_darwin_test.go b/internal/keyvault/security_darwin_test.go
+index ac7d260..f0cf594 100644
+--- a/internal/keyvault/security_darwin_test.go
++++ b/internal/keyvault/security_darwin_test.go
+@@ -3,6 +3,7 @@
+ package keyvault
+ 
+ import (
++	"bytes"
+ 	"errors"
+ 	"fmt"
+ 	"os"
+@@ -12,9 +13,12 @@ import (
+ )
+ 
+ // GuardedStore wraps a Backend and fails the test process before any Create,
+-// Delete or UpdateTag whose label is outside the test namespace (service
+-// "test", see IsTestLabel) reaches the real keychain. Every integration test
+-// in this repository goes through it.
++// Delete, UpdateTag or Sign whose label is outside the test namespace
++// (service "test", see IsTestLabel) reaches the real keychain. Every
++// integration test in this repository goes through it. Every mutating or
++// private-key-using Backend method must be overridden here: an embedded
++// method Go promotes unchanged is a guard bypass (review rev1 F1 found Sign
++// promoted that way).
+ type GuardedStore struct {
+ 	Backend
+ 	touched []string
+@@ -52,6 +56,15 @@ func (g *GuardedStore) UpdateTag(label string, tag []byte) error {
+ 	return g.Backend.UpdateTag(label, tag)
+ }
+ 
++// Sign is guarded too: the private half of a foreign key must never be used
++// from a test, even though signing does not modify the item.
++func (g *GuardedStore) Sign(label string, digest []byte) ([]byte, error) {
++	if err := g.guard(label); err != nil {
++		return nil, err
++	}
++	return g.Backend.Sign(label, digest)
++}
++
+ func newGuardedSecurityStore(t *testing.T) *GuardedStore {
+ 	t.Helper()
+ 	store := &GuardedStore{Backend: NewSecurityStore()}
+@@ -82,10 +95,18 @@ func testTag(t *testing.T, label string) []byte {
+ 
+ // The guard itself refuses non-test labels (positive control for every
+ // integration test below): a foreign or production-prefixed label never
+-// reaches the wrapped backend.
++// reaches the wrapped backend through Create, Delete, UpdateTag or Sign —
++// Sign included, so the private half of a production key is never used by
++// a test (rev1 F1: an embedded Backend.Sign was promoted around the guard).
++// The store holds a signing-capable production key so that a leaked Sign
++// would succeed rather than fail for another reason; the test then asserts
++// zero recorded signs. Test-namespace labels sign through the guard
++// (positive control).
+ func TestGuardedStoreRefusesNonTestLabels(t *testing.T) {
+ 	inner := newFakeStore(LabelPrefix + "prod")
++	inner.installSigner(t, LabelPrefix+"prod")
+ 	store := &GuardedStore{Backend: inner}
++	digest := testDigest("guard sign")
+ 	for _, label := range []string{LabelPrefix + "prod", LabelPrefix + "key.kvctl.pki.v1", LabelPrefix + "key.testx.a.v1", "com.apple.security.key", TestLabelPrefix, LabelPrefix + "test.", ""} {
+ 		if _, err := store.Create(CreateOptions{Label: label, Store: StoreKeychain}); !errors.Is(err, ErrGuardedLabel) {
+ 			t.Fatalf("create %q: err = %v", label, err)
+@@ -96,9 +117,12 @@ func TestGuardedStoreRefusesNonTestLabels(t *testing.T) {
+ 		if err := store.UpdateTag(label, nil); !errors.Is(err, ErrGuardedLabel) {
+ 			t.Fatalf("update %q: err = %v", label, err)
+ 		}
++		if sig, err := store.Sign(label, digest); !errors.Is(err, ErrGuardedLabel) || sig != nil {
++			t.Fatalf("sign %q: sig=%x err = %v", label, sig, err)
++		}
+ 	}
+-	if len(inner.creates) != 0 || len(inner.deletes) != 0 || len(inner.updates) != 0 {
+-		t.Fatalf("guard leaked calls: creates=%v deletes=%v updates=%v", inner.creates, inner.deletes, inner.updates)
++	if len(inner.creates) != 0 || len(inner.deletes) != 0 || len(inner.updates) != 0 || len(inner.signs) != 0 {
++		t.Fatalf("guard leaked calls: creates=%v deletes=%v updates=%v signs=%v", inner.creates, inner.deletes, inner.updates, inner.signs)
+ 	}
+ 	if _, ok := inner.keys[LabelPrefix+"prod"]; !ok {
+ 		t.Fatal("production key was deleted through the guard")
+@@ -111,6 +135,10 @@ func TestGuardedStoreRefusesNonTestLabels(t *testing.T) {
+ 			t.Fatalf("test label %s refused: %v", label, err)
+ 		}
+ 	}
++	inner.installSigner(t, tl("ok", 1))
++	if sig, err := store.Sign(tl("ok", 1), digest); err != nil || len(sig) == 0 || len(inner.signs) != 1 || inner.signs[0] != tl("ok", 1) {
++		t.Fatalf("test label sign: err=%v sig=%x signs=%v", err, sig, inner.signs)
++	}
+ }
+ 
+ // Login-keychain round trip on this Mac: Create persists a P-256 pair whose
+@@ -355,3 +383,62 @@ func TestParseACLRecords(t *testing.T) {
+ 		t.Fatalf("entries = %+v", entries)
+ 	}
+ }
++
++// SecurityStore.Sign on this Mac: the bridge signs a 32-byte digest with the
++// keychain private half (digest variant, so the bytes are signed as the
++// digest, not re-hashed) and the DER it returns parses strictly and
++// verifies under the item's own SPKI with crypto/ecdsa; two signatures of
++// one digest differ (fresh k). A mis-sized digest is invalid_digest without
++// a Security call, and a label with no key is ErrNotFound. The high-S
++// share of corecrypto's output is not assumed either way: whatever comes
++// back, its low-S form verifies.
++func TestSecurityStoreSign(t *testing.T) {
++	store := newGuardedSecurityStore(t)
++	label := testLabel(t, "sign")
++	item, err := store.Create(CreateOptions{Label: label, Tag: testTag(t, label), Store: StoreKeychain})
++	if err != nil {
++		t.Fatal(err)
++	}
++	digest := testDigest("security store sign")
++	first, err := store.Sign(label, digest)
++	if err != nil {
++		t.Fatal(err)
++	}
++	second, err := store.Sign(label, digest)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if bytes.Equal(first, second) {
++		t.Fatal("two ECDSA signatures of one digest are identical; k is not fresh")
++	}
++	for _, der := range [][]byte{first, second} {
++		sig, err := ParseSignature(der, FormatSignatureDERLowS)
++		if err != nil {
++			t.Fatalf("bridge DER is not strict: %v (%x)", err, der)
++		}
++		if ok, err := VerifyDigest(item.SPKI, digest, sig); err != nil || !ok {
++			t.Fatalf("bridge signature does not verify as given: %v %v", ok, err)
++		}
++		if ok, err := VerifyDigest(item.SPKI, digest, sig.LowS()); err != nil || !ok {
++			t.Fatalf("low-S form does not verify: %v %v", ok, err)
++		}
++	}
++	if ok, _ := VerifyDigest(item.SPKI, testDigest("another"), mustParse(t, first)); ok {
++		t.Fatal("signature verified over a different digest")
++	}
++	if _, err := store.Sign(label, digest[:31]); refusalCode(t, err) != CodeInvalidDigest {
++		t.Fatalf("31-byte digest: %v", err)
++	}
++	if _, err := store.Sign(tl(fmt.Sprintf("absent-%d", os.Getpid()), 1), digest); !errors.Is(err, ErrNotFound) {
++		t.Fatalf("absent label: %v", err)
++	}
++}
++
++func mustParse(t *testing.T, der []byte) Signature {
++	t.Helper()
++	sig, err := ParseSignature(der, FormatSignatureDERLowS)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return sig
++}
+diff --git a/internal/keyvault/security_unsupported.go b/internal/keyvault/security_unsupported.go
+index 2b3c033..240fe3b 100644
+--- a/internal/keyvault/security_unsupported.go
++++ b/internal/keyvault/security_unsupported.go
+@@ -18,3 +18,5 @@ func (s *SecurityStore) List() ([]Item, error) { return nil, errUnsupported }
+ func (s *SecurityStore) Delete(string) error { return errUnsupported }
+ 
+ func (s *SecurityStore) UpdateTag(string, []byte) error { return errUnsupported }
++
++func (s *SecurityStore) Sign(string, []byte) ([]byte, error) { return nil, errUnsupported }

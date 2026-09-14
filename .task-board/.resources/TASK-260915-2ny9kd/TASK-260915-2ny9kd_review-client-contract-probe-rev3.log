@@ -1,0 +1,3 @@
+start_accepted address="other/key" kind="certificate" tool="impostor" ops=[]
+unknown_code_error=self_minted: not in contract remote=true protocol=false
+stream_still_usable=true

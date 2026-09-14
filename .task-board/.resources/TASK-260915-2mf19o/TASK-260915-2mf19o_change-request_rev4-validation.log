@@ -1,0 +1,38 @@
+$ go test -count=1 ./...
+?   	github.com/relux-works/mac-infra/cmd/mac-audio-reset	[no test files]
+ok  	github.com/relux-works/mac-infra/cmd/mac-audio-sweep	1.229s
+ok  	github.com/relux-works/mac-infra/cmd/mac-browser-site	92.782s
+ok  	github.com/relux-works/mac-infra/cmd/mac-chrome-session	70.873s
+ok  	github.com/relux-works/mac-infra/cmd/mac-cleanup	12.137s
+ok  	github.com/relux-works/mac-infra/cmd/mac-disk-profile	2.038s
+ok  	github.com/relux-works/mac-infra/cmd/mac-document-sanitize	3.235s
+ok  	github.com/relux-works/mac-infra/cmd/mac-infra-core	2.837s
+ok  	github.com/relux-works/mac-infra/cmd/mac-keyvault	5.004s
+?   	github.com/relux-works/mac-infra/cmd/mac-load-profile	[no test files]
+ok  	github.com/relux-works/mac-infra/cmd/mac-safari-session	20.363s
+?   	github.com/relux-works/mac-infra/cmd/mac-video-profile	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/anyconnect	4.883s
+?   	github.com/relux-works/mac-infra/internal/audiodevice	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/audioreset	4.127s
+ok  	github.com/relux-works/mac-infra/internal/audiosweep	4.058s
+ok  	github.com/relux-works/mac-infra/internal/browserfacade	11.739s
+ok  	github.com/relux-works/mac-infra/internal/browserquery	4.179s
+ok  	github.com/relux-works/mac-infra/internal/browsersession	18.633s
+ok  	github.com/relux-works/mac-infra/internal/chromectl	112.275s
+ok  	github.com/relux-works/mac-infra/internal/cleanup	4.208s
+ok  	github.com/relux-works/mac-infra/internal/diskprofile	4.273s
+ok  	github.com/relux-works/mac-infra/internal/docsanitize	4.046s
+ok  	github.com/relux-works/mac-infra/internal/fsevents	3.608s
+ok  	github.com/relux-works/mac-infra/internal/keyvault	4.615s
+ok  	github.com/relux-works/mac-infra/internal/loadprofile	4.119s
+ok  	github.com/relux-works/mac-infra/internal/maccore	4.379s
+ok  	github.com/relux-works/mac-infra/internal/safarictl	13.569s
+ok  	github.com/relux-works/mac-infra/internal/simcleanup	3.620s
+ok  	github.com/relux-works/mac-infra/internal/videoprofile	4.034s
+ok  	github.com/relux-works/mac-infra/scripts	9.183s
+[exit 0]
+$ go vet ./...
+[exit 0]
+$ go build ./...
+[exit 0]
+coverage_unit=exact_command_shard required=3 green=3 failed=0 missing=0 test_case_coverage=unknown

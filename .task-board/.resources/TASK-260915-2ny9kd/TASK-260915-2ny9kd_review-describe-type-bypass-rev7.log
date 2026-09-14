@@ -1,0 +1,4 @@
+/opt/homebrew/bin/go
+go version go1.25.5 darwin/arm64
+mode=valid describe_error=<nil> protocol=false view=map[exposure:never findings:[] fingerprint:probe-fingerprint kind:key label:works.relux.mac-keyvault.key.test.fake.v1 operations:[] purpose:fake schema:2 service:test version:1]
+mode=malformed describe_error=<nil> protocol=false view=map[exposure:never findings:[] fingerprint:probe-fingerprint kind:map[] label:works.relux.mac-keyvault.key.test.fake.v1 operations:[] purpose:false schema:two service:[] version:map[]]

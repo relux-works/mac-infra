@@ -1,0 +1,3 @@
+ok  	github.com/relux-works/mac-infra/cmd/mac-keyvault	3.174s
+ok  	github.com/relux-works/mac-infra/internal/keyvault	3.744s
+exit=0

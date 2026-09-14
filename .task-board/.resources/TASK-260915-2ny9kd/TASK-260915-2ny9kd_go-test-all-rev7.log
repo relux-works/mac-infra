@@ -1,0 +1,34 @@
+?   	github.com/relux-works/mac-infra/cmd/mac-audio-reset	[no test files]
+ok  	github.com/relux-works/mac-infra/cmd/mac-audio-sweep	2.968s
+ok  	github.com/relux-works/mac-infra/cmd/mac-browser-site	215.735s
+ok  	github.com/relux-works/mac-infra/cmd/mac-chrome-session	173.998s
+ok  	github.com/relux-works/mac-infra/cmd/mac-cleanup	20.965s
+ok  	github.com/relux-works/mac-infra/cmd/mac-disk-profile	6.125s
+ok  	github.com/relux-works/mac-infra/cmd/mac-document-sanitize	6.496s
+ok  	github.com/relux-works/mac-infra/cmd/mac-infra-core	5.410s
+ok  	github.com/relux-works/mac-infra/cmd/mac-keyvault	21.376s
+?   	github.com/relux-works/mac-infra/cmd/mac-load-profile	[no test files]
+ok  	github.com/relux-works/mac-infra/cmd/mac-safari-session	39.086s
+?   	github.com/relux-works/mac-infra/cmd/mac-video-profile	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/anyconnect	9.621s
+?   	github.com/relux-works/mac-infra/internal/audiodevice	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/audioreset	9.831s
+ok  	github.com/relux-works/mac-infra/internal/audiosweep	9.203s
+ok  	github.com/relux-works/mac-infra/internal/browserfacade	23.060s
+ok  	github.com/relux-works/mac-infra/internal/browserquery	9.649s
+ok  	github.com/relux-works/mac-infra/internal/browsersession	38.468s
+ok  	github.com/relux-works/mac-infra/internal/chromectl	241.965s
+ok  	github.com/relux-works/mac-infra/internal/cleanup	7.026s
+ok  	github.com/relux-works/mac-infra/internal/diskprofile	6.802s
+ok  	github.com/relux-works/mac-infra/internal/docsanitize	5.644s
+ok  	github.com/relux-works/mac-infra/internal/fsevents	6.860s
+ok  	github.com/relux-works/mac-infra/internal/keyvault	14.673s
+?   	github.com/relux-works/mac-infra/internal/keyvault/recordtest	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/keyvault/signerclient	18.617s
+?   	github.com/relux-works/mac-infra/internal/keyvault/signertest	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/loadprofile	8.153s
+ok  	github.com/relux-works/mac-infra/internal/maccore	9.781s
+ok  	github.com/relux-works/mac-infra/internal/safarictl	30.680s
+ok  	github.com/relux-works/mac-infra/internal/simcleanup	5.064s
+ok  	github.com/relux-works/mac-infra/internal/videoprofile	6.318s
+ok  	github.com/relux-works/mac-infra/scripts	19.127s

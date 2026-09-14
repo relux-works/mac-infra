@@ -1,0 +1,85 @@
+baseline
+    ./internal/keyvault/ -run 'TestSigner' => exit 0
+    ./cmd/mac-keyvault/ -run 'TestRunSignerServeStartupGolden|TestSignerStreamCodesEmittedByProduction' => exit 0
+    ./internal/keyvault/signerclient/ -run 'TestErrorContractRegistryComplete' => exit 0
+== M1-zero-values-treated-absent
+    ./internal/keyvault/ -run 'TestSignerServeRefusesInapplicableZeroValueMembers|TestSignerServeGoldenWire' => exit 1
+      --- FAIL: TestSignerServeGoldenWire (0.01s)
+          --- FAIL: TestSignerServeGoldenWire/signer (0.00s)
+      --- FAIL: TestSignerServeRefusesInapplicableZeroValueMembers (0.00s)
+  KILLED
+== M2-sign-admits-allow-high-s
+    ./internal/keyvault/ -run 'TestSignerServeRefusesInapplicableZeroValueMembers|TestSignerServeGoldenWire' => exit 1
+      --- FAIL: TestSignerServeGoldenWire (0.01s)
+          --- FAIL: TestSignerServeGoldenWire/signer (0.00s)
+      --- FAIL: TestSignerServeRefusesInapplicableZeroValueMembers (0.00s)
+  KILLED
+== M3-only-allow-high-s-false-admitted
+    ./internal/keyvault/ -run 'TestSignerServeRefusesInapplicableZeroValueMembers|TestSignerServeGoldenWire' => exit 1
+      --- FAIL: TestSignerServeGoldenWire (0.01s)
+          --- FAIL: TestSignerServeGoldenWire/signer (0.00s)
+      --- FAIL: TestSignerServeRefusesInapplicableZeroValueMembers (0.00s)
+  KILLED
+== M4-invalid-kind-not-stream
+    ./internal/keyvault/ -run 'TestSignerGoldenCoversStreamErrorCodes' => exit 1
+      --- FAIL: TestSignerGoldenCoversStreamErrorCodes (0.00s)
+  KILLED
+== M4b-invalid-kind-not-stream-cli
+    ./cmd/mac-keyvault/ -run 'TestSignerStreamCodesEmittedByProduction' => exit 1
+      --- FAIL: TestSignerStreamCodesEmittedByProduction (0.00s)
+  KILLED
+== M5-failure-not-stream
+    ./internal/keyvault/ -run 'TestSignerGoldenCoversStreamErrorCodes|TestSignerServedErrorCodesAreDeclared' => exit 1
+      --- FAIL: TestSignerGoldenCoversStreamErrorCodes (0.00s)
+      --- FAIL: TestSignerServedErrorCodesAreDeclared (0.00s)
+  KILLED
+== M6-cli-emits-undeclared-usage-code
+    ./cmd/mac-keyvault/ -run 'TestRunSignerServeStartupGolden|TestSignerStreamCodesEmittedByProduction' => exit 1
+      --- FAIL: TestRunSignerServeStartupGolden (0.03s)
+          --- FAIL: TestRunSignerServeStartupGolden/startup-00-signer-bare.json (0.00s)
+          --- FAIL: TestRunSignerServeStartupGolden/startup-01-serve-no-address.json (0.00s)
+          --- FAIL: TestRunSignerServeStartupGolden/startup-02-serve-positional.json (0.01s)
+          --- FAIL: TestRunSignerServeStartupGolden/startup-03-serve-unknown-flag.json (0.00s)
+          --- FAIL: TestRunSignerServeStartupGolden/startup-04-serve-unknown-subcommand.json (0.01s)
+      --- FAIL: TestSignerStreamCodesEmittedByProduction (0.07s)
+          --- FAIL: TestSignerStreamCodesEmittedByProduction/usage (0.00s)
+  KILLED
+== M7-row-removed-constant-kept
+    ./internal/keyvault/signerclient/ -run 'TestErrorContractRegistryComplete' => exit 1
+      --- FAIL: TestErrorContractRegistryComplete (0.00s)
+  KILLED
+== M8-signature-invalid-exit-class
+    ./cmd/mac-keyvault/ -run 'TestRunVerify' => exit 1
+      --- FAIL: TestRunVerifyVerdicts (0.05s)
+          --- FAIL: TestRunVerifyVerdicts/tampered_r (0.00s)
+          --- FAIL: TestRunVerifyVerdicts/other_digest (0.00s)
+          --- FAIL: TestRunVerifyVerdicts/other_key (0.00s)
+          --- FAIL: TestRunVerifyVerdicts/raw_tampered (0.00s)
+  KILLED
+== M9-duplicate-stream-row-not-found-declared-twice
+    ./internal/keyvault/signerclient/ -run 'TestErrorContractRegistryComplete' => exit 1
+      --- FAIL: TestErrorContractRegistryComplete (0.00s)
+  KILLED
+== M10-startup-fixture-removed (invalid_service)
+    ./internal/keyvault/ -run 'TestSignerGoldenCoversStreamErrorCodes' => exit 1
+      --- FAIL: TestSignerGoldenCoversStreamErrorCodes (0.00s)
+    ./cmd/mac-keyvault/ -run 'TestSignerStreamCodesEmittedByProduction' => exit 1
+      --- FAIL: TestSignerStreamCodesEmittedByProduction (0.07s)
+          --- FAIL: TestSignerStreamCodesEmittedByProduction/invalid_service (0.00s)
+  KILLED (both suites)
+post-harness worktree status (must equal pre-harness):
+ M LOGBOOK.md
+ M README.md
+ M agents/skills/mac-infra/SKILL.md
+ M cmd/mac-keyvault/main.go
+ M internal/keyvault/ecdsa.go
+ M internal/keyvault/invariants.go
+ M internal/keyvault/keyvault.go
+ M internal/keyvault/record.go
+?? cmd/mac-keyvault/signer_golden_test.go
+?? cmd/mac-keyvault/signer_test.go
+?? internal/keyvault/signer.go
+?? internal/keyvault/signer_test.go
+?? internal/keyvault/signerclient/
+?? internal/keyvault/signertest/
+?? internal/keyvault/testdata/

@@ -1,0 +1,32 @@
+?   	github.com/relux-works/mac-infra/cmd/mac-audio-reset	[no test files]
+ok  	github.com/relux-works/mac-infra/cmd/mac-audio-sweep	1.043s
+ok  	github.com/relux-works/mac-infra/cmd/mac-browser-site	104.978s
+ok  	github.com/relux-works/mac-infra/cmd/mac-chrome-session	84.104s
+ok  	github.com/relux-works/mac-infra/cmd/mac-cleanup	13.660s
+ok  	github.com/relux-works/mac-infra/cmd/mac-disk-profile	3.067s
+ok  	github.com/relux-works/mac-infra/cmd/mac-document-sanitize	4.079s
+ok  	github.com/relux-works/mac-infra/cmd/mac-infra-core	1.500s
+ok  	github.com/relux-works/mac-infra/cmd/mac-keyvault	3.495s
+?   	github.com/relux-works/mac-infra/cmd/mac-load-profile	[no test files]
+ok  	github.com/relux-works/mac-infra/cmd/mac-safari-session	24.098s
+?   	github.com/relux-works/mac-infra/cmd/mac-video-profile	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/anyconnect	4.986s
+?   	github.com/relux-works/mac-infra/internal/audiodevice	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/audioreset	5.490s
+ok  	github.com/relux-works/mac-infra/internal/audiosweep	5.460s
+ok  	github.com/relux-works/mac-infra/internal/browserfacade	12.806s
+ok  	github.com/relux-works/mac-infra/internal/browserquery	4.987s
+ok  	github.com/relux-works/mac-infra/internal/browsersession	24.019s
+ok  	github.com/relux-works/mac-infra/internal/chromectl	139.509s
+ok  	github.com/relux-works/mac-infra/internal/cleanup	4.620s
+ok  	github.com/relux-works/mac-infra/internal/diskprofile	5.506s
+ok  	github.com/relux-works/mac-infra/internal/docsanitize	4.362s
+ok  	github.com/relux-works/mac-infra/internal/fsevents	3.805s
+ok  	github.com/relux-works/mac-infra/internal/keyvault	7.181s
+?   	github.com/relux-works/mac-infra/internal/keyvault/recordtest	[no test files]
+ok  	github.com/relux-works/mac-infra/internal/loadprofile	4.112s
+ok  	github.com/relux-works/mac-infra/internal/maccore	5.474s
+ok  	github.com/relux-works/mac-infra/internal/safarictl	16.437s
+ok  	github.com/relux-works/mac-infra/internal/simcleanup	4.760s
+ok  	github.com/relux-works/mac-infra/internal/videoprofile	5.483s
+ok  	github.com/relux-works/mac-infra/scripts	11.696s

@@ -1,0 +1,26 @@
+{
+  "ok": true,
+  "command": "init",
+  "result": {
+    "algorithm": "ec-p256",
+    "created": "2026-09-15T16:34:21Z",
+    "description": "",
+    "exposure": "never",
+    "extraction": "none",
+    "fin
+{"contract":1,"ok":true,"result":{"tool":"mac-keyvault","tool_version":"dev","address":"test/rev3-probe-63680","kind":"key","version":1,"label":"works.relux.mac-keyvault.key.test.rev3-probe-63680.v1","fingerprint":"o0dyTekHv2kI4giEI8sBL33WDPxsxk4STQUC7ubAKFg","ops":["describe","pub","sign","verify"]}}
+{"id":1,"ok":false,"error":{"code":"bad_request","message":"describe takes no members besides id and op (got allow_high_s)","hint":"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes"}}
+{"id":2,"ok":false,"error":{"code":"bad_request","message":"pub takes only format besides id and op (got allow_high_s)","hint":"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes"}}
+{"id":3,"ok":false,"error":{"code":"bad_request","message":"sign takes only digest, format besides id and op (got allow_high_s)","hint":"requests are one JSON object per line: {id, op, ...params}; see the signerclient package for the fields each op takes"}}
+{"id":4,"ok":true,"result":{"label":"works.relux.mac-keyvault.key.test.rev3-probe-63680.v1","fingerprint":"o0dyTekHv2kI4giEI8sBL33WDPxsxk4STQUC7ubAKFg","hash":"sha256","digest":"ba9c736f19e7f60b7f6764adb0b7908c0a2b394e09b6c09863528c7f2bc86095","format":"ecdsa-der-low-s","signature":"30440220120d5fb797527ee9cfa73e70fb87a7350dea5e7c7bca3a35a5128196e0bbb3bf02201f2bc12952603d298dfdc6f7d852a71cfdb3eb0a18ecc64511343d4703eb8b19","signature_base64":"MEQCIBINX7eXUn7pz6c+cPuHpzUN6l58e8o6NaUSgZbgu7O/AiAfK8EpUmA9KY39xvfYUqcc/bPrChjsxkURND1HA+uLGQ==","low_s":true,"normalized":true}}
+serve exit 0
+{"contract":1,"ok":false,"error":{"code":"invalid_service","message":"service \"Test\" must match ^[a-z0-9-]+$ and be 1-40 characters","hint":"nothing was created or changed; fix the input and rerun"}}
+exit 3
+{"contract":1,"ok":false,"error":{"code":"usage","message":"signer requires serve","hint":"mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]"}}
+exit 2
+{
+  "ok": true,
+  "command": "delete",
+  "result": {
+    "deleted": true,
+    "label": "works.relux.mac-keyvault.key.tes
