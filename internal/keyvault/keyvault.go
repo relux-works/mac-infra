@@ -9,13 +9,13 @@ package keyvault
 import (
 	"crypto/ecdh"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/relux-works/mac-infra/internal/keyvault/signerclient"
 	"regexp"
 	"sort"
 	"strings"
@@ -23,7 +23,7 @@ import (
 )
 
 // LabelPrefix is the only namespace mac-keyvault creates, lists, or deletes.
-const LabelPrefix = "works.relux.mac-keyvault."
+const LabelPrefix = signerclient.LabelPrefix
 
 // TestService is the service every test record uses; test labels are
 // works.relux.mac-keyvault.<kind>.test.<purpose>.v<N>. TestLabelPrefix is
@@ -52,12 +52,12 @@ const errSecMissingEntitlement = -34018
 const errSecItemNotFound = -25300
 
 // StoreKind names where a key pair lives.
-type StoreKind string
+type StoreKind = signerclient.StoreKind
 
 const (
-	StoreKeychain StoreKind = "keychain"
-	StoreEnclave  StoreKind = "enclave"
-	StoreUnknown  StoreKind = "unknown"
+	StoreKeychain = signerclient.StoreKeychain
+	StoreEnclave  = signerclient.StoreEnclave
+	StoreUnknown  = signerclient.StoreUnknown
 )
 
 // Item is what the Backend stores: a label, the raw application tag, and the
@@ -84,8 +84,7 @@ func (k Key) Fingerprint() string {
 	if len(k.SPKI) == 0 {
 		return ""
 	}
-	sum := sha256.Sum256(k.SPKI)
-	return base64.RawURLEncoding.EncodeToString(sum[:])
+	return signerclient.Fingerprint(k.SPKI)
 }
 
 // Findings lists what a reader must know about the record beyond its fields.
@@ -154,31 +153,17 @@ func (e *StatusError) Error() string {
 
 // Refusal is a policy gate rejection raised before or instead of a store
 // call, or an operational failure translated per the error contract (model
-// §8): a stable code, a message in the caller's terms, and a hint that says
-// what to do next. Failure marks the exit-1 (operational) class.
-type Refusal struct {
-	Code    string
-	Message string
-	Hint    string
-	Status  int // underlying OSStatus when a Security call produced the refusal
-	Failure bool
-}
-
-func (e *Refusal) Error() string {
-	if e.Status != 0 {
-		return fmt.Sprintf("%s: %s (OSStatus %d)", e.Code, e.Message, e.Status)
-	}
-	return fmt.Sprintf("%s: %s", e.Code, e.Message)
-}
+// §8); see signerclient.Refusal.
+type Refusal = signerclient.Refusal
 
 // Error-contract codes.
 const (
-	CodeForeignLabel         = "foreign_label"
-	CodeDuplicate            = "duplicate"
-	CodeConfirmationRequired = "confirmation_required"
-	CodeMissingEntitlement   = "missing_entitlement"
-	CodeUnsupportedStore     = "unsupported_store"
-	CodeSecurity             = "security"
+	CodeForeignLabel         = signerclient.CodeForeignLabel
+	CodeDuplicate            = signerclient.CodeDuplicate
+	CodeConfirmationRequired = signerclient.CodeConfirmationRequired
+	CodeMissingEntitlement   = signerclient.CodeMissingEntitlement
+	CodeUnsupportedStore     = signerclient.CodeUnsupportedStore
+	CodeSecurity             = signerclient.CodeSecurity
 )
 
 // OSStatusName translates the Security.framework statuses the tool meets so
@@ -224,12 +209,7 @@ var labelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // RequireOwnLabel refuses any label outside LabelPrefix. It is the guard every
 // mutating Manager path runs before touching the store.
-func RequireOwnLabel(label string) error {
-	if !strings.HasPrefix(label, LabelPrefix) || len(label) == len(LabelPrefix) {
-		return &Refusal{Code: CodeForeignLabel, Message: fmt.Sprintf("label %q resolves outside the %s namespace; refusing to touch it", label, LabelPrefix), Hint: "addresses are <service>/<purpose>; raw labels are not accepted"}
-	}
-	return nil
-}
+func RequireOwnLabel(label string) error { return signerclient.RequireOwnLabel(label) }
 
 // Manager applies the policy gates around a Backend.
 type Manager struct {
@@ -306,7 +286,7 @@ func pick(keys []Key, addr Address) (Key, error) {
 		if parsable && parsed.Service == addr.Service && parsed.Purpose == addr.Purpose {
 			nearby = append(nearby, fmt.Sprintf("%s v%d", parsed.Kind, parsed.Version))
 		}
-		if !addr.Matches(key) {
+		if !addressMatches(addr, key) {
 			continue
 		}
 		if !ok || parsed.Version > foundVersion {
@@ -749,3 +729,12 @@ func EncodeJWK(spki []byte) ([]byte, error) {
 	}
 	return json.Marshal(map[string]string{"kty": "EC", "crv": "P-256", "x": coordinate(pub.X.Bytes()), "y": coordinate(pub.Y.Bytes())})
 }
+
+// Codes the classifier itself assigns; every Code* constant of this
+// package is an alias of the signerclient registry (ErrorContract), the
+// single source of the error contract.
+const (
+	CodeUsage    = signerclient.CodeUsage
+	CodeFailure  = signerclient.CodeFailure
+	CodeNotFound = signerclient.CodeNotFound
+)

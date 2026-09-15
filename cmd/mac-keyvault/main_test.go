@@ -435,12 +435,19 @@ func TestRunMetaJSONRejectsTrailingDocument(t *testing.T) {
 		return path
 	}
 	for name, args := range map[string][]string{
-		"second object":      initArgs("a", "--meta-json", write("two.json", `{"owner":"a"} {"ignored":true}`)),
-		"trailing token":     initArgs("a", "--meta-json", write("token.json", `{"owner":"a"} 1`)),
-		"trailing garbage":   initArgs("a", "--meta-json", write("garbage.json", "{\"owner\":\"a\"}\n}")),
-		"trailing bracket":   initArgs("a", "--meta-json", write("bracket.json", `{"owner":"a"}]`)),
-		"array top level":    initArgs("a", "--meta-json", write("array.json", `[{"owner":"a"}]`)),
-		"empty file":         initArgs("a", "--meta-json", write("empty.json", "")),
+		"second object":    initArgs("a", "--meta-json", write("two.json", `{"owner":"a"} {"ignored":true}`)),
+		"trailing token":   initArgs("a", "--meta-json", write("token.json", `{"owner":"a"} 1`)),
+		"trailing garbage": initArgs("a", "--meta-json", write("garbage.json", "{\"owner\":\"a\"}\n}")),
+		"trailing bracket": initArgs("a", "--meta-json", write("bracket.json", `{"owner":"a"}]`)),
+		"array top level":  initArgs("a", "--meta-json", write("array.json", `[{"owner":"a"}]`)),
+		"empty file":       initArgs("a", "--meta-json", write("empty.json", "")),
+		// a repeated member, top-level or nested, verbatim or escape-spelt
+		// (rev8 F1: CheckDocument runs before the map decode that would
+		// keep only the last value)
+		"duplicate member":   initArgs("a", "--meta-json", write("dup.json", `{"owner":"x","owner":"a"}`)),
+		"duplicate escaped":  initArgs("a", "--meta-json", write("dup-esc.json", `{"own\u0065r":"x","owner":"a"}`)),
+		"duplicate nested":   initArgs("a", "--meta-json", write("dup-nested.json", `{"owner":"a","o":{"n":1,"n":2}}`)),
+		"json-value dup":     {"meta", "set", "test/a", "n", `{"a":1,"a":2}`, "--json-value"},
 		"json-value second":  {"meta", "set", "test/a", "n", "1 2", "--json-value"},
 		"json-value garbage": {"meta", "set", "test/a", "n", "true x", "--json-value"},
 	} {

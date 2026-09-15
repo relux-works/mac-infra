@@ -11,7 +11,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -69,19 +68,21 @@ func usagef(format string, args ...any) error {
 // usageLines are the per-command usage lines the error contract hands back
 // as the hint of a usage error.
 var usageLines = map[string]string{
-	"init":       "mac-keyvault [--json] init --service S --purpose P [--kind key] [--algorithm ec-p256] [--title T] [--description D] [--usages a,b] [--format-public F] [--format-signature F] [--format-envelope F] [--extraction none|human|agent] [--not-after RFC3339] [--meta k=v]... [--meta-json FILE] [--generate SPEC] [--keychain|--enclave] [--user-presence]",
-	"list":       "mac-keyvault [--json] list [--service S] [--kind K]",
-	"describe":   "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
-	"pub":        "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk]",
-	"sign":       "mac-keyvault [--json] sign <service>/<purpose> (--digest <hex|@file> | --data-file FILE | --stdin) [--raw | --format ecdsa-der-low-s|ecdsa-raw] [--out FILE] [--kind K] [--version N]",
-	"verify":     "mac-keyvault [--json] verify (<service>/<purpose> [--kind K] [--version N] | --spki FILE) (--digest <hex|@file> | --data-file FILE | --stdin) --sig <hex|@file> [--raw] [--allow-high-s]",
-	"rotate":     "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
-	"delete":     "mac-keyvault [--json] delete <service>/<purpose> --confirm [--kind K] [--version N]",
-	"meta":       "mac-keyvault [--json] meta get|set|unset <service>/<purpose> [key] [value] [--kind K] [--version N] [--json-value]",
-	"meta get":   "mac-keyvault [--json] meta get <service>/<purpose> [key] [--kind K] [--version N]",
-	"meta set":   "mac-keyvault [--json] meta set <service>/<purpose> <key> <value> [--json-value] [--kind K] [--version N]",
-	"meta unset": "mac-keyvault [--json] meta unset <service>/<purpose> <key> [--kind K] [--version N]",
-	"version":    "mac-keyvault [--json] version",
+	"init":         "mac-keyvault [--json] init --service S --purpose P [--kind key] [--algorithm ec-p256] [--title T] [--description D] [--usages a,b] [--format-public F] [--format-signature F] [--format-envelope F] [--extraction none|human|agent] [--not-after RFC3339] [--meta k=v]... [--meta-json FILE] [--generate SPEC] [--keychain|--enclave] [--user-presence]",
+	"list":         "mac-keyvault [--json] list [--service S] [--kind K]",
+	"describe":     "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
+	"pub":          "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk]",
+	"sign":         "mac-keyvault [--json] sign <service>/<purpose> (--digest <hex|@file> | --data-file FILE | --stdin) [--raw | --format ecdsa-der-low-s|ecdsa-raw] [--out FILE] [--kind K] [--version N]",
+	"verify":       "mac-keyvault [--json] verify (<service>/<purpose> [--kind K] [--version N] | --spki FILE) (--digest <hex|@file> | --data-file FILE | --stdin) --sig <hex|@file> [--raw] [--allow-high-s]",
+	"rotate":       "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
+	"delete":       "mac-keyvault [--json] delete <service>/<purpose> --confirm [--kind K] [--version N]",
+	"meta":         "mac-keyvault [--json] meta get|set|unset <service>/<purpose> [key] [value] [--kind K] [--version N] [--json-value]",
+	"meta get":     "mac-keyvault [--json] meta get <service>/<purpose> [key] [--kind K] [--version N]",
+	"meta set":     "mac-keyvault [--json] meta set <service>/<purpose> <key> <value> [--json-value] [--kind K] [--version N]",
+	"meta unset":   "mac-keyvault [--json] meta unset <service>/<purpose> <key> [--kind K] [--version N]",
+	"signer":       "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
+	"signer serve": "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
+	"version":      "mac-keyvault [--json] version",
 }
 
 // response is the JSON envelope every command emits in --json mode.
@@ -150,8 +151,6 @@ func (o output) failWith(result any, err error) int {
 	return code
 }
 
-type hinter interface{ Hint() string }
-
 func (o output) classify(err error) (int, *responseError) {
 	var usage *usageError
 	if errors.As(err, &usage) {
@@ -160,31 +159,25 @@ func (o output) classify(err error) (int, *responseError) {
 			hint = usageLines[strings.SplitN(o.command, " ", 2)[0]]
 		}
 		if hint == "" {
-			hint = "mac-keyvault help lists the commands: init, list, describe, pub, sign, verify, rotate, delete, meta, version"
+			hint = "mac-keyvault help lists the commands: init, list, describe, pub, sign, verify, rotate, delete, meta, signer, version"
 		}
-		return exitUsage, &responseError{Code: "usage", Message: usage.msg, Hint: hint}
+		return exitUsage, &responseError{Code: keyvault.CodeUsage, Message: usage.msg, Hint: hint}
 	}
-	var refusal *keyvault.Refusal
-	if errors.As(err, &refusal) {
-		code := exitRefused
-		if refusal.Failure {
-			code = exitFailure
-		}
-		return code, &responseError{Code: refusal.Code, Message: refusal.Message, Hint: refusal.Hint, Status: refusal.Status}
+	return exitCodeOf(err), contractError(err)
+}
+
+// exitCodeOf maps a non-usage error to its exit class: 1 for the
+// operational failures, 3 for policy refusals.
+func exitCodeOf(err error) int {
+	if keyvault.ClassifyError(err).Failure {
+		return exitFailure
 	}
-	if errors.Is(err, keyvault.ErrNotFound) {
-		hint := "list shows every record"
-		var h hinter
-		if errors.As(err, &h) {
-			hint = h.Hint()
-		}
-		return exitFailure, &responseError{Code: "not_found", Message: err.Error(), Hint: hint}
-	}
-	var status *keyvault.StatusError
-	if errors.As(err, &status) {
-		return o.classify(keyvault.Translate(status.Op, err))
-	}
-	return exitFailure, &responseError{Code: "failure", Message: err.Error(), Hint: "check the path or environment named in the message and rerun"}
+	return exitRefused
+}
+
+func contractError(err error) *responseError {
+	c := keyvault.ClassifyError(err)
+	return &responseError{Code: c.Code, Message: c.Message, Hint: c.Hint, Status: c.Status}
 }
 
 func encodeJSON(w io.Writer, v any) {
@@ -263,6 +256,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDelete(rest, out)
 	case "meta":
 		return runMeta(rest, out)
+	case "signer":
+		return runSigner(rest, out)
 	case "version":
 		return runVersion(rest, out)
 	case "help", "--help", "-h":
@@ -372,23 +367,10 @@ func singleAddress(fs *flag.FlagSet, positional []string, kind string, version i
 }
 
 // keyView is the flat JSON a read command prints: the record plus derived
-// label, fingerprint, operations and findings.
+// label, fingerprint, operations and findings (keyvault.Key.View, shared
+// with the signer contract's describe).
 func keyView(key keyvault.Key) map[string]any {
-	view := map[string]any{}
-	raw, _ := json.Marshal(key.Record)
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber() // numeric meta is re-emitted digit-exact (review F11)
-	_ = decoder.Decode(&view)
-	ops, findings := key.Findings(now())
-	if findings == nil {
-		findings = []string{}
-	}
-	view["label"] = key.Label
-	view["fingerprint"] = key.Fingerprint()
-	view["exposure"] = keyvault.Exposure(key.Record)
-	view["operations"] = ops
-	view["findings"] = findings
-	return view
+	return key.View(now())
 }
 
 func orUnknown(value string) string {
@@ -1063,6 +1045,7 @@ Usage:
   %s
   %s
   %s
+  %s
 
 sign takes a SHA-256 digest (--digest) or hashes --data-file/--stdin itself and says so;
 it emits strict DER with low-S (or --raw r||s). verify judges the digest, the signature
@@ -1070,8 +1053,62 @@ and a key (vault address or --spki FILE): exit 0 verified, 1 not, 3 high-S refus
 Raw labels are refused as foreign_label. --enclave and --user-presence fail with
 missing_entitlement (OSStatus -34018) when the binary has no provisioning profile;
 there is no silent fallback. --extraction agent must be typed literally.
+signer serve binds one address and speaks JSON lines (contract 1) on stdin/stdout for a
+consumer such as kvctl: hello line, then {id, op: describe|pub|sign|verify, ...} ->
+{id, ok, result|error}; errors never end the stream, EOF exits 0.
 
 Exit codes: 0 ok, 1 failure, 2 usage, 3 refused by a policy gate. Every error is
 {code, message, hint, os_status}; text mode prints "error: <code>: <message>" and "hint: <hint>".
-`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["version"])
+`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["signer"], usageLines["version"])
+}
+
+// runSigner dispatches the signer subcommands; serve is the only one in
+// contract 1. Its stdout is the JSON-lines stream by definition, so every
+// failure before the server runs — usage, a refused address, no vault —
+// is written as the one-line startup hello (contract 1, ok=false, error)
+// with the usual exit code; text mode and the multi-line CLI envelope are
+// never used here.
+func runSigner(args []string, out output) int {
+	fail := func(err error) int {
+		code, respErr := out.classify(err)
+		_ = keyvault.WriteStartupFailure(out.stdout, keyvault.ContractError{Code: respErr.Code, Message: respErr.Message, Hint: respErr.Hint, Status: respErr.Status})
+		return code
+	}
+	if len(args) == 0 {
+		return fail(usagef("signer requires serve"))
+	}
+	sub, rest := args[0], args[1:]
+	out.command = "signer " + sub
+	if sub != "serve" {
+		return fail(usagef("unknown signer command %q; use serve", sub))
+	}
+	fs := flag.NewFlagSet("signer serve", flag.ContinueOnError)
+	address := fs.String("address", "", "the <service>/<purpose> the server signs with")
+	kind, version := addressFlags(fs)
+	positional, err := parseFlags(fs, rest)
+	if err != nil {
+		return fail(err)
+	}
+	switch {
+	case len(positional) != 0:
+		return fail(usagef("signer serve takes no positional arguments; use --address (got %q)", positional[0]))
+	case *address == "":
+		return fail(usagef("signer serve requires --address <service>/<purpose>"))
+	}
+	addr, err := keyvault.ParseAddress(*address, *kind, *version)
+	if err != nil {
+		return fail(err)
+	}
+	manager, err := newManager()
+	if err != nil {
+		return fail(err)
+	}
+	server := &keyvault.SignerServer{Manager: manager, Address: addr, ToolVersion: Version}
+	if err := server.Serve(stdinReader, out.stdout); err != nil {
+		// A startup failure already wrote its hello line; a write failure
+		// has no stream left to report on. Only the exit code remains.
+		code, _ := out.classify(err)
+		return code
+	}
+	return exitOK
 }

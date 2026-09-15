@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/relux-works/mac-infra/internal/keyvault/signerclient"
 	"math/big"
 )
 
@@ -22,13 +23,13 @@ const RawSignatureSize = 64
 
 // Error-contract codes of the sign/verify paths.
 const (
-	CodeInvalidDigest    = "invalid_digest"
-	CodeInvalidSignature = "invalid_signature"
-	CodeSignatureInvalid = "signature_invalid"
-	CodeHighSRefused     = "high_s_refused"
-	CodeUsageRefused     = "usage_refused"
-	CodeExpired          = "expired"
-	CodeInvalidPublicKey = "invalid_public_key"
+	CodeInvalidDigest    = signerclient.CodeInvalidDigest
+	CodeInvalidSignature = signerclient.CodeInvalidSignature
+	CodeSignatureInvalid = signerclient.CodeSignatureInvalid
+	CodeHighSRefused     = signerclient.CodeHighSRefused
+	CodeUsageRefused     = signerclient.CodeUsageRefused
+	CodeExpired          = signerclient.CodeExpired
+	CodeInvalidPublicKey = signerclient.CodeInvalidPublicKey
 )
 
 // ValidateDigest refuses anything but exactly DigestSize bytes. It is the

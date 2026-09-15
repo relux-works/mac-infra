@@ -1301,6 +1301,40 @@ func TestValidateKind(t *testing.T) {
 // decoded record reproduces the digits exactly (2^53+1 and 2^64+1 would be
 // rounded through float64); a small integer, a fraction and a bool are the
 // nearby positive controls, and a rev1 tag still carries an empty meta.
+// Review rev8 F1, the persisted tag: a schema-2 record whose NESTED
+// object repeats a member — format.public, origin.user, validity, meta,
+// verbatim or escape-spelt, the forged value first and the valid one
+// last, the order a struct decode collapses to the valid value — is a
+// read failure naming the duplicate (DecodeRecord → DecodeSingleJSON →
+// CheckDocument), never a readable record with the forged value erased
+// before ValidateStored sees it; a top-level repeat is refused the same
+// way. Controls: the same tag with a single escape-spelt nested member
+// is readable under the decoded name, and one member name in two sibling
+// objects is not a repeat.
+func TestDecodeRecordRefusesNestedDuplicateMembers(t *testing.T) {
+	head := `{"schema":2,"kind":"key","service":"test","purpose":"n","version":1,"algorithm":"ec-p256","store":"keychain","extraction":"none","usages":["sign"],"created":"2023-11-14T22:13:20Z",`
+	tail := `,"origin":{"user":"u","host":"h","tool":"t","source":"generated"},"validity":{"not_before":null,"not_after":null},"meta":{"owner":"a"}}`
+	forged := map[string]string{
+		"format.public":          head + `"format":{"public":"wrong","public":"spki-der","signature":"ecdsa-der-low-s"}` + tail,
+		"format.public escaped":  head + `"format":{"publ\u0069c":"wrong","public":"spki-der","signature":"ecdsa-der-low-s"}` + tail,
+		"origin.user":            head + `"format":{"public":"spki-der","signature":"ecdsa-der-low-s"},"origin":{"user":"attacker","user":"u","host":"h","tool":"t","source":"generated"},"validity":{"not_before":null,"not_after":null},"meta":{"owner":"a"}}`,
+		"validity.not_after":     head + `"format":{"public":"spki-der","signature":"ecdsa-der-low-s"},"origin":{"user":"u","host":"h","tool":"t","source":"generated"},"validity":{"not_before":null,"not_after":"2020-01-01T00:00:00Z","not_after":null},"meta":{"owner":"a"}}`,
+		"meta.owner escaped":     head + `"format":{"public":"spki-der","signature":"ecdsa-der-low-s"},"origin":{"user":"u","host":"h","tool":"t","source":"generated"},"validity":{"not_before":null,"not_after":null},"meta":{"own\u0065r":"attacker","owner":"a"}}`,
+		"top-level store":        head + `"store":"enclave","format":{"public":"spki-der","signature":"ecdsa-der-low-s"}` + tail,
+		"unknown nested in meta": head + `"format":{"public":"spki-der","signature":"ecdsa-der-low-s"},"origin":{"user":"u","host":"h","tool":"t","source":"generated"},"validity":{"not_before":null,"not_after":null},"meta":{"x":{"a":1,"a":2},"owner":"a"}}`,
+	}
+	for name, tag := range forged {
+		rec, problem := DecodeRecord([]byte(tag))
+		if !strings.Contains(problem, "duplicate member") || rec.Schema != 0 || rec.Store != StoreUnknown {
+			t.Errorf("%s: DecodeRecord = %+v (%q); a repeated nested member must be a read failure naming the duplicate", name, rec, problem)
+		}
+	}
+	control := head + `"format":{"publ\u0069c":"spki-der","signature":"ecdsa-der-low-s"}` + tail
+	if rec, problem := DecodeRecord([]byte(control)); problem != "" || rec.Format.Public != "spki-der" || rec.Origin.User != "u" {
+		t.Fatalf("control: %+v (%q)", rec, problem)
+	}
+}
+
 func TestDecodeRecordPreservesNumericMeta(t *testing.T) {
 	tag := []byte(`{"schema":2,"kind":"key","service":"test","purpose":"n","version":1,"algorithm":"ec-p256","store":"keychain","extraction":"none","usages":["sign"],"format":{"public":"spki-der","signature":"ecdsa-der-low-s"},"meta":{"big":9007199254740993,"huge":18446744073709551617,"small":7,"frac":0.1,"flag":true}}`)
 	rec, problem := DecodeRecord(tag)
