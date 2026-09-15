@@ -2,8 +2,13 @@ package keyvault
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,15 +22,19 @@ import (
 // duplicate-race regression uses to force both Inits into the
 // check-then-create window at once.
 type fakeStore struct {
-	mu       sync.Mutex
-	keys     map[string]Item
-	creates  []CreateOptions
-	deletes  []string
-	updates  []string
-	lists    int
-	createE  error
-	listGate *barrier
-	listDone *barrier
+	mu        sync.Mutex
+	keys      map[string]Item
+	creates   []CreateOptions
+	deletes   []string
+	updates   []string
+	lists     int
+	createE   error
+	signs     []string
+	signE     error
+	signHighS bool
+	signers   map[string]*ecdsa.PrivateKey
+	listGate  *barrier
+	listDone  *barrier
 	// createGate, when set, holds Create until both callers have taken
 	// their List snapshot (or a short timeout): with the lock held across
 	// check-and-create the peer cannot list, the gate times out and the
@@ -164,6 +173,61 @@ func (s *fakeStore) UpdateTag(label string, tag []byte) error {
 	item.Tag = tag
 	s.keys[label] = item
 	return nil
+}
+
+// Sign records the call; it signs with the real P-256 key registered for
+// the label by installSigner (so Manager.Sign's self-check passes), low-S,
+// and is ErrNotFound otherwise. signHighS makes it hand back the high-S
+// twin, the shape corecrypto may emit, to drive normalisation.
+func (s *fakeStore) Sign(label string, digest []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signs = append(s.signs, label)
+	if s.signE != nil {
+		return nil, s.signE
+	}
+	priv, ok := s.signers[label]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	der, err := ecdsa.SignASN1(rand.Reader, priv, digest)
+	if err != nil {
+		return nil, err
+	}
+	// crypto/ecdsa does not normalise; the fake picks the half itself.
+	sig, err := ParseSignature(der, FormatSignatureDERLowS)
+	if err != nil {
+		return nil, err
+	}
+	sig = sig.LowS()
+	if s.signHighS {
+		sig = Signature{R: sig.R, S: new(big.Int).Sub(p256Order, sig.S)}
+	}
+	return sig.Encode(FormatSignatureDERLowS)
+}
+
+// installSigner gives the item under label a real key pair: the SPKI the
+// store lists and the private key its Sign uses.
+func (s *fakeStore) installSigner(t *testing.T, label string) *ecdsa.PrivateKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.signers == nil {
+		s.signers = map[string]*ecdsa.PrivateKey{}
+	}
+	s.signers[label] = priv
+	item := s.keys[label]
+	item.SPKI = spki
+	s.keys[label] = item
+	return priv
 }
 
 func (s *fakeStore) calls() (creates, deletes, updates, lists int) {
@@ -1048,8 +1112,16 @@ func TestOperationsRegistry(t *testing.T) {
 		if op.Name == "export-public" && op.Via != "pub" {
 			t.Fatalf("export-public via %s", op.Via)
 		}
-		if op.Name == "ecdsa-sha256-sign" && op.Via != ViaReserved {
-			t.Fatalf("sign is not implemented yet but is advertised via %s", op.Via)
+		// T2 implements sign and verify; every other crypto operation of
+		// the row is still reserved so a consumer never assumes it works.
+		if op.Name == OperationSign && op.Via != "sign" {
+			t.Fatalf("sign advertised via %s", op.Via)
+		}
+		if op.Name == OperationVerify && op.Via != "verify" {
+			t.Fatalf("verify advertised via %s", op.Via)
+		}
+		if (op.Name == "ecdh-p256" || op.Name == "ecies-p256-encrypt" || op.Name == "ecies-p256-decrypt") && op.Via != ViaReserved {
+			t.Fatalf("%s advertised via %s before it is implemented", op.Name, op.Via)
 		}
 		if op.Name == "export-private" {
 			t.Fatal("export-private advertised for extraction none")

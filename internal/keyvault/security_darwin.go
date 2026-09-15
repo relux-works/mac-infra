@@ -129,6 +129,31 @@ func (s *SecurityStore) UpdateTag(label string, tag []byte) error {
 	return nil
 }
 
+// Sign asks Security.framework for an ECDSA signature over digest with the
+// private half under label (kSecKeyAlgorithmECDSASignatureDigestX962SHA256:
+// the digest is signed as given, never re-hashed). The result is X9.62 DER
+// as corecrypto emits it; low-S normalisation is the Manager's job.
+func (s *SecurityStore) Sign(label string, digest []byte) ([]byte, error) {
+	if len(digest) != DigestSize {
+		// Belt and braces: the Manager gate runs first, but the bridge
+		// never signs a mis-sized digest either.
+		return nil, ValidateDigest(digest)
+	}
+	cLabel := C.CString(label)
+	defer C.free(unsafe.Pointer(cLabel))
+	var out *C.uchar
+	var outLen C.size_t
+	status := int(C.MacKeyVaultSign(cLabel, (*C.uchar)(unsafe.Pointer(&digest[0])), C.size_t(len(digest)), &out, &outLen))
+	if status == errSecItemNotFound {
+		return nil, ErrNotFound
+	}
+	if status != 0 {
+		return nil, &StatusError{Op: "sign", Status: status}
+	}
+	defer C.free(unsafe.Pointer(out))
+	return C.GoBytes(unsafe.Pointer(out), C.int(outLen)), nil
+}
+
 // ExportProbe is the outcome of trying to pull private material out of a
 // keychain item through both Security.framework export paths.
 type ExportProbe struct {

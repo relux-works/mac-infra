@@ -3,14 +3,18 @@
 // meta) in its application tag and is addressed as <service>/<purpose>.
 //
 // Exit codes: 0 success, 1 operational failure (Security.framework error,
-// unknown address, I/O), 2 usage error, 3 policy refusal (invalid record,
-// duplicate, missing --confirm, label outside the tool namespace, Secure
-// Enclave or user-presence unavailable, unknown metadata on rotate).
+// unknown address, I/O, a signature that does not verify), 2 usage error,
+// 3 policy refusal (invalid record, duplicate, missing --confirm, label
+// outside the tool namespace, Secure Enclave or user-presence unavailable,
+// unknown metadata on rotate, usage or validity gate on sign, a mis-sized
+// digest or malformed signature, a high-S signature without --allow-high-s).
 package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -69,6 +73,8 @@ var usageLines = map[string]string{
 	"list":       "mac-keyvault [--json] list [--service S] [--kind K]",
 	"describe":   "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
 	"pub":        "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk]",
+	"sign":       "mac-keyvault [--json] sign <service>/<purpose> (--digest <hex|@file> | --data-file FILE | --stdin) [--raw | --format ecdsa-der-low-s|ecdsa-raw] [--out FILE] [--kind K] [--version N]",
+	"verify":     "mac-keyvault [--json] verify (<service>/<purpose> [--kind K] [--version N] | --spki FILE) (--digest <hex|@file> | --data-file FILE | --stdin) --sig <hex|@file> [--raw] [--allow-high-s]",
 	"rotate":     "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
 	"delete":     "mac-keyvault [--json] delete <service>/<purpose> --confirm [--kind K] [--version N]",
 	"meta":       "mac-keyvault [--json] meta get|set|unset <service>/<purpose> [key] [value] [--kind K] [--version N] [--json-value]",
@@ -129,6 +135,21 @@ func (o output) fail(err error) int {
 	return code
 }
 
+// failWith is fail with a result attached: a verify verdict of false is an
+// error by the contract (exit 1 or 3, code, message, hint) and also carries
+// the verdict fields so a consumer sees what was judged.
+func (o output) failWith(result any, err error) int {
+	code, respErr := o.classify(err)
+	if o.json {
+		encodeJSON(o.stdout, response{OK: false, Command: o.command, Result: result, Error: respErr})
+		return code
+	}
+	fmt.Fprintln(o.stdout, "verified: false")
+	fmt.Fprintf(o.stderr, "error: %s: %s\n", respErr.Code, respErr.Message)
+	fmt.Fprintf(o.stderr, "hint: %s\n", respErr.Hint)
+	return code
+}
+
 type hinter interface{ Hint() string }
 
 func (o output) classify(err error) (int, *responseError) {
@@ -139,7 +160,7 @@ func (o output) classify(err error) (int, *responseError) {
 			hint = usageLines[strings.SplitN(o.command, " ", 2)[0]]
 		}
 		if hint == "" {
-			hint = "mac-keyvault help lists the commands: init, list, describe, pub, rotate, delete, meta, version"
+			hint = "mac-keyvault help lists the commands: init, list, describe, pub, sign, verify, rotate, delete, meta, version"
 		}
 		return exitUsage, &responseError{Code: "usage", Message: usage.msg, Hint: hint}
 	}
@@ -232,6 +253,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDescribe(rest, out)
 	case "pub":
 		return runPub(rest, out)
+	case "sign":
+		return runSign(rest, out)
+	case "verify":
+		return runVerify(rest, out)
 	case "rotate":
 		return runRotate(rest, out)
 	case "delete":
@@ -283,7 +308,11 @@ func newManager() (*keyvault.Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lock path: %w", err)
 	}
-	return keyvault.NewManager(newBackend(), keyvault.FileLock{Path: path}, localOrigin()), nil
+	manager := keyvault.NewManager(newBackend(), keyvault.FileLock{Path: path}, localOrigin())
+	// One clock for created stamps, the validity gate of sign and the
+	// operations describe prints.
+	manager.SetClock(now)
+	return manager, nil
 }
 
 func localOrigin() keyvault.Origin {
@@ -656,6 +685,251 @@ func encodePublic(spki []byte, encoding string) ([]byte, error) {
 	}
 }
 
+// digestFlags are the three ways a command takes its SHA-256 digest:
+// --digest (the caller hashed; the tool signs exactly those 32 bytes),
+// --data-file or --stdin (the tool hashes with SHA-256 and says so in the
+// output). Exactly one must be given.
+type digestFlags struct {
+	digest, dataFile *string
+	stdin            *bool
+}
+
+func addDigestFlags(fs *flag.FlagSet) digestFlags {
+	return digestFlags{
+		digest:   fs.String("digest", "", "SHA-256 digest to sign/verify: 64 hex chars, or @FILE holding the 32 raw bytes"),
+		dataFile: fs.String("data-file", "", "hash FILE with SHA-256 and use that digest"),
+		stdin:    fs.Bool("stdin", false, "hash stdin with SHA-256 and use that digest"),
+	}
+}
+
+// stdinReader is swapped by tests.
+var stdinReader io.Reader = os.Stdin
+
+// resolve returns the digest bytes and the source name (digest, file,
+// stdin). Length is judged by keyvault.ValidateDigest so a mis-sized
+// caller digest is refused with invalid_digest before any store exists.
+func (d digestFlags) resolve() ([]byte, string, error) {
+	given := 0
+	for _, set := range []bool{*d.digest != "", *d.dataFile != "", *d.stdin} {
+		if set {
+			given++
+		}
+	}
+	if given != 1 {
+		return nil, "", usagef("exactly one of --digest, --data-file or --stdin is required")
+	}
+	switch {
+	case *d.digest != "":
+		digest, err := bytesArg("--digest", *d.digest)
+		if err != nil {
+			return nil, "", err
+		}
+		if err := keyvault.ValidateDigest(digest); err != nil {
+			return nil, "", err
+		}
+		return digest, "digest", nil
+	case *d.dataFile != "":
+		data, err := os.ReadFile(*d.dataFile)
+		if err != nil {
+			return nil, "", usagef("--data-file: %v", err)
+		}
+		sum := sha256.Sum256(data)
+		return sum[:], "file", nil
+	default:
+		data, err := io.ReadAll(stdinReader)
+		if err != nil {
+			return nil, "", fmt.Errorf("stdin: %w", err)
+		}
+		sum := sha256.Sum256(data)
+		return sum[:], "stdin", nil
+	}
+}
+
+// bytesArg decodes a hex string, or the raw bytes of @FILE (files are never
+// hex-decoded, so a raw digest that happens to look like hex is not
+// misread). A value the parser cannot read is a usage error.
+func bytesArg(flagName, value string) ([]byte, error) {
+	if strings.HasPrefix(value, "@") {
+		data, err := os.ReadFile(value[1:])
+		if err != nil {
+			return nil, usagef("%s: %v", flagName, err)
+		}
+		return data, nil
+	}
+	decoded, err := hex.DecodeString(strings.TrimSpace(value))
+	if err != nil {
+		return nil, usagef("%s must be hex or @FILE: %v", flagName, err)
+	}
+	return decoded, nil
+}
+
+// signatureFormat resolves --raw / --format against the record default.
+func signatureFormat(raw bool, format, recordDefault string) (string, error) {
+	switch {
+	case raw && format != "" && format != keyvault.FormatSignatureRaw:
+		return "", usagef("--raw contradicts --format %s", format)
+	case raw:
+		return keyvault.FormatSignatureRaw, nil
+	case format == keyvault.FormatSignatureDERLowS || format == keyvault.FormatSignatureRaw:
+		return format, nil
+	case format != "":
+		return "", usagef("--format must be %s or %s, got %q", keyvault.FormatSignatureDERLowS, keyvault.FormatSignatureRaw, format)
+	case recordDefault == keyvault.FormatSignatureRaw:
+		return recordDefault, nil
+	default:
+		return keyvault.FormatSignatureDERLowS, nil
+	}
+}
+
+func runSign(args []string, out output) int {
+	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
+	kind, version := addressFlags(fs)
+	digestIn := addDigestFlags(fs)
+	raw := fs.Bool("raw", false, "emit raw r||s (64 bytes) instead of DER")
+	format := fs.String("format", "", "ecdsa-der-low-s or ecdsa-raw; default is the record's format.signature")
+	outPath := fs.String("out", "", "write the signature bytes to PATH")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return out.fail(err)
+	}
+	// Gates before the store exists: flag shape, digest length, address.
+	if _, err := signatureFormat(*raw, *format, ""); err != nil {
+		return out.fail(err)
+	}
+	digest, source, err := digestIn.resolve()
+	if err != nil {
+		return out.fail(err)
+	}
+	addr, err := singleAddress(fs, positional, *kind, *version)
+	if err != nil {
+		return out.fail(err)
+	}
+	manager, err := newManager()
+	if err != nil {
+		return out.fail(err)
+	}
+	signed, err := manager.Sign(addr, digest)
+	if err != nil {
+		return out.fail(err)
+	}
+	encoding, _ := signatureFormat(*raw, *format, signed.Key.Record.Format.Signature)
+	payload, err := signed.Signature.Encode(encoding)
+	if err != nil {
+		return out.fail(err)
+	}
+	result := keyView(signed.Key)
+	result["hash"] = "sha256"
+	result["digest"] = hex.EncodeToString(digest)
+	result["digest_source"] = source
+	result["format"] = encoding
+	result["signature"] = hex.EncodeToString(payload)
+	result["signature_base64"] = base64.StdEncoding.EncodeToString(payload)
+	result["low_s"] = true
+	result["normalized"] = signed.Normalized
+	if *outPath != "" {
+		if err := os.WriteFile(*outPath, payload, 0o600); err != nil {
+			return out.fail(err)
+		}
+		result["out"] = *outPath
+		return out.success(result, func(w io.Writer) {
+			fmt.Fprintf(w, "signed sha256 %s with %s: wrote %s (%d bytes) to %s\n", hex.EncodeToString(digest), signed.Key.Label, encoding, len(payload), *outPath)
+		})
+	}
+	return out.success(result, func(w io.Writer) { fmt.Fprintln(w, hex.EncodeToString(payload)) })
+}
+
+func runVerify(args []string, out output) int {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	kind, version := addressFlags(fs)
+	digestIn := addDigestFlags(fs)
+	spkiPath := fs.String("spki", "", "verify under this SPKI DER or PEM file instead of a vault address")
+	sigIn := fs.String("sig", "", "signature: hex, or @FILE with the raw bytes")
+	raw := fs.Bool("raw", false, "the signature is raw r||s (64 bytes), not DER")
+	allowHighS := fs.Bool("allow-high-s", false, "accept a signature whose s is in the high half (malleable form)")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return out.fail(err)
+	}
+	switch {
+	case *spkiPath != "" && len(positional) != 0:
+		return out.fail(usagef("verify takes either a <service>/<purpose> address or --spki FILE, not both"))
+	case *spkiPath == "" && len(positional) != 1:
+		return out.fail(usagef("verify requires a <service>/<purpose> address or --spki FILE"))
+	case *sigIn == "":
+		return out.fail(usagef("verify requires --sig <hex|@file>"))
+	}
+	digest, source, err := digestIn.resolve()
+	if err != nil {
+		return out.fail(err)
+	}
+	encoding := keyvault.FormatSignatureDERLowS
+	if *raw {
+		encoding = keyvault.FormatSignatureRaw
+	}
+	sigBytes, err := bytesArg("--sig", *sigIn)
+	if err != nil {
+		return out.fail(err)
+	}
+	sig, err := keyvault.ParseSignature(sigBytes, encoding)
+	if err != nil {
+		return out.fail(err)
+	}
+	// The high-S policy is judged on the signature bytes alone, so it is
+	// refused here, before the SPKI file is read and before the vault is
+	// listed: a malleable signature never causes a Security call (rev1 F2).
+	inputs := map[string]any{"hash": "sha256", "digest": hex.EncodeToString(digest), "digest_source": source, "format": encoding, "low_s": sig.IsLowS(), "high_s_allowed": *allowHighS}
+	if !sig.IsLowS() && !*allowHighS {
+		inputs["verified"] = false
+		return out.failWith(inputs, &keyvault.Refusal{Code: keyvault.CodeHighSRefused, Message: "signature s is in the high half of the P-256 order (malleable form); the vault only accepts low-S signatures", Hint: "signatures made by mac-keyvault sign are always low-S; pass --allow-high-s to accept this one knowingly"})
+	}
+	// The public key: from the file, or from the vault after the record
+	// gate (readable record, registry row, readable public half).
+	var spki []byte
+	result := map[string]any{}
+	if *spkiPath != "" {
+		data, err := os.ReadFile(*spkiPath)
+		if err != nil {
+			return out.fail(usagef("--spki: %v", err))
+		}
+		der, _, err := keyvault.ParseSPKI(data)
+		if err != nil {
+			return out.fail(err)
+		}
+		spki = der
+		result["by"] = "spki"
+		result["spki"] = *spkiPath
+		result["fingerprint"] = keyvault.Key{SPKI: der}.Fingerprint()
+	} else {
+		addr, err := singleAddress(fs, positional, *kind, *version)
+		if err != nil {
+			return out.fail(err)
+		}
+		manager, err := newManager()
+		if err != nil {
+			return out.fail(err)
+		}
+		key, err := manager.PublicKeyFor(addr)
+		if err != nil {
+			return out.fail(err)
+		}
+		spki = key.SPKI
+		result = keyView(key)
+		result["by"] = "label"
+	}
+	for k, v := range inputs {
+		result[k] = v
+	}
+	verified, err := keyvault.VerifyDigest(spki, digest, sig)
+	if err != nil {
+		return out.fail(err)
+	}
+	result["verified"] = verified
+	if !verified {
+		return out.failWith(result, &keyvault.Refusal{Code: keyvault.CodeSignatureInvalid, Failure: true, Message: "signature does not verify over the digest under this public key", Hint: "the digest, the signature or the key is not the one that was signed; verdict false"})
+	}
+	return out.success(result, func(w io.Writer) { fmt.Fprintln(w, "verified: true") })
+}
+
 func runRotate(args []string, out output) int {
 	fs := flag.NewFlagSet("rotate", flag.ContinueOnError)
 	kind := fs.String("kind", keyvault.KindKey, "record kind: key, public-key, certificate or secret")
@@ -787,12 +1061,17 @@ Usage:
   %s
   %s
   %s
+  %s
+  %s
 
+sign takes a SHA-256 digest (--digest) or hashes --data-file/--stdin itself and says so;
+it emits strict DER with low-S (or --raw r||s). verify judges the digest, the signature
+and a key (vault address or --spki FILE): exit 0 verified, 1 not, 3 high-S refused.
 Raw labels are refused as foreign_label. --enclave and --user-presence fail with
 missing_entitlement (OSStatus -34018) when the binary has no provisioning profile;
 there is no silent fallback. --extraction agent must be typed literally.
 
 Exit codes: 0 ok, 1 failure, 2 usage, 3 refused by a policy gate. Every error is
 {code, message, hint, os_status}; text mode prints "error: <code>: <message>" and "hint: <hint>".
-`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["version"])
+`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["version"])
 }

@@ -3,6 +3,7 @@
 package keyvault
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -12,9 +13,12 @@ import (
 )
 
 // GuardedStore wraps a Backend and fails the test process before any Create,
-// Delete or UpdateTag whose label is outside the test namespace (service
-// "test", see IsTestLabel) reaches the real keychain. Every integration test
-// in this repository goes through it.
+// Delete, UpdateTag or Sign whose label is outside the test namespace
+// (service "test", see IsTestLabel) reaches the real keychain. Every
+// integration test in this repository goes through it. Every mutating or
+// private-key-using Backend method must be overridden here: an embedded
+// method Go promotes unchanged is a guard bypass (review rev1 F1 found Sign
+// promoted that way).
 type GuardedStore struct {
 	Backend
 	touched []string
@@ -52,6 +56,15 @@ func (g *GuardedStore) UpdateTag(label string, tag []byte) error {
 	return g.Backend.UpdateTag(label, tag)
 }
 
+// Sign is guarded too: the private half of a foreign key must never be used
+// from a test, even though signing does not modify the item.
+func (g *GuardedStore) Sign(label string, digest []byte) ([]byte, error) {
+	if err := g.guard(label); err != nil {
+		return nil, err
+	}
+	return g.Backend.Sign(label, digest)
+}
+
 func newGuardedSecurityStore(t *testing.T) *GuardedStore {
 	t.Helper()
 	store := &GuardedStore{Backend: NewSecurityStore()}
@@ -82,10 +95,18 @@ func testTag(t *testing.T, label string) []byte {
 
 // The guard itself refuses non-test labels (positive control for every
 // integration test below): a foreign or production-prefixed label never
-// reaches the wrapped backend.
+// reaches the wrapped backend through Create, Delete, UpdateTag or Sign —
+// Sign included, so the private half of a production key is never used by
+// a test (rev1 F1: an embedded Backend.Sign was promoted around the guard).
+// The store holds a signing-capable production key so that a leaked Sign
+// would succeed rather than fail for another reason; the test then asserts
+// zero recorded signs. Test-namespace labels sign through the guard
+// (positive control).
 func TestGuardedStoreRefusesNonTestLabels(t *testing.T) {
 	inner := newFakeStore(LabelPrefix + "prod")
+	inner.installSigner(t, LabelPrefix+"prod")
 	store := &GuardedStore{Backend: inner}
+	digest := testDigest("guard sign")
 	for _, label := range []string{LabelPrefix + "prod", LabelPrefix + "key.kvctl.pki.v1", LabelPrefix + "key.testx.a.v1", "com.apple.security.key", TestLabelPrefix, LabelPrefix + "test.", ""} {
 		if _, err := store.Create(CreateOptions{Label: label, Store: StoreKeychain}); !errors.Is(err, ErrGuardedLabel) {
 			t.Fatalf("create %q: err = %v", label, err)
@@ -96,9 +117,12 @@ func TestGuardedStoreRefusesNonTestLabels(t *testing.T) {
 		if err := store.UpdateTag(label, nil); !errors.Is(err, ErrGuardedLabel) {
 			t.Fatalf("update %q: err = %v", label, err)
 		}
+		if sig, err := store.Sign(label, digest); !errors.Is(err, ErrGuardedLabel) || sig != nil {
+			t.Fatalf("sign %q: sig=%x err = %v", label, sig, err)
+		}
 	}
-	if len(inner.creates) != 0 || len(inner.deletes) != 0 || len(inner.updates) != 0 {
-		t.Fatalf("guard leaked calls: creates=%v deletes=%v updates=%v", inner.creates, inner.deletes, inner.updates)
+	if len(inner.creates) != 0 || len(inner.deletes) != 0 || len(inner.updates) != 0 || len(inner.signs) != 0 {
+		t.Fatalf("guard leaked calls: creates=%v deletes=%v updates=%v signs=%v", inner.creates, inner.deletes, inner.updates, inner.signs)
 	}
 	if _, ok := inner.keys[LabelPrefix+"prod"]; !ok {
 		t.Fatal("production key was deleted through the guard")
@@ -110,6 +134,10 @@ func TestGuardedStoreRefusesNonTestLabels(t *testing.T) {
 		if _, err := store.Create(CreateOptions{Label: label, Store: StoreKeychain}); err != nil {
 			t.Fatalf("test label %s refused: %v", label, err)
 		}
+	}
+	inner.installSigner(t, tl("ok", 1))
+	if sig, err := store.Sign(tl("ok", 1), digest); err != nil || len(sig) == 0 || len(inner.signs) != 1 || inner.signs[0] != tl("ok", 1) {
+		t.Fatalf("test label sign: err=%v sig=%x signs=%v", err, sig, inner.signs)
 	}
 }
 
@@ -354,4 +382,63 @@ func TestParseACLRecords(t *testing.T) {
 	if len(entries) != 3 || !entries[0].AnyApplication || len(entries[1].Applications) != 2 || entries[1].Authorizations[1] != "ACLAuthorizationDecrypt" || entries[2].AnyApplication || len(entries[2].Applications) != 0 {
 		t.Fatalf("entries = %+v", entries)
 	}
+}
+
+// SecurityStore.Sign on this Mac: the bridge signs a 32-byte digest with the
+// keychain private half (digest variant, so the bytes are signed as the
+// digest, not re-hashed) and the DER it returns parses strictly and
+// verifies under the item's own SPKI with crypto/ecdsa; two signatures of
+// one digest differ (fresh k). A mis-sized digest is invalid_digest without
+// a Security call, and a label with no key is ErrNotFound. The high-S
+// share of corecrypto's output is not assumed either way: whatever comes
+// back, its low-S form verifies.
+func TestSecurityStoreSign(t *testing.T) {
+	store := newGuardedSecurityStore(t)
+	label := testLabel(t, "sign")
+	item, err := store.Create(CreateOptions{Label: label, Tag: testTag(t, label), Store: StoreKeychain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := testDigest("security store sign")
+	first, err := store.Sign(label, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Sign(label, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(first, second) {
+		t.Fatal("two ECDSA signatures of one digest are identical; k is not fresh")
+	}
+	for _, der := range [][]byte{first, second} {
+		sig, err := ParseSignature(der, FormatSignatureDERLowS)
+		if err != nil {
+			t.Fatalf("bridge DER is not strict: %v (%x)", err, der)
+		}
+		if ok, err := VerifyDigest(item.SPKI, digest, sig); err != nil || !ok {
+			t.Fatalf("bridge signature does not verify as given: %v %v", ok, err)
+		}
+		if ok, err := VerifyDigest(item.SPKI, digest, sig.LowS()); err != nil || !ok {
+			t.Fatalf("low-S form does not verify: %v %v", ok, err)
+		}
+	}
+	if ok, _ := VerifyDigest(item.SPKI, testDigest("another"), mustParse(t, first)); ok {
+		t.Fatal("signature verified over a different digest")
+	}
+	if _, err := store.Sign(label, digest[:31]); refusalCode(t, err) != CodeInvalidDigest {
+		t.Fatalf("31-byte digest: %v", err)
+	}
+	if _, err := store.Sign(tl(fmt.Sprintf("absent-%d", os.Getpid()), 1), digest); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("absent label: %v", err)
+	}
+}
+
+func mustParse(t *testing.T, der []byte) Signature {
+	t.Helper()
+	sig, err := ParseSignature(der, FormatSignatureDERLowS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sig
 }

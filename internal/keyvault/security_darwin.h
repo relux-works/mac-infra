@@ -16,6 +16,8 @@ int MacKeyVaultList(const char *prefix, char **out, size_t *outLen);
 int MacKeyVaultDelete(const char *label);
 int MacKeyVaultUpdateTag(const char *label, const char *tag);
 int MacKeyVaultProbeExport(const char *label, int *repStatus, int *exportStatus, size_t *leaked);
+int MacKeyVaultSign(const char *label, const unsigned char *digest, size_t digestLen,
+                    unsigned char **out, size_t *outLen);
 int MacKeyVaultCopyACL(const char *label, char **out, size_t *outLen);
 
 #endif

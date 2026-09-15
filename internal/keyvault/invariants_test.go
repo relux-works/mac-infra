@@ -2,6 +2,11 @@ package keyvault_test
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -20,11 +25,23 @@ type recordingStore struct {
 	keys    map[string]keyvault.Item
 	creates int
 	updates int
+	signs   int
+	// priv signs for every stored item (storeWith installs its SPKI).
+	priv *ecdsa.PrivateKey
+}
+
+func (s *recordingStore) Sign(label string, digest []byte) ([]byte, error) {
+	s.signs++
+	if _, ok := s.keys[label]; !ok {
+		return nil, keyvault.ErrNotFound
+	}
+	return ecdsa.SignASN1(rand.Reader, s.priv, digest)
 }
 
 func (s *recordingStore) Create(opts keyvault.CreateOptions) (keyvault.Item, error) {
 	s.creates++
-	item := keyvault.Item{Label: opts.Label, Tag: opts.Tag, SPKI: []byte{0x30, 0x59, byte(s.creates)}}
+	spki, _ := x509.MarshalPKIXPublicKey(&s.priv.PublicKey)
+	item := keyvault.Item{Label: opts.Label, Tag: opts.Tag, SPKI: spki}
 	s.keys[opts.Label] = item
 	return item, nil
 }
@@ -56,6 +73,9 @@ func (s *recordingStore) UpdateTag(label string, tag []byte) error {
 	return nil
 }
 
+// digest32 is a fixed SHA-256-sized digest for the sign gate rows.
+var digest32 = sha256.Sum256([]byte("forgery table digest"))
+
 var origin = keyvault.Origin{User: "tester", Host: "testhost", Tool: "mac-keyvault/test", Source: keyvault.SourceGenerated}
 
 // storedKey is a valid schema-2 key record for key/test/<purpose> v1.
@@ -73,7 +93,15 @@ func storeWith(t *testing.T, label string, rec keyvault.Record) (*recordingStore
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := &recordingStore{keys: map[string]keyvault.Item{label: {Label: label, Tag: tag, SPKI: []byte{0x30, 0x59, 1}}}}
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingStore{keys: map[string]keyvault.Item{label: {Label: label, Tag: tag, SPKI: spki}}, priv: priv}
 	manager := keyvault.NewManager(store, keyvault.FileLock{Path: filepath.Join(t.TempDir(), "lock")}, origin)
 	manager.SetClock(func() time.Time { return time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC) })
 	return store, manager, label
@@ -144,8 +172,16 @@ func TestForgedStoredRecordRefusedEverywhere(t *testing.T) {
 			if _, err := manager.MetaUnset(a, "owner"); code(t, err) != keyvault.CodeMetadataUnknown {
 				t.Fatalf("meta unset: %v", err)
 			}
-			if store.creates != 0 || store.updates != 0 || len(store.keys) != 1 || !bytes.Equal(store.keys[label].Tag, before) {
-				t.Fatalf("a gate touched the store: creates=%d updates=%d keys=%d tag-equal=%v", store.creates, store.updates, len(store.keys), bytes.Equal(store.keys[label].Tag, before))
+			// Sign (T2) runs the same trust gate: a forged record never
+			// reaches the private key, and verify never trusts its SPKI.
+			if _, err := manager.Sign(a, digest32[:]); code(t, err) != keyvault.CodeMetadataUnknown {
+				t.Fatalf("sign: %v", err)
+			}
+			if _, err := manager.PublicKeyFor(a); code(t, err) != keyvault.CodeMetadataUnknown {
+				t.Fatalf("verify key: %v", err)
+			}
+			if store.creates != 0 || store.updates != 0 || store.signs != 0 || len(store.keys) != 1 || !bytes.Equal(store.keys[label].Tag, before) {
+				t.Fatalf("a gate touched the store: creates=%d updates=%d signs=%d keys=%d tag-equal=%v", store.creates, store.updates, store.signs, len(store.keys), bytes.Equal(store.keys[label].Tag, before))
 			}
 			key, err := manager.Describe(a)
 			if err != nil {
@@ -187,6 +223,13 @@ func TestForgedStoredRecordRefusedEverywhere(t *testing.T) {
 			}
 			if _, ok := store.keys[label]; !ok {
 				t.Fatal("old generation removed")
+			}
+			signed, err := manager.Sign(a, digest32[:])
+			if err != nil || store.signs != 1 || !signed.Signature.IsLowS() {
+				t.Fatalf("control sign: %v signs=%d", err, store.signs)
+			}
+			if ok, err := keyvault.VerifyDigest(signed.Key.SPKI, digest32[:], signed.Signature); err != nil || !ok {
+				t.Fatalf("control signature does not verify: %v %v", ok, err)
 			}
 		})
 	}

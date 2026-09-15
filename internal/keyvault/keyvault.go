@@ -132,6 +132,11 @@ type Backend interface {
 	Delete(label string) error
 	// UpdateTag replaces the application tag under label or returns ErrNotFound.
 	UpdateTag(label string, tag []byte) error
+	// Sign produces an ECDSA signature over a SHA-256 digest with the
+	// private half under label, encoded as DER (X9.62), or ErrNotFound.
+	// It is the only operation that uses private material and the
+	// material never leaves Security.framework.
+	Sign(label string, digest []byte) ([]byte, error)
 }
 
 // ErrNotFound reports an address with no key pair behind it.
@@ -587,6 +592,128 @@ func (m *Manager) updateMeta(addr Address, change func(map[string]any)) (Key, er
 	}
 	if err := m.backend.UpdateTag(key.Label, tag); err != nil {
 		return Key{}, Translate("update", err)
+	}
+	return key, nil
+}
+
+// OperationSign and OperationVerify are the registry names sign and
+// verify are gated on.
+const (
+	OperationSign   = "ecdsa-sha256-sign"
+	OperationVerify = "ecdsa-sha256-verify"
+)
+
+// authorize is the operations gate (model §6): the named operation must be
+// in what the record can do right now, judged by the same registry
+// derivation describe prints. The reason of a miss is reported by its own
+// code: no registry row is unsupported_primitive (exit 1), a missing usage
+// is usage_refused, an elapsed validity.not_after is expired. A record that
+// is unreadable or violates its invariants is refused as metadata_unknown
+// before any of that: the vault never operates on a record it cannot trust.
+func (m *Manager) authorize(key Key, operation string) error {
+	rec := key.Record
+	if key.RecordProblem != "" || rec.Schema != SchemaVersion {
+		return &Refusal{Code: CodeMetadataUnknown, Message: fmt.Sprintf("%s does not carry a readable schema-%d record; its policy is unknown, so %s is not performed", key.Label, SchemaVersion, operation), Hint: "describe shows the findings; delete --confirm and init a fresh record"}
+	}
+	if err := ValidateStored(key.Label, rec); err != nil {
+		return &Refusal{Code: CodeMetadataUnknown, Message: fmt.Sprintf("%s carries a record this revision cannot trust (%v); %s is not performed", key.Label, err, operation), Hint: "describe shows the findings; delete --confirm --version N and init a fresh record"}
+	}
+	primitive, ok := LookupPrimitive(rec)
+	if !ok {
+		return &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("%s is (%s, %s, %s), a primitive this revision has no registry row for", key.Label, rec.Kind, rec.Algorithm, rec.Store), Hint: "only (key, ec-p256, keychain) performs operations in this revision"}
+	}
+	var row *Operation
+	for i := range primitive.Operations {
+		if primitive.Operations[i].Name == operation {
+			row = &primitive.Operations[i]
+		}
+	}
+	if row == nil {
+		return &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("%s does not support %s", key.Label, operation), Hint: "describe lists the operations of the record"}
+	}
+	ops, _ := Operations(rec, m.now())
+	for _, op := range ops {
+		if op.Name == operation {
+			return nil
+		}
+	}
+	if row.requires != "" && !contains(rec.Usages, row.requires) {
+		return &Refusal{Code: CodeUsageRefused, Message: fmt.Sprintf("%s has usages [%s]; %s requires usage %s", key.Label, strings.Join(rec.SortedUsages(), ", "), operation, row.requires), Hint: "init a record with --usages including " + row.requires + "; usages are fixed at creation"}
+	}
+	if row.expires && rec.Validity.NotAfter != nil {
+		return &Refusal{Code: CodeExpired, Message: fmt.Sprintf("%s expired at %s (validity.not_after); %s is refused", key.Label, rec.Validity.NotAfter.UTC().Format(time.RFC3339), operation), Hint: "rotate creates the next generation with the same not_after; init a fresh record for a new validity"}
+	}
+	return &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("%s cannot perform %s under its policy", key.Label, operation), Hint: "describe lists the operations of the record"}
+}
+
+// SignResult is one signature with the key that produced it.
+type SignResult struct {
+	Key       Key
+	Signature Signature
+	// Normalized reports that Security.framework produced a high-S value
+	// and the vault replaced s by n-s.
+	Normalized bool
+}
+
+// Sign produces a low-S ECDSA signature over a 32-byte SHA-256 digest with
+// the newest generation the address names. Gates, in order and all before
+// the backend signs: digest length, address inside the namespace, readable
+// and valid record, registry row, usages ∋ sign, validity unexpired.
+func (m *Manager) Sign(addr Address, digest []byte) (SignResult, error) {
+	if err := ValidateDigest(digest); err != nil {
+		return SignResult{}, err
+	}
+	if err := RequireOwnLabel(addr.Label()); err != nil {
+		return SignResult{}, err
+	}
+	key, err := m.resolve(addr)
+	if err != nil {
+		return SignResult{}, err
+	}
+	if err := m.authorize(key, OperationSign); err != nil {
+		return SignResult{}, err
+	}
+	if err := RequireOwnLabel(key.Label); err != nil {
+		return SignResult{}, err
+	}
+	der, err := m.backend.Sign(key.Label, digest)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return SignResult{}, &NotFoundError{Address: addr}
+		}
+		return SignResult{}, Translate("sign", err)
+	}
+	sig, err := ParseSignature(der, FormatSignatureDERLowS)
+	if err != nil {
+		return SignResult{}, &Refusal{Code: CodeSecurity, Failure: true, Message: fmt.Sprintf("Security.framework returned a signature the vault cannot parse for %s: %v", key.Label, err), Hint: "nothing was emitted; rerun and report the bridge output"}
+	}
+	result := SignResult{Key: key, Signature: sig.LowS(), Normalized: !sig.IsLowS()}
+	if len(key.SPKI) != 0 {
+		// The public half is known: refuse to emit a signature that
+		// does not verify under it (a bridge or keychain fault, never a
+		// caller error).
+		if ok, err := VerifyDigest(key.SPKI, digest, result.Signature); err != nil || !ok {
+			return SignResult{}, &Refusal{Code: CodeSecurity, Failure: true, Message: fmt.Sprintf("the signature Security.framework produced for %s does not verify under its own public key", key.Label), Hint: "nothing was emitted; the keychain item may be damaged, describe and rotate it"}
+		}
+	}
+	return result, nil
+}
+
+// PublicKeyFor resolves the address for verify: the key must carry a
+// readable public half and its record must admit ecdsa-sha256-verify.
+func (m *Manager) PublicKeyFor(addr Address) (Key, error) {
+	if err := RequireOwnLabel(addr.Label()); err != nil {
+		return Key{}, err
+	}
+	key, err := m.resolve(addr)
+	if err != nil {
+		return Key{}, err
+	}
+	if err := m.authorize(key, OperationVerify); err != nil {
+		return Key{}, err
+	}
+	if len(key.SPKI) == 0 {
+		return Key{}, &Refusal{Code: CodeSecurity, Failure: true, Message: fmt.Sprintf("public key of %s is unreadable; nothing can be verified against it", key.Label), Hint: "describe reports the fingerprint as unknown; pass --spki with a saved public key instead"}
 	}
 	return key, nil
 }

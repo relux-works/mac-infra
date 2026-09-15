@@ -294,6 +294,37 @@ int MacKeyVaultUpdateTag(const char *label, const char *tag) {
     return (int)status;
 }
 
+// Signs a SHA-256 digest with the private half under label. The digest
+// algorithm variant is used so Security.framework signs the given bytes as
+// the digest instead of hashing them again; the output is X9.62 DER.
+int MacKeyVaultSign(const char *label, const unsigned char *digest, size_t digestLen,
+                    unsigned char **out, size_t *outLen) {
+    SecKeyRef key = NULL;
+    OSStatus status = MacKeyVaultCopyPrivateKey(label, &key);
+    if (status != errSecSuccess) return (int)status;
+    CFDataRef digestData = CFDataCreate(kCFAllocatorDefault, digest, (CFIndex)digestLen);
+    CFErrorRef error = NULL;
+    CFDataRef signature = SecKeyCreateSignature(key, kSecKeyAlgorithmECDSASignatureDigestX962SHA256, digestData, &error);
+    CFRelease(digestData);
+    CFRelease(key);
+    if (signature == NULL) {
+        int code = MacKeyVaultErrorCode(error);
+        if (error != NULL) CFRelease(error);
+        return code;
+    }
+    size_t length = (size_t)CFDataGetLength(signature);
+    unsigned char *buffer = malloc(length);
+    if (buffer == NULL) {
+        CFRelease(signature);
+        return MacKeyVaultUnknownError;
+    }
+    memcpy(buffer, CFDataGetBytePtr(signature), length);
+    CFRelease(signature);
+    *out = buffer;
+    *outLen = length;
+    return 0;
+}
+
 // Attestation probe: tries both private-material export paths on the item and
 // reports their statuses verbatim. 0 from either would mean the private key
 // left the keychain; the tests require the documented refusals instead.

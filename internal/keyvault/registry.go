@@ -43,8 +43,8 @@ var registry = map[PrimitiveKey]Primitive{
 	{Kind: KindKey, Algorithm: AlgorithmECP256, Store: StoreKeychain}: {
 		Exposure: ExposureNever,
 		Operations: []Operation{
-			{Name: "ecdsa-sha256-sign", Input: "sha256-digest", Output: "ecdsa-der-low-s|ecdsa-raw", Via: ViaReserved, requires: "sign", expires: true},
-			{Name: "ecdsa-sha256-verify", Input: "sha256-digest+signature", Output: "verdict", Via: ViaReserved},
+			{Name: OperationSign, Input: "sha256-digest", Output: "ecdsa-der-low-s|ecdsa-raw", Via: "sign", requires: "sign", expires: true},
+			{Name: OperationVerify, Input: "sha256-digest+signature", Output: "verdict", Via: "verify"},
 			{Name: "ecdh-p256", Input: "peer-spki", Output: "shared-secret", Via: ViaReserved, requires: "wrap"},
 			{Name: "ecies-p256-encrypt", Input: "payload", Output: "envelope:ecies-x963-sha256-aesgcm", Via: ViaReserved},
 			{Name: "ecies-p256-decrypt", Input: "envelope:ecies-x963-sha256-aesgcm", Output: "payload", Via: ViaReserved, requires: "decrypt", expires: true},

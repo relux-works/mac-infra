@@ -18,3 +18,5 @@ func (s *SecurityStore) List() ([]Item, error) { return nil, errUnsupported }
 func (s *SecurityStore) Delete(string) error { return errUnsupported }
 
 func (s *SecurityStore) UpdateTag(string, []byte) error { return errUnsupported }
+
+func (s *SecurityStore) Sign(string, []byte) ([]byte, error) { return nil, errUnsupported }

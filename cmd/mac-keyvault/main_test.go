@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,10 @@ type memStore struct {
 	updates []string
 	lists   int
 	createE error
+	signs   []string
+	signE   error
+	// signHighS makes Sign return the high-S twin of every signature.
+	signHighS bool
 }
 
 func newMemStore(labels ...string) *memStore {
@@ -102,7 +107,7 @@ func (s *memStore) UpdateTag(label string, tag []byte) error {
 }
 
 func (s *memStore) touched() bool {
-	return len(s.creates)+len(s.deletes)+len(s.updates)+s.lists != 0
+	return len(s.creates)+len(s.deletes)+len(s.updates)+len(s.signs)+s.lists != 0
 }
 
 func (s *memStore) record(t *testing.T, label string) keyvault.Record {
@@ -120,11 +125,13 @@ func (s *memStore) record(t *testing.T, label string) keyvault.Record {
 
 var (
 	spkiCache   = map[byte][]byte{}
+	signerCache = map[string]*ecdsa.PrivateKey{} // by SPKI bytes
 	spkiCacheMu sync.Mutex
 )
 
 // generatorSPKI returns a real P-256 SPKI per salt so fingerprints differ
-// per key and every representation (DER, PEM, JWK) parses.
+// per key and every representation (DER, PEM, JWK) parses; the private
+// half is kept so memStore.Sign can produce real signatures under it.
 func generatorSPKI(salt byte) []byte {
 	spkiCacheMu.Lock()
 	defer spkiCacheMu.Unlock()
@@ -140,7 +147,49 @@ func generatorSPKI(salt byte) []byte {
 		panic(err)
 	}
 	spkiCache[salt] = spki
+	signerCache[string(spki)] = key
 	return spki
+}
+
+// signerFor returns the private key behind a generatorSPKI SPKI.
+func signerFor(spki []byte) *ecdsa.PrivateKey {
+	spkiCacheMu.Lock()
+	defer spkiCacheMu.Unlock()
+	return signerCache[string(spki)]
+}
+
+// Sign records the call and signs with the private half behind the item's
+// SPKI (crypto/ecdsa, DER out, the shape the bridge returns), low-S unless
+// signHighS asks for the high-S twin so the CLI's normalisation is
+// exercised; signE stands in for a Security.framework failure.
+func (s *memStore) Sign(label string, digest []byte) ([]byte, error) {
+	s.signs = append(s.signs, label)
+	if s.signE != nil {
+		return nil, s.signE
+	}
+	item, ok := s.keys[label]
+	if !ok {
+		return nil, keyvault.ErrNotFound
+	}
+	priv := signerFor(item.SPKI)
+	if priv == nil {
+		return nil, fmt.Errorf("memStore: no private key behind %s", label)
+	}
+	der, err := ecdsa.SignASN1(rand.Reader, priv, digest)
+	if err != nil {
+		return nil, err
+	}
+	// crypto/ecdsa does not normalise, so the fake decides the half
+	// deterministically: low-S by default, the high-S twin on request.
+	sig, err := keyvault.ParseSignature(der, keyvault.FormatSignatureDERLowS)
+	if err != nil {
+		return nil, err
+	}
+	sig = sig.LowS()
+	if s.signHighS {
+		sig = keyvault.Signature{R: sig.R, S: new(big.Int).Sub(elliptic.P256().Params().N, sig.S)}
+	}
+	return sig.Encode(keyvault.FormatSignatureDERLowS)
 }
 
 func useStore(t *testing.T, store keyvault.Backend) {
@@ -703,8 +752,8 @@ func TestRunRecordRoundTrip(t *testing.T) {
 }
 
 // describe derives operations from the primitive registry: the ec-p256
-// keychain key lists export-public via pub and the reserved sign/verify
-// operations, a record whose (kind, algorithm, store) has no row reports []
+// keychain key lists export-public via pub, ecdsa-sha256-sign via sign and
+// ecdsa-sha256-verify via verify (T2), the rest reserved, a record whose (kind, algorithm, store) has no row reports []
 // with unsupported_primitive (plus the invariant finding) and exposure
 // unknown, and a rev1 tag under a
 // parseable label is schema 1 with service and purpose unknown, no
@@ -727,7 +776,7 @@ func TestRunDescribeOperationsAndLegacy(t *testing.T) {
 	for _, op := range ops {
 		names[op.(map[string]any)["name"].(string)] = op.(map[string]any)["via"].(string)
 	}
-	if names["export-public"] != "pub" || names["ecdsa-sha256-sign"] != "reserved" || names["ecdsa-sha256-verify"] != "reserved" || names["ecdh-p256"] != "" || names["ecies-p256-decrypt"] != "" || names["export-private"] != "" || len(view["findings"].([]any)) != 0 || view["exposure"] != "never" {
+	if names["export-public"] != "pub" || names["ecdsa-sha256-sign"] != "sign" || names["ecdsa-sha256-verify"] != "verify" || names["ecdh-p256"] != "" || names["ecies-p256-decrypt"] != "" || names["export-private"] != "" || len(view["findings"].([]any)) != 0 || view["exposure"] != "never" {
 		t.Fatalf("operations = %s", raw)
 	}
 
@@ -1182,6 +1231,13 @@ func (g *guardedBackend) UpdateTag(label string, tag []byte) error {
 		return err
 	}
 	return g.inner.UpdateTag(label, tag)
+}
+
+func (g *guardedBackend) Sign(label string, digest []byte) ([]byte, error) {
+	if err := g.guard(label); err != nil {
+		return nil, err
+	}
+	return g.inner.Sign(label, digest)
 }
 
 // End-to-end against the login keychain on this Mac through the production
