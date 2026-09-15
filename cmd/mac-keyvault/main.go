@@ -1,0 +1,798 @@
+// mac-keyvault manages non-extractable P-256 key pairs in the login keychain.
+// Every item carries a schema-2 record (service, purpose, version, policy,
+// meta) in its application tag and is addressed as <service>/<purpose>.
+//
+// Exit codes: 0 success, 1 operational failure (Security.framework error,
+// unknown address, I/O), 2 usage error, 3 policy refusal (invalid record,
+// duplicate, missing --confirm, label outside the tool namespace, Secure
+// Enclave or user-presence unavailable, unknown metadata on rotate).
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/user"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/relux-works/mac-infra/internal/keyvault"
+)
+
+var (
+	Version   = "dev"
+	Commit    = "unknown"
+	BuildDate = "unknown"
+)
+
+const (
+	exitOK      = 0
+	exitFailure = 1
+	exitUsage   = 2
+	exitRefused = 3
+)
+
+// Production wiring; tests swap these for recording stores and a temp lock.
+var (
+	newBackend = func() keyvault.Backend { return keyvault.NewSecurityStore() }
+	lockPath   = keyvault.DefaultLockPath
+	now        = time.Now
+)
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// usageError is a command-line mistake: exit 2, no store call. Its hint is
+// the exact usage line of the command.
+type usageError struct {
+	msg     string
+	command string
+}
+
+func (e *usageError) Error() string { return e.msg }
+
+func usagef(format string, args ...any) error {
+	return &usageError{msg: fmt.Sprintf(format, args...)}
+}
+
+// usageLines are the per-command usage lines the error contract hands back
+// as the hint of a usage error.
+var usageLines = map[string]string{
+	"init":       "mac-keyvault [--json] init --service S --purpose P [--kind key] [--algorithm ec-p256] [--title T] [--description D] [--usages a,b] [--format-public F] [--format-signature F] [--format-envelope F] [--extraction none|human|agent] [--not-after RFC3339] [--meta k=v]... [--meta-json FILE] [--generate SPEC] [--keychain|--enclave] [--user-presence]",
+	"list":       "mac-keyvault [--json] list [--service S] [--kind K]",
+	"describe":   "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
+	"pub":        "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk]",
+	"rotate":     "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
+	"delete":     "mac-keyvault [--json] delete <service>/<purpose> --confirm [--kind K] [--version N]",
+	"meta":       "mac-keyvault [--json] meta get|set|unset <service>/<purpose> [key] [value] [--kind K] [--version N] [--json-value]",
+	"meta get":   "mac-keyvault [--json] meta get <service>/<purpose> [key] [--kind K] [--version N]",
+	"meta set":   "mac-keyvault [--json] meta set <service>/<purpose> <key> <value> [--json-value] [--kind K] [--version N]",
+	"meta unset": "mac-keyvault [--json] meta unset <service>/<purpose> <key> [--kind K] [--version N]",
+	"version":    "mac-keyvault [--json] version",
+}
+
+// response is the JSON envelope every command emits in --json mode.
+type response struct {
+	OK      bool           `json:"ok"`
+	Command string         `json:"command"`
+	Result  any            `json:"result,omitempty"`
+	Error   *responseError `json:"error,omitempty"`
+}
+
+// responseError is the error contract (model §8): stable code, message in
+// the caller's terms, a hint that says what to do next, os_status when
+// Security.framework produced the failure.
+type responseError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Hint    string `json:"hint"`
+	Status  int    `json:"os_status,omitempty"`
+}
+
+type output struct {
+	command string
+	json    bool
+	stdout  io.Writer
+	stderr  io.Writer
+}
+
+func (o output) success(result any, text func(io.Writer)) int {
+	if o.json {
+		encodeJSON(o.stdout, response{OK: true, Command: o.command, Result: result})
+		return exitOK
+	}
+	text(o.stdout)
+	return exitOK
+}
+
+// fail routes every failure, usage errors included, through the JSON
+// emitter when --json was given (review F3); text mode writes
+// "error: <code>: <message>" and "hint: <hint>" to stderr.
+func (o output) fail(err error) int {
+	code, respErr := o.classify(err)
+	if o.json {
+		encodeJSON(o.stdout, response{OK: false, Command: o.command, Error: respErr})
+		return code
+	}
+	fmt.Fprintf(o.stderr, "error: %s: %s\n", respErr.Code, respErr.Message)
+	if respErr.Status != 0 {
+		fmt.Fprintf(o.stderr, "os_status: %d (%s)\n", respErr.Status, keyvault.OSStatusName(respErr.Status))
+	}
+	fmt.Fprintf(o.stderr, "hint: %s\n", respErr.Hint)
+	return code
+}
+
+type hinter interface{ Hint() string }
+
+func (o output) classify(err error) (int, *responseError) {
+	var usage *usageError
+	if errors.As(err, &usage) {
+		hint := usageLines[o.command]
+		if hint == "" {
+			hint = usageLines[strings.SplitN(o.command, " ", 2)[0]]
+		}
+		if hint == "" {
+			hint = "mac-keyvault help lists the commands: init, list, describe, pub, rotate, delete, meta, version"
+		}
+		return exitUsage, &responseError{Code: "usage", Message: usage.msg, Hint: hint}
+	}
+	var refusal *keyvault.Refusal
+	if errors.As(err, &refusal) {
+		code := exitRefused
+		if refusal.Failure {
+			code = exitFailure
+		}
+		return code, &responseError{Code: refusal.Code, Message: refusal.Message, Hint: refusal.Hint, Status: refusal.Status}
+	}
+	if errors.Is(err, keyvault.ErrNotFound) {
+		hint := "list shows every record"
+		var h hinter
+		if errors.As(err, &h) {
+			hint = h.Hint()
+		}
+		return exitFailure, &responseError{Code: "not_found", Message: err.Error(), Hint: hint}
+	}
+	var status *keyvault.StatusError
+	if errors.As(err, &status) {
+		return o.classify(keyvault.Translate(status.Op, err))
+	}
+	return exitFailure, &responseError{Code: "failure", Message: err.Error(), Hint: "check the path or environment named in the message and rerun"}
+}
+
+func encodeJSON(w io.Writer, v any) {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
+
+// wantsJSON decides the output mode before any command parsing can fail.
+// It is not string matching (review F3/F6/F9): every token is offered on
+// its own to a flag.FlagSet that defines only the json bool, so the set of
+// spellings that select the envelope is, by construction, exactly the set
+// flag.Bool accepts (--json, -json, --json=true, --json=1, --json=T,
+// -json=TRUE, ...) and a later --json=false wins over an earlier --json,
+// as it does in the command parser. Tokens the pre-parser does not know
+// (every other flag, positionals, --) are ignored here and judged by the
+// command parser later.
+func wantsJSON(args []string) bool {
+	jsonMode := false
+	for _, arg := range args {
+		if arg == "--" {
+			break // flag terminator: what follows is positional for the command parser too
+		}
+		if value, ok := jsonToken(arg); ok {
+			jsonMode = value
+		}
+	}
+	return jsonMode
+}
+
+// jsonToken parses one token with the json-only pre-parser; ok is false
+// for anything that is not a json flag spelling flag.Bool would accept.
+func jsonToken(arg string) (value bool, ok bool) {
+	fs := flag.NewFlagSet("json-mode", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mode := fs.Bool("json", false, "")
+	if err := fs.Parse([]string{arg}); err != nil || fs.NFlag() != 1 {
+		return false, false
+	}
+	return *mode, true
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	jsonMode := wantsJSON(args)
+	for len(args) > 0 {
+		if _, ok := jsonToken(args[0]); !ok {
+			break
+		}
+		args = args[1:]
+	}
+	command := ""
+	if len(args) > 0 {
+		command = args[0]
+	}
+	out := output{command: command, json: jsonMode, stdout: stdout, stderr: stderr}
+	if command == "" {
+		return out.fail(usagef("a command is required"))
+	}
+	rest := args[1:]
+	switch command {
+	case "init":
+		return runInit(rest, out)
+	case "list":
+		return runList(rest, out)
+	case "describe":
+		return runDescribe(rest, out)
+	case "pub":
+		return runPub(rest, out)
+	case "rotate":
+		return runRotate(rest, out)
+	case "delete":
+		return runDelete(rest, out)
+	case "meta":
+		return runMeta(rest, out)
+	case "version":
+		return runVersion(rest, out)
+	case "help", "--help", "-h":
+		// help takes nothing; extra input is the same usage class as
+		// everywhere else (review F6), so it is refused before printing.
+		if err := requireNoArguments(command, rest); err != nil {
+			return out.fail(err)
+		}
+		printUsage(stdout)
+		return exitOK
+	default:
+		return out.fail(usagef("unknown command %q", command))
+	}
+}
+
+// runVersion goes through the same flag parser as every other command so
+// that a stray positional or unknown flag is a usage error (envelope, exit 2)
+// instead of being ignored (review F6, repeat of F3).
+func runVersion(args []string, out output) int {
+	fs := flag.NewFlagSet("version", flag.ContinueOnError)
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return out.fail(err)
+	}
+	if err := requireNoArguments("version", positional); err != nil {
+		return out.fail(err)
+	}
+	return out.success(map[string]string{"version": Version, "commit": Commit, "build_date": BuildDate}, func(w io.Writer) {
+		fmt.Fprintf(w, "mac-keyvault %s %s %s\n", Version, Commit, BuildDate)
+	})
+}
+
+// requireNoArguments refuses any leftover input for a command that takes none.
+func requireNoArguments(command string, rest []string) error {
+	if len(rest) != 0 {
+		return usagef("%s takes no arguments (got %q)", command, rest[0])
+	}
+	return nil
+}
+
+func newManager() (*keyvault.Manager, error) {
+	path, err := lockPath()
+	if err != nil {
+		return nil, fmt.Errorf("lock path: %w", err)
+	}
+	return keyvault.NewManager(newBackend(), keyvault.FileLock{Path: path}, localOrigin()), nil
+}
+
+func localOrigin() keyvault.Origin {
+	// user and host are always present (the record invariant requires
+	// them); a failed lookup is recorded as unknown, never as an empty
+	// string that reads like an absent field.
+	origin := keyvault.Origin{Tool: "mac-keyvault/" + Version, User: keyvault.Unknown, Host: keyvault.Unknown}
+	if current, err := user.Current(); err == nil && current.Username != "" {
+		origin.User = current.Username
+	}
+	if host, err := os.Hostname(); err == nil && host != "" {
+		origin.Host = host
+	}
+	return origin
+}
+
+// parseFlags parses flags interspersed with positionals
+// (mac-keyvault delete ADDR --confirm) and turns parser output into a usage
+// error instead of writing to stderr.
+func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
+	var sink strings.Builder
+	fs.SetOutput(&sink)
+	fs.Bool("json", false, "emit a JSON envelope on stdout")
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil, usagef("%s", strings.TrimSpace(sink.String()))
+			}
+			return nil, usagef("%s", strings.TrimSpace(strings.SplitN(sink.String(), "\n", 2)[0]))
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		if terminated := len(args) - len(rest) - 1; terminated >= 0 && args[terminated] == "--" {
+			// "--" ends flag parsing for good; nothing after it is re-parsed.
+			return append(positional, rest...), nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+}
+
+// addressFlags adds --kind and --version to a command that names one item.
+func addressFlags(fs *flag.FlagSet) (kind *string, version *int) {
+	kind = fs.String("kind", keyvault.KindKey, "record kind: key, public-key, certificate or secret")
+	version = fs.Int("version", 0, "one generation; 0 selects the newest")
+	return kind, version
+}
+
+func singleAddress(fs *flag.FlagSet, positional []string, kind string, version int) (keyvault.Address, error) {
+	if len(positional) != 1 {
+		return keyvault.Address{}, usagef("%s requires exactly one <service>/<purpose> address", fs.Name())
+	}
+	return keyvault.ParseAddress(positional[0], kind, version)
+}
+
+// keyView is the flat JSON a read command prints: the record plus derived
+// label, fingerprint, operations and findings.
+func keyView(key keyvault.Key) map[string]any {
+	view := map[string]any{}
+	raw, _ := json.Marshal(key.Record)
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber() // numeric meta is re-emitted digit-exact (review F11)
+	_ = decoder.Decode(&view)
+	ops, findings := key.Findings(now())
+	if findings == nil {
+		findings = []string{}
+	}
+	view["label"] = key.Label
+	view["fingerprint"] = key.Fingerprint()
+	view["exposure"] = keyvault.Exposure(key.Record)
+	view["operations"] = ops
+	view["findings"] = findings
+	return view
+}
+
+func orUnknown(value string) string {
+	if value == "" {
+		return keyvault.Unknown
+	}
+	return value
+}
+
+func createdText(key keyvault.Key) string {
+	if key.Record.Created.IsZero() {
+		return keyvault.Unknown
+	}
+	return key.Record.Created.UTC().Format(time.RFC3339)
+}
+
+type metaFlags struct {
+	pairs []string
+}
+
+func (m *metaFlags) String() string     { return strings.Join(m.pairs, ",") }
+func (m *metaFlags) Set(v string) error { m.pairs = append(m.pairs, v); return nil }
+
+func runInit(args []string, out output) int {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	service := fs.String("service", "", "consumer of the key (kvctl, bsim-ci, agent)")
+	purpose := fs.String("purpose", "", "role of the key (pki-root, attest)")
+	kind := fs.String("kind", keyvault.KindKey, "record kind; only key is created in this revision")
+	title := fs.String("title", "", "short human name, at most 80 characters")
+	description := fs.String("description", "", "free text shown by describe and list --json")
+	algorithm := fs.String("algorithm", keyvault.AlgorithmECP256, "ec-p256 (ec-p384, rsa-3072 reserved; ed25519 refused)")
+	usages := fs.String("usages", "sign,verify", "comma-separated subset of "+strings.Join(keyvault.Usages, ","))
+	formatPublic := fs.String("format-public", keyvault.FormatPublicSPKIDER, "default public representation: spki-der, spki-pem or jwk")
+	formatSignature := fs.String("format-signature", keyvault.FormatSignatureDERLowS, "default signature representation: ecdsa-der-low-s or ecdsa-raw")
+	formatEnvelope := fs.String("format-envelope", "", "default envelope representation for kind secret: json or der")
+	extraction := fs.String("extraction", keyvault.ExtractionNone, "none, human or agent; typed literally, never a default")
+	generate := fs.String("generate", "", "kind secret only: token:N | password:N[:charset] | bytes:N")
+	notAfter := fs.String("not-after", "", "RFC3339 validity end; sign refuses after it")
+	var meta metaFlags
+	fs.Var(&meta, "meta", "k=v string entry; repeatable")
+	metaJSON := fs.String("meta-json", "", "JSON object file with string, number and bool values")
+	enclave := fs.Bool("enclave", false, "store the pair in the Secure Enclave; refuses with -34018 on an unprovisioned binary")
+	keychain := fs.Bool("keychain", false, "store the pair in the login keychain (default)")
+	userPresence := fs.Bool("user-presence", false, "require biometry or passcode for private-key use; refuses with -34018 on an unprovisioned binary")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return out.fail(err)
+	}
+	switch {
+	case len(positional) != 0:
+		return out.fail(usagef("init takes no positional arguments; use --service and --purpose (got %q)", positional[0]))
+	case *enclave && *keychain:
+		return out.fail(usagef("init accepts either --enclave or --keychain, not both"))
+	case *service == "" || *purpose == "":
+		return out.fail(usagef("init requires --service and --purpose"))
+	}
+	spec := keyvault.InitSpec{
+		Service: *service, Purpose: *purpose, Kind: *kind, Title: *title, Description: *description,
+		Algorithm: *algorithm, Store: keyvault.StoreKeychain, UserPresence: *userPresence, Extraction: *extraction,
+		Usages: splitList(*usages), Format: keyvault.Format{Public: *formatPublic, Signature: *formatSignature, Envelope: *formatEnvelope},
+		Generate: *generate,
+	}
+	if *enclave {
+		spec.Store = keyvault.StoreEnclave
+	}
+	if *notAfter != "" {
+		parsed, err := time.Parse(time.RFC3339, *notAfter)
+		if err != nil {
+			return out.fail(usagef("--not-after must be RFC3339: %v", err))
+		}
+		spec.NotAfter = &parsed
+	}
+	spec.Meta, err = collectMeta(meta.pairs, *metaJSON)
+	if err != nil {
+		return out.fail(err)
+	}
+	manager, err := newManager()
+	if err != nil {
+		return out.fail(err)
+	}
+	key, err := manager.Init(spec)
+	if err != nil {
+		return out.fail(err)
+	}
+	return out.success(keyView(key), func(w io.Writer) {
+		fmt.Fprintf(w, "created %s label=%s store=%s created=%s fingerprint=%s\n", key.Record.Address(), key.Label, key.Record.Store, createdText(key), key.Fingerprint())
+	})
+}
+
+func splitList(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// collectMeta merges --meta k=v pairs and a --meta-json file. Shapes the
+// parser cannot read are usage errors; reserved names and bad value types
+// are refused by the record validation.
+func collectMeta(pairs []string, jsonPath string) (map[string]any, error) {
+	meta := map[string]any{}
+	if jsonPath != "" {
+		data, err := os.ReadFile(jsonPath)
+		if err != nil {
+			return nil, usagef("--meta-json: %v", err)
+		}
+		if err := keyvault.DecodeSingleJSON(data, &meta); err != nil {
+			return nil, usagef("--meta-json %s is not a single JSON object: %v", jsonPath, err)
+		}
+		if meta == nil {
+			meta = map[string]any{}
+		}
+	}
+	for _, pair := range pairs {
+		name, value, ok := strings.Cut(pair, "=")
+		if !ok || name == "" {
+			return nil, usagef("--meta expects k=v, got %q", pair)
+		}
+		if _, exists := meta[name]; exists {
+			return nil, usagef("meta %q is given twice", name)
+		}
+		meta[name] = value
+	}
+	return meta, nil
+}
+
+func runList(args []string, out output) int {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	service := fs.String("service", "", "only records of this service")
+	kind := fs.String("kind", "", "only records of this kind")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return out.fail(err)
+	}
+	if len(positional) != 0 {
+		return out.fail(usagef("list takes no positional arguments"))
+	}
+	if *service != "" {
+		if err := keyvault.ValidateName("service", keyvault.CodeInvalidService, *service); err != nil {
+			return out.fail(err)
+		}
+	}
+	if *kind != "" {
+		// Same closed vocabulary as the address parser, judged before the
+		// manager exists (review F10).
+		if err := keyvault.ValidateKind(*kind); err != nil {
+			return out.fail(err)
+		}
+	}
+	manager, err := newManager()
+	if err != nil {
+		return out.fail(err)
+	}
+	keys, err := manager.List(*service, *kind)
+	if err != nil {
+		return out.fail(err)
+	}
+	views := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		views = append(views, keyView(key))
+	}
+	return out.success(views, func(w io.Writer) {
+		if len(keys) == 0 {
+			fmt.Fprintln(w, "no keys under "+keyvault.LabelPrefix)
+			return
+		}
+		for _, key := range keys {
+			rec := key.Record
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", key.Label, orUnknown(rec.Kind), orUnknown(rec.Algorithm), orUnknown(string(rec.Store)), orUnknown(rec.Extraction),
+				orUnknown(strings.Join(rec.SortedUsages(), ",")), createdText(key), orUnknown(key.Fingerprint()), rec.Title)
+		}
+	})
+}
+
+func runDescribe(args []string, out output) int {
+	fs := flag.NewFlagSet("describe", flag.ContinueOnError)
+	kind, version := addressFlags(fs)
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return out.fail(err)
+	}
+	addr, err := singleAddress(fs, positional, *kind, *version)
+	if err != nil {
+		return out.fail(err)
+	}
+	manager, err := newManager()
+	if err != nil {
+		return out.fail(err)
+	}
+	key, err := manager.Describe(addr)
+	if err != nil {
+		return out.fail(err)
+	}
+	view := keyView(key)
+	return out.success(view, func(w io.Writer) { encodeJSON(w, view) })
+}
+
+func runPub(args []string, out output) int {
+	fs := flag.NewFlagSet("pub", flag.ContinueOnError)
+	kind, version := addressFlags(fs)
+	outPath := fs.String("out", "", "write the public key to PATH (.pem for PEM, .jwk/.json for JWK, anything else for SPKI DER)")
+	format := fs.String("format", "", "spki-der, spki-pem or jwk; default is inferred from --out, else the record's format.public")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return out.fail(err)
+	}
+	addr, err := singleAddress(fs, positional, *kind, *version)
+	if err != nil {
+		return out.fail(err)
+	}
+	if *format != "" && *format != keyvault.FormatPublicSPKIDER && *format != keyvault.FormatPublicSPKIPEM && *format != keyvault.FormatPublicJWK {
+		return out.fail(usagef("--format must be spki-der, spki-pem or jwk, got %q", *format))
+	}
+	manager, err := newManager()
+	if err != nil {
+		return out.fail(err)
+	}
+	key, err := manager.Describe(addr)
+	if err != nil {
+		return out.fail(err)
+	}
+	if len(key.SPKI) == 0 {
+		return out.fail(fmt.Errorf("public key of %s is unreadable; fingerprint unknown", key.Label))
+	}
+	encoding := resolveFormat(*format, *outPath, key.Record.Format.Public)
+	payload, err := encodePublic(key.SPKI, encoding)
+	if err != nil {
+		return out.fail(err)
+	}
+	result := keyView(key)
+	result["format"] = encoding
+	if *outPath != "" {
+		if err := os.WriteFile(*outPath, payload, 0o600); err != nil {
+			return out.fail(err)
+		}
+		result["out"] = *outPath
+		return out.success(result, func(w io.Writer) {
+			fmt.Fprintf(w, "wrote %s %s to %s fingerprint=%s\n", key.Label, encoding, *outPath, key.Fingerprint())
+		})
+	}
+	if !out.json {
+		_, err := out.stdout.Write(payload)
+		if err != nil {
+			return out.fail(err)
+		}
+		return exitOK
+	}
+	switch encoding {
+	case keyvault.FormatPublicSPKIDER:
+		result["der_base64"] = base64.StdEncoding.EncodeToString(payload)
+	case keyvault.FormatPublicJWK:
+		var jwk map[string]string
+		_ = json.Unmarshal(payload, &jwk)
+		result["jwk"] = jwk
+	default:
+		result["pem"] = string(payload)
+	}
+	return out.success(result, nil)
+}
+
+// resolveFormat picks the output representation: explicit --format, then
+// the --out extension, then the record's own format.public.
+func resolveFormat(format, outPath, recordDefault string) string {
+	if format != "" {
+		return format
+	}
+	switch strings.ToLower(filepath.Ext(outPath)) {
+	case ".pem":
+		return keyvault.FormatPublicSPKIPEM
+	case ".jwk", ".json":
+		return keyvault.FormatPublicJWK
+	case ".der":
+		return keyvault.FormatPublicSPKIDER
+	}
+	switch recordDefault {
+	case keyvault.FormatPublicSPKIPEM, keyvault.FormatPublicJWK:
+		return recordDefault
+	default:
+		return keyvault.FormatPublicSPKIDER
+	}
+}
+
+func encodePublic(spki []byte, encoding string) ([]byte, error) {
+	switch encoding {
+	case keyvault.FormatPublicSPKIPEM:
+		return keyvault.EncodePEM(spki), nil
+	case keyvault.FormatPublicJWK:
+		return keyvault.EncodeJWK(spki)
+	default:
+		return spki, nil
+	}
+}
+
+func runRotate(args []string, out output) int {
+	fs := flag.NewFlagSet("rotate", flag.ContinueOnError)
+	kind := fs.String("kind", keyvault.KindKey, "record kind: key, public-key, certificate or secret")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return out.fail(err)
+	}
+	addr, err := singleAddress(fs, positional, *kind, 0)
+	if err != nil {
+		return out.fail(err)
+	}
+	manager, err := newManager()
+	if err != nil {
+		return out.fail(err)
+	}
+	rotated, err := manager.Rotate(addr)
+	if err != nil {
+		return out.fail(err)
+	}
+	result := map[string]any{"old": keyView(rotated.Old), "new": keyView(rotated.New)}
+	return out.success(result, func(w io.Writer) {
+		fmt.Fprintf(w, "rotated %s -> %s fingerprint=%s (old key kept until deleted)\n", rotated.Old.Label, rotated.New.Label, rotated.New.Fingerprint())
+	})
+}
+
+func runDelete(args []string, out output) int {
+	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
+	kind, version := addressFlags(fs)
+	confirm := fs.Bool("confirm", false, "acknowledge that the private key is destroyed irreversibly")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return out.fail(err)
+	}
+	addr, err := singleAddress(fs, positional, *kind, *version)
+	if err != nil {
+		return out.fail(err)
+	}
+	manager, err := newManager()
+	if err != nil {
+		return out.fail(err)
+	}
+	label, err := manager.Delete(addr, *confirm)
+	if err != nil {
+		return out.fail(err)
+	}
+	result := map[string]any{"label": label, "deleted": true}
+	return out.success(result, func(w io.Writer) { fmt.Fprintf(w, "deleted %s\n", label) })
+}
+
+func runMeta(args []string, out output) int {
+	if len(args) == 0 {
+		return out.fail(usagef("meta requires get, set or unset"))
+	}
+	sub, rest := args[0], args[1:]
+	out.command = "meta " + sub
+	fs := flag.NewFlagSet("meta "+sub, flag.ContinueOnError)
+	kind, version := addressFlags(fs)
+	jsonValue := fs.Bool("json-value", false, "set: parse VALUE as JSON (number or bool) instead of a string")
+	positional, err := parseFlags(fs, rest)
+	if err != nil {
+		return out.fail(err)
+	}
+	want := map[string]int{"get": 1, "set": 3, "unset": 2}[sub]
+	if want == 0 {
+		return out.fail(usagef("unknown meta command %q; use get, set or unset", sub))
+	}
+	if sub == "get" && len(positional) == 2 {
+		want = 2
+	}
+	if len(positional) != want {
+		return out.fail(usagef("meta %s takes %s", sub, map[string]string{"get": "<service>/<purpose> [key]", "set": "<service>/<purpose> <key> <value>", "unset": "<service>/<purpose> <key>"}[sub]))
+	}
+	addr, err := keyvault.ParseAddress(positional[0], *kind, *version)
+	if err != nil {
+		return out.fail(err)
+	}
+	manager, err := newManager()
+	if err != nil {
+		return out.fail(err)
+	}
+	switch sub {
+	case "get":
+		key, err := manager.Describe(addr)
+		if err != nil {
+			return out.fail(err)
+		}
+		if len(positional) == 2 {
+			value, ok := key.Record.Meta[positional[1]]
+			if !ok {
+				return out.fail(&keyvault.MetaNotFoundError{Name: positional[1], Label: key.Label})
+			}
+			return out.success(map[string]any{"label": key.Label, "name": positional[1], "value": value}, func(w io.Writer) { fmt.Fprintf(w, "%v\n", value) })
+		}
+		return out.success(map[string]any{"label": key.Label, "meta": key.Record.Meta}, func(w io.Writer) { encodeJSON(w, key.Record.Meta) })
+	case "set":
+		var value any = positional[2]
+		if *jsonValue {
+			// A number stays a json.Number: the digits the caller typed are
+			// what the record carries and what describe prints (review F11).
+			if err := keyvault.DecodeSingleJSON([]byte(positional[2]), &value); err != nil {
+				return out.fail(usagef("--json-value: %v", err))
+			}
+		}
+		key, err := manager.MetaSet(addr, positional[1], value)
+		if err != nil {
+			return out.fail(err)
+		}
+		return out.success(map[string]any{"label": key.Label, "meta": key.Record.Meta}, func(w io.Writer) { fmt.Fprintf(w, "set %s on %s\n", positional[1], key.Label) })
+	default:
+		key, err := manager.MetaUnset(addr, positional[1])
+		if err != nil {
+			return out.fail(err)
+		}
+		return out.success(map[string]any{"label": key.Label, "meta": key.Record.Meta}, func(w io.Writer) { fmt.Fprintf(w, "unset %s on %s\n", positional[1], key.Label) })
+	}
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintf(w, `mac-keyvault manages non-extractable P-256 key pairs in the login keychain.
+Items are records addressed as <service>/<purpose> (+ --kind, default key; + --version N, default newest);
+the label %s<kind>.<service>.<purpose>.v<N> is derived by the vault and never typed.
+
+Usage:
+  %s
+  %s
+  %s
+  %s
+  %s
+  %s
+  %s
+  %s
+
+Raw labels are refused as foreign_label. --enclave and --user-presence fail with
+missing_entitlement (OSStatus -34018) when the binary has no provisioning profile;
+there is no silent fallback. --extraction agent must be typed literally.
+
+Exit codes: 0 ok, 1 failure, 2 usage, 3 refused by a policy gate. Every error is
+{code, message, hint, os_status}; text mode prints "error: <code>: <message>" and "hint: <hint>".
+`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["version"])
+}

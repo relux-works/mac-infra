@@ -8,7 +8,8 @@ description: >
   symptoms, broad CPU, memory, thermal, and process load, authenticated Safari
   and Google Chrome browser-session inspection/harvesting, privacy-safe document
   intake, PII redaction, fseventsd memory/CPU bloat from slow FSEvents
-  consumers or high file-event volume, and related maintenance tasks.
+  consumers or high file-event volume, non-extractable P-256 key pairs in the
+  login keychain via mac-keyvault, and related maintenance tasks.
 triggers:
   - mac load
   - load profile
@@ -28,6 +29,12 @@ triggers:
   - disk space
   - storage profile
   - cleanup plan
+  - keyvault
+  - key vault
+  - keychain key
+  - secure enclave
+  - P-256 key
+  - signing key
   - mac cleanup
   - cleanup mac
   - high CPU
@@ -478,6 +485,30 @@ mac-disk-profile explain "$HOME/Library/Developer"
 - `mac-disk-profile` is read-only. It must not delete, move, or mutate files.
 - Prefer `scan` when a persisted JSON artifact is useful for later analysis.
 - Use `explain` for one suspicious path after `scan` or `top` identifies it.
+
+## Key Vault Workflow
+
+- Use `mac-keyvault` when an agent needs a persistent, non-extractable P-256 key pair on this Mac. Every item is a schema-2 record addressed as `<service>/<purpose>` plus `--kind` (default `key`) and `--version N` (default newest); the label `works.relux.mac-keyvault.<kind>.<service>.<purpose>.v<N>` is derived by the vault and never typed:
+
+```bash
+mac-keyvault --json init --service kvctl --purpose pki-root --title "test PKI root" --usages sign,verify --meta owner=alexis
+mac-keyvault --json list --service kvctl          # records + label, fingerprint, exposure, operations, findings
+mac-keyvault --json describe kvctl/pki-root       # newest generation; --version 1 selects one
+mac-keyvault pub kvctl/pki-root --out .temp/pki-root.pem   # --format spki-der|spki-pem|jwk
+mac-keyvault --json meta set kvctl/pki-root ticket MI-7
+mac-keyvault --json rotate kvctl/pki-root         # ...v2, record copied, old key kept
+mac-keyvault --json delete kvctl/pki-root --confirm --version 1
+```
+
+- Read `error.code` and `error.hint` in `--json` mode; every outcome, usage errors included, is a `{ok, command, result|error{code, message, hint, os_status}}` envelope on stdout with an empty stderr. Exit 2 is `usage`, exit 3 is a policy refusal, exit 1 is an operational failure (`not_found`, `missing_entitlement`, `security`).
+- Invalid `service`/`purpose`/`kind`/`algorithm`/`usages`/`format`/`extraction`, `--generate` on a key, reserved names inside `meta`, a duplicate `(kind, service, purpose)` and any input that is not a `<service>/<purpose>` address (raw labels included) are refused with exit 3 before Security.framework is called. Do not retry these; fix the input.
+- `operations` in `describe`/`list --json` is derived from the primitive registry and the record's `usages`/`validity`/`extraction`; `via: reserved` means no command performs it yet, and `findings: ["unsupported_primitive"]` means the tool does not know the primitive. Select an operation by its `name`/`input`/`output`, never by guessing from `algorithm`.
+- `rotate` refuses a record whose store or schema is unknown (`metadata_unknown`, first-revision tags included) rather than assuming the keychain; delete such items with `--confirm --version N` and recreate them.
+- Every record field is checked against a per-kind invariant table on `init`, `rotate` and `meta set|unset` (a forged stored field — non-null `issuer` or `validity.not_before` on a key, null `created`, bad `origin.source`, … — is `metadata_unknown`, nothing created or rewritten); `describe`/`list --json` show the same violation as `findings: ["record_invalid:<code>"]`. Treat that finding as "delete and recreate", never as a record to reproduce.
+- A persisted record carrying a JSON member the schema does not define (top-level or inside `format`/`origin`/`issuer`/`validity`) is an unreadable record (`findings: ["record_unreadable"]`); `rotate` and `meta set|unset` refuse it with `metadata_unknown` and write nothing. Only `meta` is an open map; a field that must drive behaviour is added to the schema, never smuggled in and silently dropped.
+- `--enclave` and `--user-presence` fail with `missing_entitlement` (`os_status: -34018`) on this ad-hoc signed binary: the Secure Enclave and the Data Protection keychain need a provisioning profile. Do not retry in a loop and do not fall back silently; report the failure.
+- `--extraction` defaults to `none`. An agent never passes `--extraction agent` for a key on its own; that value is typed only on an explicit human instruction so the transcript shows the choice. `export-private` and `--human-authorized` are not implemented in this revision; agents never pass `--human-authorized` by contract.
+- Tests and probes must use `--service test` (labels `works.relux.mac-keyvault.<kind>.test.*`) and delete them afterwards.
 
 ## Cleanup Planning Workflow
 

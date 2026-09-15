@@ -116,6 +116,8 @@ echo "Building mac-document-sanitize..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-document-sanitize" ./cmd/mac-document-sanitize
 echo "Building mac-infra-core..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-infra-core" ./cmd/mac-infra-core
+echo "Building mac-keyvault..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-keyvault" ./cmd/mac-keyvault
 
 ln -sf "$BUILD_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-reset"
 ln -sf "$BUILD_DIR/mac-audio-sweep" "$BIN_DIR/mac-audio-sweep"
@@ -128,6 +130,7 @@ ln -sf "$BUILD_DIR/mac-chrome-session" "$BIN_DIR/mac-chrome-session"
 ln -sf "$BUILD_DIR/mac-browser-site" "$BIN_DIR/mac-browser-site"
 ln -sf "$BUILD_DIR/mac-document-sanitize" "$BIN_DIR/mac-document-sanitize"
 ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
+ln -sf "$BUILD_DIR/mac-keyvault" "$BIN_DIR/mac-keyvault"
 echo "Installed binary symlinks:"
 echo "  $BIN_DIR/mac-audio-reset -> $BUILD_DIR/mac-audio-reset"
 echo "  $BIN_DIR/mac-audio-sweep -> $BUILD_DIR/mac-audio-sweep"
@@ -141,6 +144,7 @@ echo "  heartbeat launcher: $HEARTBEAT_LAUNCHER"
 echo "  $BIN_DIR/mac-browser-site -> $BUILD_DIR/mac-browser-site"
 echo "  $BIN_DIR/mac-document-sanitize -> $BUILD_DIR/mac-document-sanitize"
 echo "  $BIN_DIR/mac-infra-core  -> $BUILD_DIR/mac-infra-core"
+echo "  $BIN_DIR/mac-keyvault    -> $BUILD_DIR/mac-keyvault"
 
 if [[ ! -d "$SKILL_SOURCE" ]]; then
   echo "missing skill source: $SKILL_SOURCE" >&2
