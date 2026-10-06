@@ -236,9 +236,16 @@ mac-infra-core fseventsd-watchdog status
 thresholds, lists known consumers from a pattern allowlist, parses
 `~/.colima/*/colima.yaml` for `mountInotify`/`mounts`, and sizes `go-build*`
 leftovers. `fseventsd-restart` is an allowlisted root-daemon action
-(`launchctl kickstart -k system/com.apple.fseventsd`) that refuses below the
-512 MB threshold unless `--force` is given; update the installed daemon with
-`mac-infra-core install` first. The watchdog is a current-user LaunchAgent that
+(one `/bin/kill -TERM PID` for the revalidated canonical root-owned fseventsd,
+parented by launchd). It refuses below 512 MB unless `--force` is given; force
+never bypasses process identity or a missing daemon. It waits up to 5 seconds
+for launchd to respawn a new PID with lower RSS, and reports an error without
+another signal if verification fails. Apple-service `launchctl kickstart` was
+refused by SIP on the M1 Max; this action preserves SIP. Announce the restart
+after fixing the input consumer, then capture before/after metrics. Update the
+installed daemon with `mac-infra-core install` first.
+The immediate userspace PID recheck is not an atomic process handle.
+The watchdog is a current-user LaunchAgent that
 checks every 10 minutes, notifies over the threshold, and restarts only with
 the opt-in `--auto-restart`. Do not renice or throttle fseventsd: dropped
 events make every FSEvents client rescan the volume.

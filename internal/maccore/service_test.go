@@ -277,6 +277,11 @@ func TestCoreCommandHelperProcess(t *testing.T) {
 	case "/opt/cisco/anyconnect/bin/vpn":
 		fmt.Fprintln(os.Stdout, os.Getenv("MAC_INFRA_TEST_VPN_STATUS"))
 	case "/usr/bin/pkill":
+	case "/bin/kill":
+		if os.Getenv("MAC_INFRA_TEST_KILL_FAIL") == "1" {
+			fmt.Fprintln(os.Stderr, "signal refused")
+			os.Exit(9)
+		}
 	case "/bin/launchctl":
 		if strings.Contains(command, "/bin/launchctl print ") {
 			switch os.Getenv("MAC_INFRA_TEST_LAUNCHCTL_PRINT") {
@@ -311,6 +316,17 @@ func TestCoreCommandHelperProcess(t *testing.T) {
 		}
 		if index >= len(outputs) {
 			index = len(outputs) - 1
+		}
+		if os.Getenv("MAC_INFRA_TEST_PS_FAIL_AT") == fmt.Sprint(index) {
+			fmt.Fprintln(os.Stderr, "ps unavailable after signal")
+			os.Exit(9)
+		}
+		if os.Getenv("MAC_INFRA_TEST_PS_DELAY_AT") == fmt.Sprint(index) {
+			delay, err := time.ParseDuration(os.Getenv("MAC_INFRA_TEST_PS_DELAY"))
+			if err != nil {
+				os.Exit(2)
+			}
+			time.Sleep(delay)
 		}
 		fmt.Fprintln(os.Stdout, strings.ReplaceAll(outputs[index], ";", "\n"))
 	case "/usr/bin/osascript":

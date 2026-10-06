@@ -361,7 +361,11 @@ func verifyAnyConnectDisconnected() (CommandResult, anyconnect.VPNState, error) 
 }
 
 func runCoreCommand(name string, args ...string) (CommandResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	return runCoreCommandWithTimeout(commandTimeout, name, args...)
+}
+
+func runCoreCommandWithTimeout(timeout time.Duration, name string, args ...string) (CommandResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := execCommandContextCore(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
@@ -371,7 +375,7 @@ func runCoreCommand(name string, args ...string) (CommandResult, error) {
 	}
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return result, fmt.Errorf("%s timed out after %s", result.Command, commandTimeout)
+			return result, fmt.Errorf("%s timed out after %s: %w", result.Command, timeout, ctx.Err())
 		}
 		if result.Output != "" {
 			return result, fmt.Errorf("%s: %w (%s)", result.Command, err, result.Output)

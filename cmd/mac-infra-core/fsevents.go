@@ -16,7 +16,7 @@ const bytesPerGB = 1024 * 1024 * 1024
 func runFSEventsRestart(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("fseventsd-restart", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	force := fs.Bool("force", false, "restart even when fseventsd rss is below the threshold or the process is missing")
+	force := fs.Bool("force", false, "restart even when fseventsd rss is below the threshold; identity checks still apply")
 	thresholdGB := fs.Float64("threshold-gb", float64(fsevents.DefaultRSSCriticalBytes)/bytesPerGB, "rss threshold in GB below which the restart is refused")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -33,11 +33,11 @@ func runFSEventsRestart(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	thresholdBytes := int64(*thresholdGB * bytesPerGB)
+	if !state.Found {
+		fmt.Fprintln(stderr, "fseventsd-restart refused: fseventsd process not found")
+		return 1
+	}
 	if !*force {
-		if !state.Found {
-			fmt.Fprintln(stderr, "fseventsd-restart refused: fseventsd process not found; pass --force to kickstart anyway")
-			return 1
-		}
 		if state.RSSBytes < thresholdBytes {
 			fmt.Fprintf(stderr, "fseventsd-restart refused: rss %s is below threshold %s; pass --force to override\n",
 				loadprofile.FormatBytes(state.RSSBytes), loadprofile.FormatBytes(thresholdBytes))

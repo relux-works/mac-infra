@@ -125,6 +125,26 @@ func TestFSEventsRestartReportsDaemonFailure(t *testing.T) {
 	}
 }
 
+// Missing daemon is refused locally even with force; no privileged request
+// is sent, so force cannot turn an absent target into a process-family signal.
+func TestFSEventsRestartMissingDaemonForceDoesNotContactDaemon(t *testing.T) {
+	withInspectFSEventsDaemon(t, func() (maccore.FSEventsDaemonState, maccore.CommandResult, error) {
+		return maccore.FSEventsDaemonState{}, maccore.CommandResult{}, nil
+	})
+	called := false
+	withRestartFSEvents(t, func(maccore.ServiceConfig, bool, int64) (maccore.Response, error) {
+		called = true
+		return maccore.Response{OK: true}, nil
+	})
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"fseventsd-restart", "--force"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code = %d", code)
+	}
+	if called || stdout.Len() != 0 || !strings.Contains(stderr.String(), "process not found") {
+		t.Fatalf("called = %t stdout = %q stderr = %q", called, stdout.String(), stderr.String())
+	}
+}
+
 // enable parses threshold/interval/auto-restart into settings, and
 // auto-restart is refused when the root daemon is not installed.
 func TestFSEventsWatchdogEnableParsesSettings(t *testing.T) {

@@ -3,6 +3,13 @@
 > Institutional memory. Concise, factual, high-signal.
 > Newest entries first. One block per insight.
 
+## 2026-10-07
+
+### 1435 — SIP rejects fseventsd kickstart even through the root daemon
+- FINDING: M1 Max root-daemon `launchctl kickstart -k system/com.apple.fseventsd` returned exit 150 under SIP; PID stayed 44518. Command-runner mocks did not establish host permission.
+- DECISION: No reboot; one SIGTERM to the revalidated canonical root-owned daemon, then bounded launchd respawn and lower-RSS verification. Force bypasses only RSS, not target identity. `BUG-261007-3n1x5z`, `internal/maccore/fsevents_restart.go`.
+- SCOPE: Colima workers owner disabled HOME-wide inotify first. Keeper preserves other projects and the existing staged board deletions.
+
 ## 2026-09-15
 
 ### 2330 — mac-keyvault T3 rev9: a duplicate-member gate that judges only the object it is handed is a per-object gate — the owner must be one recursive pass over the whole document

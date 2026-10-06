@@ -417,10 +417,17 @@ mac-infra-core fseventsd-restart
 mac-infra-core fseventsd-restart --force
 ```
 
-The daemon action is fixed to `/bin/launchctl kickstart -k
-system/com.apple.fseventsd` and reports before/after pid and RSS. It needs
-the installed daemon to be updated from a build that includes the action:
-run `mac-infra-core install` after `scripts/setup.sh`.
+Announce the restart before running it, after the consumer fix is confirmed.
+The root daemon revalidates the canonical Apple executable, root owner,
+launchd parent and unchanged PID immediately before sending one
+`/bin/kill -TERM PID`. It waits up to 5 seconds for a new PID with lower RSS;
+missing respawn, unchanged PID, absent memory relief or inspection/signal errors
+fail without another signal. `--force` bypasses only RSS admission, never
+identity or a missing daemon. The userspace recheck does not provide an atomic
+PID handle. Capture before/after PID, RSS, CPU, load and disk intervals.
+SIP refused the old Apple-service `launchctl kickstart` method on the M1 Max;
+do not retry that method or weaken SIP. Update the installed daemon from the
+reviewed source: run `mac-infra-core install` after `scripts/setup.sh`.
 
 - Keep a watchdog so the next bloat is caught at 512 MB, not 40 GB:
 
