@@ -180,6 +180,16 @@ mac-infra-core status
 
 This caches sudo for the current interactive session only. It does not grant Full Disk Access and does not grant permissions to Terminal, iTerm2, Cursor, VS Code, or another broad launcher.
 
+Run `mac-infra-core install` as the intended normal user, without a `sudo`
+prefix; the installer obtains privilege internally and assigns the socket to
+that user's UID/GID. Reinstallation waits up to five seconds for the exact old
+service to leave the system domain before bootstrap. Removal or inspection
+errors stop installation, and bootstrap failures retain their original cause
+without blind retries. A missing service is admitted only after launchctl
+confirms that exact target is absent. The disappearance wait also bounds each
+inspection command; privileged bootout/bootstrap commands each have a separate
+ten-second timeout.
+
 ## AnyConnect Socket Filter Cleanup
 
 Use this when Cisco AnyConnect reports disconnected but `com.cisco.anyconnect.macos.acsockext` or `vpnagentd` still eats CPU/RSS.
@@ -249,6 +259,18 @@ The watchdog is a current-user LaunchAgent that
 checks every 10 minutes, notifies over the threshold, and restarts only with
 the opt-in `--auto-restart`. Do not renice or throttle fseventsd: dropped
 events make every FSEvents client rescan the volume.
+
+For a 2 GiB recovery threshold checked every five minutes, after verifying the
+installed root daemon and an authorized initial restart:
+
+```bash
+mac-infra-core fseventsd-watchdog enable --threshold-gb 2 --interval 5m --auto-restart
+mac-infra-core fseventsd-watchdog status
+```
+
+This is periodic RSS-triggered recovery, not an instantaneous memory ceiling.
+Watchdog status retains the latest check and restart time; measure recurring
+restart frequency before changing the threshold.
 
 ## Video Smoothness Workflow
 

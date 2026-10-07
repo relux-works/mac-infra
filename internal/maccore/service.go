@@ -119,9 +119,8 @@ func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID i
 	if _, err := runPrivilegedCommand("install", "-o", "root", "-g", "wheel", "-m", "0644", tmpPath, cfg.PlistPath); err != nil {
 		return fmt.Errorf("install plist: %w", err)
 	}
-	_, _ = runPrivilegedCommand("launchctl", "bootout", launchctlTarget(cfg.Label))
-	if _, err := runPrivilegedCommand("launchctl", "bootstrap", "system", cfg.PlistPath); err != nil {
-		return fmt.Errorf("bootstrap service: %w", err)
+	if err := replaceLaunchService(cfg, 5*time.Second); err != nil {
+		return err
 	}
 
 	deadline := time.Now().Add(3 * time.Second)
