@@ -3,6 +3,7 @@ package maccore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,15 +152,18 @@ func TestInstallCommandHelper(t *testing.T) {
 
 // Checks fresh installation and already-removed replacement controls, and
 // refuses retained/ambiguous/error states without any bootstrap command.
+// Under load, a retained service may exhaust its inspection deadline; only
+// either exact deadline-wrapped removal rejection is accepted for that case.
 func TestReplaceLaunchServiceAdmission(t *testing.T) {
 	cases := []struct {
 		name, sequence, bootoutFail, bootoutMissing, bootstrapFail, wantError string
 		wantBootstrap                                                         bool
+		wantRemovalDeadline                                                   bool
 	}{
 		{name: "fresh", sequence: "missing", bootoutMissing: "1", wantBootstrap: true},
 		{name: "removed", sequence: "missing", wantBootstrap: true},
 		{name: "missing diagnostic observed on host", sequence: "missing-with-prefix", wantBootstrap: true},
-		{name: "still present", sequence: "present", wantError: "did not leave"},
+		{name: "still present", sequence: "present", wantError: "did not leave", wantRemovalDeadline: true},
 		{name: "print denied", sequence: "denied", wantError: "verify service removal"},
 		{name: "unrelated missing", sequence: "wrong-target", wantError: "verify service removal"},
 		{name: "wrong domain", sequence: "wrong-domain", wantError: "verify service removal"},
@@ -181,11 +185,17 @@ func TestReplaceLaunchServiceAdmission(t *testing.T) {
 			t.Setenv("MAC_INFRA_INSTALL_BOOTSTRAP_FAIL", tc.bootstrapFail)
 			cfg := ServiceConfig{Label: "works.relux.test-install", PlistPath: "/fixture/core.plist"}
 			err := replaceLaunchService(cfg, time.Second)
+			matchesError := err != nil && strings.Contains(err.Error(), tc.wantError)
+			if tc.wantRemovalDeadline {
+				matchesError = errors.Is(err, context.DeadlineExceeded) &&
+					(err.Error() == fmt.Sprintf("service %s did not leave the system domain within %s: %v", cfg.Label, time.Second, context.DeadlineExceeded) ||
+						err.Error() == fmt.Sprintf("service %s removal verification exceeded %s: %v", cfg.Label, time.Second, context.DeadlineExceeded))
+			}
 			if tc.wantError == "" {
 				if err != nil {
 					t.Fatal(err)
 				}
-			} else if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+			} else if !matchesError {
 				t.Fatalf("error=%v, want %s", err, tc.wantError)
 			}
 			calls := readCommandLog(t, logPath)
