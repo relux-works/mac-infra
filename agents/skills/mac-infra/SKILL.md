@@ -522,6 +522,13 @@ mac-keyvault --json delete kvctl/pki-root --confirm --version 1
 - `--extraction` defaults to `none`. An agent never passes `--extraction agent` for a key on its own; that value is typed only on an explicit human instruction so the transcript shows the choice. `export-private` and `--human-authorized` are not implemented in this revision; agents never pass `--human-authorized` by contract.
 - Tests and probes must use `--service test` (labels `works.relux.mac-keyvault.<kind>.test.*`) and delete them afterwards.
 
+### SSH agent bridge
+
+- Use `mac-keyvault ssh-agent --socket /absolute/private/agent.sock --key github/auth@1 --key github/signing@1` for SSH authentication and Git SSH commit signing. Each `--key` requires an explicit positive generation; only selected P-256 identities and signing are exposed. The agent never exports private keys or accepts mutation/lock/extension requests. Every sign reuses the vault policy gates.
+- `mac-keyvault pub github/auth --version 1 --format ssh` emits a public OpenSSH key for IdentityFile, Git user.signingkey, GitHub and allowed_signers. This is public conversion, not a new persisted record format.
+- Read [the SSH migration and LaunchAgent runbook](references/keyvault-ssh-migration.md) before configuring this bridge. Installation/migration is an owner action; do not modify live SSH/Git/GitHub/launchd configuration merely because this tool is available. Keep auth and commit-signing keys separate and retain old signing public keys for historical verification. MTS keys remain out of scope.
+- The socket must be in a real owned `0700` directory; it is `0600`, existing paths are refused, and kernel peer credentials must match the owner UID (lookup failure or mismatch closes the client). Forwarding grants signing authority without export and has no destination-binding implementation. Optional `--confirm-exec` runs one fixed absolute executable with literal arguments, a bounded deadline and fail-closed exit semantics; no hook means normal agent signing authority for socket clients. Do not retry denied keychain prompts.
+
 ### Signer contract for kvctl (`signer serve`, contract 1)
 
 - Use `mac-keyvault signer serve --address <service>/<purpose> [--kind key] [--version N]` when a program (kvctl's `macos-keychain` signer backend, a CI step, another agent tool) needs many signatures from one vault key without shelling out per signature and without ever holding the private half: the server binds one address, writes one hello line, then answers one JSON line per request on stdin until EOF (exit 0). Do not use it for one-off work; `sign`/`verify`/`pub` are the one-shot commands.

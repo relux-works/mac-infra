@@ -71,7 +71,7 @@ var usageLines = map[string]string{
 	"init":         "mac-keyvault [--json] init --service S --purpose P [--kind key] [--algorithm ec-p256] [--title T] [--description D] [--usages a,b] [--format-public F] [--format-signature F] [--format-envelope F] [--extraction none|human|agent] [--not-after RFC3339] [--meta k=v]... [--meta-json FILE] [--generate SPEC] [--keychain|--enclave] [--user-presence]",
 	"list":         "mac-keyvault [--json] list [--service S] [--kind K]",
 	"describe":     "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
-	"pub":          "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk]",
+	"pub":          "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk|ssh]",
 	"sign":         "mac-keyvault [--json] sign <service>/<purpose> (--digest <hex|@file> | --data-file FILE | --stdin) [--raw | --format ecdsa-der-low-s|ecdsa-raw] [--out FILE] [--kind K] [--version N]",
 	"verify":       "mac-keyvault [--json] verify (<service>/<purpose> [--kind K] [--version N] | --spki FILE) (--digest <hex|@file> | --data-file FILE | --stdin) --sig <hex|@file> [--raw] [--allow-high-s]",
 	"rotate":       "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
@@ -82,6 +82,7 @@ var usageLines = map[string]string{
 	"meta unset":   "mac-keyvault [--json] meta unset <service>/<purpose> <key> [--kind K] [--version N]",
 	"signer":       "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
 	"signer serve": "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
+	"ssh-agent":    "mac-keyvault ssh-agent --socket PATH --key service/purpose@VERSION [--key ...] [--confirm-exec /absolute/executable] [--confirm-arg ARG] [--confirm-timeout 15s]",
 	"version":      "mac-keyvault [--json] version",
 }
 
@@ -256,6 +257,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDelete(rest, out)
 	case "meta":
 		return runMeta(rest, out)
+	case "ssh-agent":
+		return runSSHAgent(rest, out)
 	case "signer":
 		return runSigner(rest, out)
 	case "version":
@@ -584,8 +587,8 @@ func runPub(args []string, out output) int {
 	if err != nil {
 		return out.fail(err)
 	}
-	if *format != "" && *format != keyvault.FormatPublicSPKIDER && *format != keyvault.FormatPublicSPKIPEM && *format != keyvault.FormatPublicJWK {
-		return out.fail(usagef("--format must be spki-der, spki-pem or jwk, got %q", *format))
+	if *format != "" && *format != keyvault.FormatPublicSPKIDER && *format != keyvault.FormatPublicSPKIPEM && *format != keyvault.FormatPublicJWK && *format != "ssh" {
+		return out.fail(usagef("--format must be spki-der, spki-pem, jwk or ssh, got %q", *format))
 	}
 	manager, err := newManager()
 	if err != nil {
@@ -622,6 +625,8 @@ func runPub(args []string, out output) int {
 		return exitOK
 	}
 	switch encoding {
+	case "ssh":
+		result["ssh"] = string(payload)
 	case keyvault.FormatPublicSPKIDER:
 		result["der_base64"] = base64.StdEncoding.EncodeToString(payload)
 	case keyvault.FormatPublicJWK:
@@ -658,6 +663,8 @@ func resolveFormat(format, outPath, recordDefault string) string {
 
 func encodePublic(spki []byte, encoding string) ([]byte, error) {
 	switch encoding {
+	case "ssh":
+		return keyvault.SSHPublicKey(spki)
 	case keyvault.FormatPublicSPKIPEM:
 		return keyvault.EncodePEM(spki), nil
 	case keyvault.FormatPublicJWK:
@@ -1046,6 +1053,7 @@ Usage:
   %s
   %s
   %s
+  %s
 
 sign takes a SHA-256 digest (--digest) or hashes --data-file/--stdin itself and says so;
 it emits strict DER with low-S (or --raw r||s). verify judges the digest, the signature
@@ -1059,7 +1067,7 @@ consumer such as kvctl: hello line, then {id, op: describe|pub|sign|verify, ...}
 
 Exit codes: 0 ok, 1 failure, 2 usage, 3 refused by a policy gate. Every error is
 {code, message, hint, os_status}; text mode prints "error: <code>: <message>" and "hint: <hint>".
-`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["signer"], usageLines["version"])
+`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["signer"], usageLines["ssh-agent"], usageLines["version"])
 }
 
 // runSigner dispatches the signer subcommands; serve is the only one in
