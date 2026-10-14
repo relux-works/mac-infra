@@ -175,6 +175,13 @@ triggers:
 Use this skill for macOS local maintenance workflows backed by the `mac-infra`
 Go tools.
 
+## Security Evidence Workflow
+
+For read-only host security checks, private persistence baselines, and drift,
+read [security.md](references/security.md). Start with `mac-security scan --json`.
+Unknown/partial coverage never establishes a clean host. Never run sudo or
+change host policy as part of an audit.
+
 ## Sleep Prevention Workflow
 
 Start with the read-only system-wide status:
