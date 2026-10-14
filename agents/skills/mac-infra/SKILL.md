@@ -182,6 +182,38 @@ read [security.md](references/security.md). Start with `mac-security scan --json
 Unknown/partial coverage never establishes a clean host. Never run sudo or
 change host policy as part of an audit.
 
+## Privileged Daemon Installation Trust
+
+Run `mac-infra-core install` as the intended normal user only after reviewing
+the executable to be installed. It copies a pre-elevation byte snapshot into
+`/Library/PrivilegedHelperTools/works.relux.mac-infra/mac-infra-core`
+(`root:wheel`, `0755`) and installs a `root:wheel`, `0644` LaunchDaemon plist.
+The root daemon must never execute a binary in a user checkout or user bin
+directory. All installed ancestors must be root-owned and deny group/world
+writes and ACL modification grants; harmless deny/read-only ACLs are allowed.
+Unsafe existing paths stop installation rather than changing shared permissions.
+
+The protected socket directory is the same helper directory; `core.sock` stays
+`0600`, owned by the intended user. Kernel peer credentials admit that user or
+root, and clients require a root daemon peer. Source-built clients using this
+path need an explicit reviewed reinstall to migrate the older `/var/run`
+socket. `scripts/setup.sh` updates user tools and the skill without restarting
+or migrating an existing privileged daemon.
+
+Startup rejects symlinks, writable/replaced executable or configuration files,
+unsafe ancestors, changed executable digest, and any drift from the complete
+pinned plist. Native ACL verification requires macOS with cgo and otherwise
+fails closed. Root-private staging and same-filesystem renames avoid reopening
+user-controlled source paths with privilege. Installation retains original
+files until verification/activation succeeds and attempts file rollback on
+failure; failed rollback reports a protected recovery directory. This does not
+make the two-file/launchd update crash-atomic or restore a stopped service.
+
+Userspace self-checks cannot authenticate the initial build or attest already
+mapped root code, and cannot defend against a root adversary. Do not claim a
+source-only fix or fixture tests remediated an already running daemon. Privileged
+reinstallation and host verification remain separate, explicitly authorized work.
+
 ## Sleep Prevention Workflow
 
 Start with the read-only system-wide status:

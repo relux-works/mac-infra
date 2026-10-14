@@ -16,14 +16,15 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-chrome-session` | Guarded exact Chrome tab access, explicit exact-tab handoff, trusted form input and native file upload, sealed authenticated same-origin downloads and Slack reads, bounded extraction, and finite named Chrome/Safari heartbeats without focus churn | `mac-chrome-session list`, guarded `run-js`/`fetch-file`/`slack-read`/`extract`, explicit `focus`, `trusted-input`, or `upload` with exact IDs/origin plus `--human-authorized`; upload/trusted input and protected fetch requests arrive through `--request-stdin`; `heartbeat start\|restart\|status\|stop\|list`, exact `close` | atomic private `run-js --out` and `fetch-file --out` artifacts; protected resource URLs, trusted values, and upload source paths stay out of argv and normal output; upload uses a short-lived private staging directory and reports only guarded origin, accepted basenames, and count; other private outputs and heartbeat state use the paths described below |
 | `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected, PII-depersonalized, secret-checked `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no raw recognized personal data, cookies, browser storage, authorization material, or cursor/session state |
 | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
-| `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | daemon files under `/Library/LaunchDaemons/` and `/var/run/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
+| `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | root-owned executable and socket under `/Library/PrivilegedHelperTools/works.relux.mac-infra/`, plist under `/Library/LaunchDaemons/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
 | `mac-security` | Bounded read-only macOS security evidence, persistence fingerprints and coverage-aware drift | `mac-security scan --json`, `mac-security baseline --file NEW_PATH --json`, `mac-security diff --file BASELINE --json` | JSON stdout + summary stderr; explicit baseline creates a new `0600` file; use `.temp/security/` |
 | `mac-keyvault` | Create, list, describe, export, sign with, verify against, rotate, annotate, and delete non-extractable P-256 key pairs in the login keychain; every item is a schema-2 record addressed as `<service>/<purpose>` (+ `--kind`, `--version`) under the derived label `works.relux.mac-keyvault.<kind>.<service>.<purpose>.v<N>`; `--enclave` fails explicitly on an unprovisioned binary | `mac-keyvault [--json] init --service S --purpose P [--title T] [--usages sign,verify] [--extraction none\|human\|agent] [--meta k=v]`, `list [--service S] [--kind K]`, `describe S/P [--version N]`, `pub S/P [--out FILE] [--format spki-der\|spki-pem\|jwk]`, `sign S/P --digest HEX\|@FILE \| --data-file F \| --stdin [--raw] [--out FILE]`, `verify S/P \| --spki FILE --digest ... --sig HEX\|@FILE [--raw] [--allow-high-s]`, `rotate S/P`, `meta get\|set\|unset S/P ...`, `delete S/P --confirm [--version N]`, `signer serve --address S/P [--kind K] [--version N]` (JSON lines on stdin/stdout, contract 1, for kvctl; Go client `internal/keyvault/signerclient`) | keychain items only; `signer serve` writes one hello line then one response line per request and exits 0 on EOF; `pub --out` writes a `0600` file; `~/Library/Application Support/mac-infra/keyvault/init.lock` serialises creates |
 | `mac-keyvault ssh-agent` | Serve explicitly pinned P-256 vault keys through the OpenSSH agent protocol | `mac-keyvault ssh-agent --socket /absolute/private/agent.sock --key github/auth@1 --key github/signing@1`; public output: `mac-keyvault pub github/auth --version 1 --format ssh` | `0600` socket in an owned `0700` directory; [manual LaunchAgent and GitHub migration runbook](agents/skills/mac-infra/references/keyvault-ssh-migration.md); no live installation or migration is automatic |
 | `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
 | `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
-| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-keyvault`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
+| Apple clang / cgo | Build the native macOS extended ACL checks used by the privileged installer and daemon | `CGO_ENABLED=1 go build -o .temp/mac-infra-core ./cmd/mac-infra-core` (requires Xcode or Command Line Tools) | `.temp/mac-infra-core`; `scripts/setup.sh` builds its normal `bin/mac-infra-core` artifact with the configured Go cgo setting |
+| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-keyvault`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
 | `scripts/deinit.sh` | Remove user-level installation without stranding managed jobs | `./scripts/deinit.sh` | stops all `works.relux.mac-infra-browser-heartbeat.*` LaunchAgents and removes the stable launcher plus legacy pinned copies before removing binary symlinks and the runtime skill copy |
 | `/usr/bin/codesign` | Give the shared heartbeat launcher a complete stable designated identity so macOS Automation consent can retain it across rebuilds | invoked by `scripts/setup.sh`; verify with `codesign --verify --strict "$HOME/Library/Application Support/mac-infra/browser-session/bin/mac-browser-heartbeat-launcher"` | signs `bin/mac-chrome-session`; setup atomically installs those signed bytes at the single managed launcher path |
 
@@ -191,6 +192,45 @@ without blind retries. A missing service is admitted only after launchctl
 confirms that exact target is absent. The disappearance wait also bounds each
 inspection command; privileged bootout/bootstrap commands each have a separate
 ten-second timeout.
+
+Installation copies a bounded snapshot of the reviewed user executable into
+`/Library/PrivilegedHelperTools/works.relux.mac-infra/mac-infra-core` as
+`root:wheel` mode `0755`. The dedicated directory and every ancestor must be
+root-owned, free of group/world write permission, and free of ACL grants that
+allow modification. Harmless deny-only/read-only ACLs are admitted. The plist
+is `root:wheel` mode `0644`; launchd never executes the checkout or user symlink.
+Privileged copies consume the snapshot on stdin in a root-private staging
+directory. Publication uses same-filesystem renames and retains the old files
+with their original inodes until verification and service activation succeed.
+On failure it restores those files where possible. Failed rollback retains a
+private recovery directory and reports its path. Installation is not a
+crash-atomic transaction across both files and launchd state; a stopped service
+may still need an explicit reinstall after the cause is corrected.
+
+At startup the daemon checks every path component using descriptor-relative
+opens with symlink rejection, checks ownership/mode/ACLs, verifies the pinned
+executable SHA-256 and inode/creation-time identities, and compares the complete
+plist against the expected fixed configuration. Missing pins, replaced files,
+changed configuration, and unsafe ancestors refuse startup. Native ACL checks
+require a macOS build with cgo; a build without that support refuses privileged
+installation/startup. Existing unsafe paths are rejected rather than silently
+repairing shared directory permissions.
+
+The socket now lives at
+`/Library/PrivilegedHelperTools/works.relux.mac-infra/core.sock`: its directory
+is protected while the socket remains mode `0600`, owned by the intended normal
+user. Kernel peer credentials restrict requests to that user or root, and
+clients verify the daemon peer is root. Rebuild the clients and explicitly
+reinstall the reviewed daemon to migrate an older `/var/run` installation.
+`scripts/setup.sh` alone does not migrate or restart it. Uninstall removes the
+installed executable, plist and socket, retaining any nonempty recovery directory.
+
+These checks prevent an ordinary user from replacing the installed service
+through a writable checkout or directory. They do not authenticate the initial
+reviewed build, attest the code already mapped into a process, or defend against
+root changing the executable, plist, permissions, or the checks themselves.
+Review the artifact before authorizing installation. Source validation and
+fixture tests do not prove the state of an already running daemon.
 
 ## AnyConnect Socket Filter Cleanup
 

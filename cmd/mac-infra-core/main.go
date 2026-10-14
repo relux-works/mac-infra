@@ -423,11 +423,19 @@ func runDaemon(args []string, stderr io.Writer) int {
 	socketPath := fs.String("socket", cfg.SocketPath, "Unix socket path")
 	clientUID := fs.Int("client-uid", os.Getuid(), "client uid for socket ownership")
 	clientGID := fs.Int("client-gid", os.Getgid(), "client gid for socket ownership")
+	binarySHA256 := fs.String("binary-sha256", "", "installed executable SHA-256")
+	binaryID := fs.String("binary-id", "", "installed executable inode/creation time")
+	plistID := fs.String("plist-id", "", "installed plist inode/creation time")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	cfg.SocketPath = *socketPath
-	if err := maccore.RunDaemon(cfg, *clientUID, *clientGID); err != nil {
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "daemon does not accept positional arguments")
+		return 2
+	}
+	trust := maccore.DaemonTrust{BinarySHA256: *binarySHA256, BinaryIdentity: *binaryID, PlistIdentity: *plistID}
+	if err := maccore.RunDaemon(cfg, *clientUID, *clientGID, trust); err != nil {
 		fmt.Fprintf(stderr, "daemon failed: %v\n", err)
 		return 1
 	}

@@ -40,7 +40,7 @@ func TestDaemonPing(t *testing.T) {
 	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+		errCh <- (serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid()}).serve()
 	}()
 	waitForSocket(t, cfg, errCh)
 
@@ -58,7 +58,7 @@ func TestDaemonRejectsUnsupportedAction(t *testing.T) {
 	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+		errCh <- (serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid()}).serve()
 	}()
 	waitForSocket(t, cfg, errCh)
 
@@ -78,7 +78,7 @@ func TestDaemonSleepPreventionActionsRunOnlyFixedPMSetCommands(t *testing.T) {
 	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+		errCh <- (serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid()}).serve()
 	}()
 	waitForSocket(t, cfg, errCh)
 
@@ -118,7 +118,7 @@ func TestDaemonSleepPreventionReturnsCommandFailure(t *testing.T) {
 	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunDaemon(cfg, os.Getuid(), os.Getgid())
+		errCh <- (serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid()}).serve()
 	}()
 	waitForSocket(t, cfg, errCh)
 

@@ -16,13 +16,10 @@ import (
 func TestInstallServiceWaitsForRemovalBeforeBootstrap(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "commands.log")
 	withFakeInstallCommand(t, logPath)
-	cfg := ServiceConfig{Label: "works.relux.test-install", PlistPath: filepath.Join(t.TempDir(), "core.plist"), SocketPath: tempSocketPath(t, "install")}
-	errs := make(chan error, 1)
-	go func() { errs <- RunDaemon(cfg, os.Getuid(), os.Getgid()) }()
-	waitForSocket(t, cfg, errs)
+	cfg := ServiceConfig{Label: "works.relux.test-install", PlistPath: filepath.Join(t.TempDir(), "core.plist")}
 	t.Setenv("MAC_INFRA_INSTALL_SEQUENCE", "present,missing")
 	t.Setenv("MAC_INFRA_INSTALL_COUNTER", filepath.Join(t.TempDir(), "counter"))
-	if err := InstallService(cfg, "/fixture/core", os.Getuid(), os.Getgid()); err != nil {
+	if err := replaceLaunchService(cfg, time.Second); err != nil {
 		t.Fatal(err)
 	}
 	calls := readCommandLog(t, logPath)

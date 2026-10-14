@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -52,6 +51,11 @@ func Call(cfg ServiceConfig, request Request) (Response, error) {
 		return Response{}, err
 	}
 	defer conn.Close()
+	if cfg == DefaultServiceConfig() {
+		if err := requireSocketPeer(conn, 0); err != nil {
+			return Response{}, fmt.Errorf("untrusted daemon peer: %w", err)
+		}
+	}
 
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		return Response{}, err
@@ -96,57 +100,74 @@ func RequestSudoCredentials() error {
 }
 
 func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID int) error {
+	if cfg != DefaultServiceConfig() || clientUID <= 0 || clientGID < 0 {
+		return fmt.Errorf("install requires fixed service paths and a non-root client; run as the intended normal user")
+	}
+	// Verify native trust-check support and the first protected ancestor before
+	// any sudo prompt or privileged command. Descendants are checked again later.
+	if err := requireTrustedDirectory("/Library"); err != nil {
+		return err
+	}
+	snapshot, err := readReviewedExecutable(binaryPath)
+	if err != nil {
+		return err
+	}
 	if err := ensureSudoCredentials(); err != nil {
 		return fmt.Errorf("sudo authentication: %w", err)
 	}
 
-	plistData := RenderServicePlist(cfg, binaryPath, clientUID, clientGID)
-	tmpFile, err := os.CreateTemp("", "mac-infra-core-*.plist")
-	if err != nil {
-		return fmt.Errorf("create temp plist: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmpFile.Write(plistData); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("write temp plist: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("close temp plist: %w", err)
-	}
-
-	if _, err := runPrivilegedCommand("install", "-o", "root", "-g", "wheel", "-m", "0644", tmpPath, cfg.PlistPath); err != nil {
-		return fmt.Errorf("install plist: %w", err)
-	}
-	if err := replaceLaunchService(cfg, 5*time.Second); err != nil {
-		return err
-	}
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		status, err := InspectService(cfg)
-		if err != nil {
+	return installReviewedSnapshot(snapshot, cfg, clientUID, clientGID, rootInstallationOps(), func() error {
+		if err := replaceLaunchService(cfg, 5*time.Second); err != nil {
 			return err
 		}
-		if status.Reachable {
-			return nil
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			status, err := InspectService(cfg)
+			if err != nil {
+				return err
+			}
+			if status.Reachable {
+				return nil
+			}
+			time.Sleep(150 * time.Millisecond)
 		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	return fmt.Errorf("service did not become reachable at %s", cfg.SocketPath)
+		return fmt.Errorf("service did not become reachable at %s", cfg.SocketPath)
+	})
 }
 
 func UninstallService(cfg ServiceConfig) error {
+	if cfg != DefaultServiceConfig() {
+		return fmt.Errorf("uninstall requires fixed installed service paths")
+	}
 	if err := ensureSudoCredentials(); err != nil {
 		return fmt.Errorf("sudo authentication: %w", err)
 	}
-	_, _ = runPrivilegedCommand("launchctl", "bootout", launchctlTarget(cfg.Label))
-	_, _ = runPrivilegedCommand("rm", "-f", cfg.PlistPath, cfg.SocketPath)
+	if err := requireTrustedDirectory("/Library/LaunchDaemons"); err != nil {
+		return err
+	}
+	if err := requireTrustedDirectory("/Library/PrivilegedHelperTools"); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(defaultServiceDirectory); err == nil {
+		if err := requireTrustedDirectory(defaultServiceDirectory); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	_, _ = runPrivilegedCommand("/bin/launchctl", "bootout", launchctlTarget(cfg.Label))
+	if _, err := runPrivilegedCommand("/bin/rm", "-f", cfg.PlistPath, cfg.SocketPath, defaultServiceBinaryPath); err != nil {
+		return err
+	}
+	// Retain a nonempty directory, notably a recovery stage from a failed install.
+	_, _ = runPrivilegedCommand("/bin/rmdir", defaultServiceDirectory)
 	return nil
 }
 
-func RunDaemon(cfg ServiceConfig, clientUID, clientGID int) error {
+func RunDaemon(cfg ServiceConfig, clientUID, clientGID int, trust DaemonTrust) error {
+	if err := validateDaemonInstallation(cfg, clientUID, clientGID, trust); err != nil {
+		return fmt.Errorf("refusing untrusted daemon installation: %w", err)
+	}
 	daemon := serviceDaemon{
 		cfg:       cfg,
 		clientUID: clientUID,
@@ -162,10 +183,9 @@ type serviceDaemon struct {
 }
 
 func (d serviceDaemon) serve() error {
-	if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
-		return fmt.Errorf("create socket dir: %w", err)
+	if err := removeStaleSocket(d.cfg.SocketPath, d.clientUID); err != nil {
+		return err
 	}
-	_ = os.Remove(d.cfg.SocketPath)
 
 	listener, err := net.Listen("unix", d.cfg.SocketPath)
 	if err != nil {
@@ -214,6 +234,9 @@ func (d serviceDaemon) serve() error {
 
 func (d serviceDaemon) handleConn(conn net.Conn) {
 	defer conn.Close()
+	if err := requireSocketPeer(conn, d.clientUID); err != nil {
+		return
+	}
 
 	var request Request
 	if err := json.NewDecoder(conn).Decode(&request); err != nil {
@@ -392,7 +415,7 @@ func exitCode(err error) int {
 	return -1
 }
 
-func RenderServicePlist(cfg ServiceConfig, binaryPath string, clientUID, clientGID int) []byte {
+func RenderServicePlist(cfg ServiceConfig, binaryPath string, clientUID, clientGID int, trust ...DaemonTrust) []byte {
 	var builder strings.Builder
 	builder.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	builder.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
@@ -402,7 +425,7 @@ func RenderServicePlist(cfg ServiceConfig, binaryPath string, clientUID, clientG
 	builder.WriteString(`  <string>` + plistEscape(cfg.Label) + `</string>` + "\n")
 	builder.WriteString(`  <key>ProgramArguments</key>` + "\n")
 	builder.WriteString(`  <array>` + "\n")
-	for _, value := range []string{
+	arguments := []string{
 		binaryPath,
 		"_daemon",
 		"--socket",
@@ -411,7 +434,12 @@ func RenderServicePlist(cfg ServiceConfig, binaryPath string, clientUID, clientG
 		strconv.Itoa(clientUID),
 		"--client-gid",
 		strconv.Itoa(clientGID),
-	} {
+	}
+	if len(trust) == 1 {
+		arguments = append(arguments, "--binary-sha256", trust[0].BinarySHA256,
+			"--binary-id", trust[0].BinaryIdentity, "--plist-id", trust[0].PlistIdentity)
+	}
+	for _, value := range arguments {
 		builder.WriteString(`    <string>` + plistEscape(value) + `</string>` + "\n")
 	}
 	builder.WriteString(`  </array>` + "\n")
@@ -429,7 +457,7 @@ func ensureSudoCredentials() error {
 		return nil
 	}
 
-	cmd := execCommandCore("sudo", "-n", "true")
+	cmd := execCommandCore("/usr/bin/sudo", "-n", "/usr/bin/true")
 	if err := cmd.Run(); err == nil {
 		return nil
 	}
@@ -438,7 +466,7 @@ func ensureSudoCredentials() error {
 		return fmt.Errorf("sudo credentials are not cached; run `sudo -v` in an interactive shell and retry")
 	}
 
-	cmd = execCommandCore("sudo", "-v")
+	cmd = execCommandCore("/usr/bin/sudo", "-v")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -457,7 +485,7 @@ func runPrivilegedCommand(name string, args ...string) ([]byte, error) {
 	if os.Geteuid() == 0 {
 		return runCommand(name, args...)
 	}
-	return runCommand("sudo", append([]string{name}, args...)...)
+	return runCommand("/usr/bin/sudo", append([]string{"-n", name}, args...)...)
 }
 
 func runCommand(name string, args ...string) ([]byte, error) {
