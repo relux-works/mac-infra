@@ -228,7 +228,7 @@ func TestInstallAndUninstallRejectAlternateScope(t *testing.T) {
 		{DefaultServiceConfig(), 0, os.Getgid()},
 		{DefaultServiceConfig(), os.Getuid(), -1},
 	} {
-		if err := InstallService(tc.cfg, "/not-opened", tc.uid, tc.gid); err == nil || !strings.Contains(err.Error(), "fixed service paths") {
+		if err := InstallService(tc.cfg, "/not-opened", tc.uid, tc.gid, InstallOptions{}); err == nil || !strings.Contains(err.Error(), "fixed service paths") {
 			t.Fatalf("invalid install scope: %v", err)
 		}
 	}

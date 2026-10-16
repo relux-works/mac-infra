@@ -34,3 +34,22 @@ func requireSocketPeer(conn net.Conn, uid int) error {
 	}
 	return nil
 }
+
+// socketPeerPID is audit attribution only; authorization uses the UID check.
+func socketPeerPID(conn net.Conn) int {
+	socket, ok := conn.(*net.UnixConn)
+	if !ok {
+		return 0
+	}
+	raw, err := socket.SyscallConn()
+	if err != nil {
+		return 0
+	}
+	pid := 0
+	_ = raw.Control(func(fd uintptr) {
+		if value, err := unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID); err == nil {
+			pid = value
+		}
+	})
+	return pid
+}

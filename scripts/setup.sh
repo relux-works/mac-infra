@@ -118,6 +118,8 @@ echo "Building mac-infra-core..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-infra-core" ./cmd/mac-infra-core
 echo "Building mac-security..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-security" ./cmd/mac-security
+echo "Building mac-firewall..."
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-firewall" ./cmd/mac-firewall
 echo "Building mac-keyvault..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-keyvault" ./cmd/mac-keyvault
 
@@ -133,6 +135,7 @@ ln -sf "$BUILD_DIR/mac-browser-site" "$BIN_DIR/mac-browser-site"
 ln -sf "$BUILD_DIR/mac-document-sanitize" "$BIN_DIR/mac-document-sanitize"
 ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
 ln -sf "$BUILD_DIR/mac-security" "$BIN_DIR/mac-security"
+ln -sf "$BUILD_DIR/mac-firewall" "$BIN_DIR/mac-firewall"
 ln -sf "$BUILD_DIR/mac-keyvault" "$BIN_DIR/mac-keyvault"
 echo "Installed binary symlinks:"
 echo "  $BIN_DIR/mac-audio-reset -> $BUILD_DIR/mac-audio-reset"
@@ -148,6 +151,7 @@ echo "  $BIN_DIR/mac-browser-site -> $BUILD_DIR/mac-browser-site"
 echo "  $BIN_DIR/mac-document-sanitize -> $BUILD_DIR/mac-document-sanitize"
 echo "  $BIN_DIR/mac-infra-core  -> $BUILD_DIR/mac-infra-core"
 echo "  $BIN_DIR/mac-security -> $BUILD_DIR/mac-security"
+echo "  $BIN_DIR/mac-firewall -> $BUILD_DIR/mac-firewall"
 echo "  $BIN_DIR/mac-keyvault    -> $BUILD_DIR/mac-keyvault"
 
 if [[ ! -d "$SKILL_SOURCE" ]]; then

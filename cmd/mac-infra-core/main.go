@@ -52,6 +52,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "install":
 		return runInstall(args[1:], stdout, stderr)
+	case "install-digest":
+		return runInstallDigest(args[1:], stdout, stderr)
 	case "uninstall":
 		return runUninstall(args[1:], stdout, stderr)
 	case "status":
@@ -90,6 +92,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 func runInstall(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	expected := fs.String("expect-sha256", "", "refuse to install unless the executable has this sha256 (from install-digest)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -100,7 +103,13 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cfg := maccore.DefaultServiceConfig()
-	if err := maccore.InstallService(cfg, path, os.Getuid(), os.Getgid()); err != nil {
+	options := maccore.InstallOptions{
+		ExpectedSHA256: *expected,
+		Announce: func(path, sha string, size int) {
+			fmt.Fprintf(stdout, "installing: %s\nsha256: %s\nsize: %d bytes\n", path, sha, size)
+		},
+	}
+	if err := maccore.InstallService(cfg, path, os.Getuid(), os.Getgid(), options); err != nil {
 		fmt.Fprintf(stderr, "install failed: %v\n", err)
 		return 1
 	}
@@ -115,6 +124,29 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "socket: %s\n", status.SocketPath)
 	fmt.Fprintf(stdout, "label: %s\n", status.Label)
 	fmt.Fprintf(stdout, "plist: %s\n", status.PlistPath)
+	return 0
+}
+
+// runInstallDigest shows, without privileges, exactly which bytes install
+// would place in the root-owned helper directory.
+func runInstallDigest(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("install-digest", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	path, err := resolveExecutablePath()
+	if err != nil {
+		fmt.Fprintf(stderr, "install-digest failed: %v\n", err)
+		return 1
+	}
+	digest, size, err := maccore.ReviewedExecutableDigest(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "install-digest failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "executable: %s\nversion: %s %s %s\nsha256: %s\nsize: %d bytes\n", path, Version, Commit, BuildDate, digest, size)
+	fmt.Fprintf(stdout, "install with: mac-infra-core install --expect-sha256 %s\n", digest)
 	return 0
 }
 
@@ -446,7 +478,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "mac-infra-core manages the privileged macOS maintenance daemon.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  mac-infra-core install")
+	fmt.Fprintln(w, "  mac-infra-core install-digest")
+	fmt.Fprintln(w, "  mac-infra-core install [--expect-sha256 HEX]")
 	fmt.Fprintln(w, "  mac-infra-core uninstall")
 	fmt.Fprintln(w, "  mac-infra-core status")
 	fmt.Fprintln(w, "  mac-infra-core request-permissions sudo")

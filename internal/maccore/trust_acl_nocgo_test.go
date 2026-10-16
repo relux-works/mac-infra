@@ -17,7 +17,7 @@ func TestTrustUnavailableRefusesBeforePrivilege(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { execCommandCore = old })
-	err := InstallService(DefaultServiceConfig(), "/not-opened", 501, 20)
+	err := InstallService(DefaultServiceConfig(), "/not-opened", 501, 20, InstallOptions{})
 	if err == nil || !strings.Contains(err.Error(), "cgo ACL support") {
 		t.Fatalf("error=%v, want unavailable native ACL check", err)
 	}

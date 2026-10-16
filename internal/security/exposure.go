@@ -50,17 +50,25 @@ func listenerExposure(ctx context.Context, r Runner) Check {
 	c.Data = map[string]any{"listeners": listeners, "coverage": "visible TCP listeners only; complete process visibility is not established; UDP is not inspected"}
 	c.Findings = append(c.Findings, Finding{Check: name, Severity: "info", Code: "visibility_limited", Detail: "Visible TCP listeners do not establish the absence of other listeners; complete visibility may require root."})
 	for _, l := range listeners {
-		host, _, _ := net.SplitHostPort(l.Bind)
-		if i := strings.LastIndexByte(host, '%'); i >= 0 {
-			host = host[:i]
-		}
-		ip := net.ParseIP(host)
-		if host == "*" || (ip != nil && !ip.IsLoopback()) {
+		if NonLoopbackBind(l.Bind) {
 			c.Findings = append(c.Findings, Finding{Check: name, Severity: "warning", Code: "non_loopback_listener", Detail: "A visible TCP listener accepts a wildcard or non-loopback bind; reachability depends on routing and firewall policy."})
 		}
 	}
 	return c
 }
+
+// NonLoopbackBind reports a wildcard or non-loopback listener address.
+func NonLoopbackBind(bind string) bool {
+	host, _, _ := net.SplitHostPort(bind)
+	if i := strings.LastIndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	ip := net.ParseIP(host)
+	return host == "*" || (ip != nil && !ip.IsLoopback())
+}
+
+// ParseListeners exposes the strict lsof field parser to the firewall status.
+func ParseListeners(raw string) ([]Listener, bool) { return parseListeners(raw) }
 
 var listenerDigitsPattern = regexp.MustCompile(`^[0-9]+$`)
 var listenerFDPattern = regexp.MustCompile(`^[0-9]+[rwu]?$`)

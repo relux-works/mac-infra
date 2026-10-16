@@ -16,7 +16,8 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-chrome-session` | Guarded exact Chrome tab access, explicit exact-tab handoff, trusted form input and native file upload, sealed authenticated same-origin downloads and Slack reads, bounded extraction, and finite named Chrome/Safari heartbeats without focus churn | `mac-chrome-session list`, guarded `run-js`/`fetch-file`/`slack-read`/`extract`, explicit `focus`, `trusted-input`, or `upload` with exact IDs/origin plus `--human-authorized`; upload/trusted input and protected fetch requests arrive through `--request-stdin`; `heartbeat start\|restart\|status\|stop\|list`, exact `close` | atomic private `run-js --out` and `fetch-file --out` artifacts; protected resource URLs, trusted values, and upload source paths stay out of argv and normal output; upload uses a short-lived private staging directory and reports only guarded origin, accepted basenames, and count; other private outputs and heartbeat state use the paths described below |
 | `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected, PII-depersonalized, secret-checked `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no raw recognized personal data, cookies, browser storage, authorization material, or cursor/session state |
 | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
-| `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core request-permissions sudo`, `mac-infra-core install`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | root-owned executable and socket under `/Library/PrivilegedHelperTools/works.relux.mac-infra/`, plist under `/Library/LaunchDaemons/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
+| `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core install-digest`, `mac-infra-core install [--expect-sha256 HEX]`, `mac-infra-core request-permissions sudo`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | root-owned executable and socket under `/Library/PrivilegedHelperTools/works.relux.mac-infra/`, plist under `/Library/LaunchDaemons/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
+| `mac-firewall` | Declarative macOS application firewall management through the `mac-infra-core` root helper: keep it on, manage app exceptions, disable allowlisted listening services; no sudo per change | `mac-firewall status`, `mac-firewall init-config`, `mac-firewall plan`, `mac-firewall apply --apply` | config `~/.config/mac-infra/firewall.json` (`0600`); root-owned audit `/Library/PrivilegedHelperTools/works.relux.mac-infra/firewall/audit.jsonl`; see [the firewall reference](agents/skills/mac-infra/references/firewall.md) |
 | `mac-security` | Bounded read-only macOS security evidence, persistence fingerprints and coverage-aware drift | `mac-security scan --json`, `mac-security baseline --file NEW_PATH --json`, `mac-security diff --file BASELINE --json` | JSON stdout + summary stderr; explicit baseline creates a new `0600` file; use `.temp/security/` |
 | `mac-keyvault` | Create, list, describe, export, sign with, verify against, rotate, annotate, and delete non-extractable P-256 key pairs in the login keychain; every item is a schema-2 record addressed as `<service>/<purpose>` (+ `--kind`, `--version`) under the derived label `works.relux.mac-keyvault.<kind>.<service>.<purpose>.v<N>`; `--enclave` fails explicitly on an unprovisioned binary | `mac-keyvault [--json] init --service S --purpose P [--title T] [--usages sign,verify] [--extraction none\|human\|agent] [--meta k=v]`, `list [--service S] [--kind K]`, `describe S/P [--version N]`, `pub S/P [--out FILE] [--format spki-der\|spki-pem\|jwk]`, `sign S/P --digest HEX\|@FILE \| --data-file F \| --stdin [--raw] [--out FILE]`, `verify S/P \| --spki FILE --digest ... --sig HEX\|@FILE [--raw] [--allow-high-s]`, `rotate S/P`, `meta get\|set\|unset S/P ...`, `delete S/P --confirm [--version N]`, `signer serve --address S/P [--kind K] [--version N]` (JSON lines on stdin/stdout, contract 1, for kvctl; Go client `internal/keyvault/signerclient`) | keychain items only; `signer serve` writes one hello line then one response line per request and exits 0 on EOF; `pub --out` writes a `0600` file; `~/Library/Application Support/mac-infra/keyvault/init.lock` serialises creates |
 | `mac-keyvault ssh-agent` | Serve explicitly pinned P-256 vault keys through the OpenSSH agent protocol | `mac-keyvault ssh-agent --socket /absolute/private/agent.sock --key new-service/auth@1 --key new-service/signing@1`; public output: `mac-keyvault pub new-service/auth --version 1 --format ssh` | `0600` socket in an owned `0700` directory; [new-key onboarding and manual LaunchAgent guide](agents/skills/mac-infra/references/keyvault-ssh-new-keys.md); existing SSH keys stay unchanged; only new keys use keyvault |
@@ -24,7 +25,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
 | Apple clang / cgo | Build the native macOS extended ACL checks used by the privileged installer and daemon | `CGO_ENABLED=1 go build -o .temp/mac-infra-core ./cmd/mac-infra-core` (requires Xcode or Command Line Tools) | `.temp/mac-infra-core`; `scripts/setup.sh` builds its normal `bin/mac-infra-core` artifact with the configured Go cgo setting |
-| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-keyvault`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
+| `scripts/setup.sh` | Build the CLIs and install global skill symlinks | `./scripts/setup.sh` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-firewall`, `bin/mac-keyvault`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
 | `scripts/deinit.sh` | Remove user-level installation without stranding managed jobs | `./scripts/deinit.sh` | stops all `works.relux.mac-infra-browser-heartbeat.*` LaunchAgents and removes the stable launcher plus legacy pinned copies before removing binary symlinks and the runtime skill copy |
 | `/usr/bin/codesign` | Give the shared heartbeat launcher a complete stable designated identity so macOS Automation consent can retain it across rebuilds | invoked by `scripts/setup.sh`; verify with `codesign --verify --strict "$HOME/Library/Application Support/mac-infra/browser-session/bin/mac-browser-heartbeat-launcher"` | signs `bin/mac-chrome-session`; setup atomically installs those signed bytes at the single managed launcher path |
 
@@ -104,10 +105,14 @@ These mutations route through the root LaunchDaemon and can execute only `/usr/b
 
 ```bash
 ./scripts/setup.sh
-mac-infra-core request-permissions sudo
-mac-infra-core install
+mac-infra-core install-digest                      # no privilege: path, version, sha256
+mac-infra-core install --expect-sha256 <sha256>    # prints the digest again, then the one sudo prompt
 mac-infra-core sleep-prevention status
 ```
+
+`install` prints the executable's sha256 before any privileged step and, with
+`--expect-sha256`, refuses before sudo when the bytes differ from the digest
+that was reviewed.
 
 ## Separate Display And Idle-Lock Prevention
 
@@ -912,5 +917,24 @@ LaunchAgent is stranded. See the detailed
 [Safari](agents/skills/mac-infra/references/safari-session.md) references.
 
 ## Security Evidence
+
+## Firewall Management
+
+`mac-firewall` keeps the macOS application firewall on and manages app
+exceptions and allowlisted listening services from a declarative config,
+through the `mac-infra-core` root helper. Sudo is needed once, to install the
+helper; changes need none. Plan is the default:
+
+```bash
+mac-firewall status
+mac-firewall init-config            # seed ~/.config/mac-infra/firewall.json from the current state
+mac-firewall plan
+mac-firewall apply --apply
+```
+
+The firewall can be turned on but never off. Allowing an app requires a code
+signature anchored to Apple (Apple, App Store or Developer ID); tightening is
+always allowed. Every apply is validated before the first change, read back,
+and rolled back on failure. See [the firewall reference](agents/skills/mac-infra/references/firewall.md).
 
 Use `mac-security scan --json` for read-only host exposure, posture, SSH and IOC evidence. `baseline --file NEW_PATH --json` explicitly captures private persistence metadata; `diff --file BASELINE --json` never treats lost visibility as deletion. Findings and incomplete coverage do not change a successful collection exit code. See [the collector contract](agents/skills/mac-infra/references/security.md) and [router discovery design](docs/security/router-discovery.md) for scope, limits and exact commands.

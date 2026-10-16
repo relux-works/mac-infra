@@ -2,6 +2,8 @@ package maccore
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/relux-works/mac-infra/internal/anyconnect"
+	"github.com/relux-works/mac-infra/internal/security/firewall"
 )
 
 const commandTimeout = 10 * time.Second
@@ -87,6 +90,18 @@ func CleanupAnyConnect(cfg ServiceConfig, force bool) (Response, error) {
 	})
 }
 
+func FirewallStatus(cfg ServiceConfig) (Response, error) {
+	return Call(cfg, Request{Action: ActionFirewallStatus})
+}
+
+func FirewallPlan(cfg ServiceConfig, desired firewall.Config) (Response, error) {
+	return Call(cfg, Request{Action: ActionFirewallPlan, Firewall: &desired})
+}
+
+func FirewallApply(cfg ServiceConfig, desired firewall.Config) (Response, error) {
+	return Call(cfg, Request{Action: ActionFirewallApply, Firewall: &desired})
+}
+
 func EnableSleepPrevention(cfg ServiceConfig) (Response, error) {
 	return Call(cfg, Request{Action: ActionSleepPreventionEnable})
 }
@@ -99,7 +114,27 @@ func RequestSudoCredentials() error {
 	return ensureSudoCredentials()
 }
 
-func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID int) error {
+// InstallOptions binds an install to the exact bytes the operator reviewed.
+type InstallOptions struct {
+	// ExpectedSHA256, when set, must equal the snapshot digest or nothing
+	// privileged runs.
+	ExpectedSHA256 string
+	// Announce is called with the snapshot digest before any sudo prompt.
+	Announce func(path, sha256 string, size int)
+}
+
+// ReviewedExecutableDigest reports what install would snapshot, without
+// privileges.
+func ReviewedExecutableDigest(path string) (string, int, error) {
+	snapshot, err := readReviewedExecutable(path)
+	if err != nil {
+		return "", 0, err
+	}
+	sum := sha256.Sum256(snapshot)
+	return hex.EncodeToString(sum[:]), len(snapshot), nil
+}
+
+func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID int, opts InstallOptions) error {
 	if cfg != DefaultServiceConfig() || clientUID <= 0 || clientGID < 0 {
 		return fmt.Errorf("install requires fixed service paths and a non-root client; run as the intended normal user")
 	}
@@ -111,6 +146,14 @@ func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID i
 	snapshot, err := readReviewedExecutable(binaryPath)
 	if err != nil {
 		return err
+	}
+	sum := sha256.Sum256(snapshot)
+	digest := hex.EncodeToString(sum[:])
+	if opts.Announce != nil {
+		opts.Announce(binaryPath, digest, len(snapshot))
+	}
+	if opts.ExpectedSHA256 != "" && !strings.EqualFold(opts.ExpectedSHA256, digest) {
+		return fmt.Errorf("executable sha256 %s does not match the expected %s; nothing was installed", digest, opts.ExpectedSHA256)
 	}
 	if err := ensureSudoCredentials(); err != nil {
 		return fmt.Errorf("sudo authentication: %w", err)
@@ -172,7 +215,11 @@ func RunDaemon(cfg ServiceConfig, clientUID, clientGID int, trust DaemonTrust) e
 		cfg:       cfg,
 		clientUID: clientUID,
 		clientGID: clientGID,
+		firewall:  newFirewallService(defaultFirewallStore()),
 	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go daemon.firewall.runEnforcement(stop)
 	return daemon.serve()
 }
 
@@ -180,6 +227,7 @@ type serviceDaemon struct {
 	cfg       ServiceConfig
 	clientUID int
 	clientGID int
+	firewall  *firewallService
 }
 
 func (d serviceDaemon) serve() error {
@@ -239,7 +287,9 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 	}
 
 	var request Request
-	if err := json.NewDecoder(conn).Decode(&request); err != nil {
+	decoder := json.NewDecoder(conn)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
 		_ = json.NewEncoder(conn).Encode(Response{Error: err.Error()})
 		return
 	}
@@ -275,6 +325,13 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 			response.OK = false
 			response.Error = err.Error()
 		}
+	case ActionFirewallStatus, ActionFirewallPlan, ActionFirewallApply:
+		if d.firewall == nil {
+			response = Response{Error: "firewall management is not available in this daemon"}
+			break
+		}
+		response = d.firewall.handle(request.Action, request.Firewall, d.clientUID, socketPeerPID(conn))
+		response.DaemonPID = os.Getpid()
 	default:
 		response.OK = false
 		response.Error = fmt.Sprintf("unsupported mac-infra-core action %q", request.Action)
@@ -510,6 +567,9 @@ func plistEscape(value string) string {
 	)
 	return replacer.Replace(value)
 }
+
+// IsUnavailable reports that the daemon socket is missing or refusing.
+func IsUnavailable(err error) bool { return isUnavailable(err) }
 
 func isUnavailable(err error) bool {
 	var netErr *net.OpError

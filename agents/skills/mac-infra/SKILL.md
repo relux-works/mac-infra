@@ -182,10 +182,24 @@ read [security.md](references/security.md). Start with `mac-security scan --json
 Unknown/partial coverage never establishes a clean host. Never run sudo or
 change host policy as part of an audit.
 
+## Firewall Management
+
+Use `mac-firewall` (never `socketfilterfw` with sudo) to manage the macOS
+application firewall: `status`, `init-config`, `plan`, `apply --apply`. It
+goes through the installed `mac-infra-core` helper, so no change needs sudo.
+Plan first and read the `LOOSENS` lines; allowing an app needs an
+Apple-anchored signature, and the firewall can never be turned off through it.
+`services.disable` accepts only allowlisted names (v1: `apache`). Read
+[firewall.md](references/firewall.md) for the config
+schema, rollback semantics and limits. A `rollback_failed` outcome is an
+incident: report it with the printed drift.
+
 ## Privileged Daemon Installation Trust
 
-Run `mac-infra-core install` as the intended normal user only after reviewing
-the executable to be installed. It copies a pre-elevation byte snapshot into
+Run `mac-infra-core install-digest`, review the printed sha256, then
+`mac-infra-core install --expect-sha256 <sha256>` as the intended normal user.
+Install prints the digest again before its one sudo prompt and refuses before
+sudo if the bytes changed. It copies a pre-elevation byte snapshot into
 `/Library/PrivilegedHelperTools/works.relux.mac-infra/mac-infra-core`
 (`root:wheel`, `0755`) and installs a `root:wheel`, `0644` LaunchDaemon plist.
 The root daemon must never execute a binary in a user checkout or user bin

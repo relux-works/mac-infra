@@ -1,0 +1,31 @@
+Total number of apps = 15 
+1 : /usr/libexec/remoted 
+             (Allow incoming connections)
+2 : /usr/bin/python3 
+             (Allow incoming connections)
+3 : /usr/bin/ruby 
+             (Allow incoming connections)
+4 : /usr/sbin/cupsd 
+             (Allow incoming connections)
+5 : /usr/libexec/sharingd 
+             (Allow incoming connections)
+6 : /usr/libexec/sshd-keygen-wrapper 
+             (Allow incoming connections)
+7 : /usr/sbin/smbd 
+             (Allow incoming connections)
+8 : com.apple.WebKit.Networking 
+             (Allow incoming connections)
+9 : com.adguard.mac.adguard 
+             (Allow incoming connections)
+10 : unity.Blizzard Entertainment.Hearthstone 
+             (Allow incoming connections)
+11 : com.spotify.client 
+             (Allow incoming connections)
+12 : com.google.android.studio-EAP 
+             (Allow incoming connections)
+13 : org.qbittorrent.qBittorrent 
+             (Allow incoming connections)
+14 : com.tlphn.Telephone 
+             (Allow incoming connections)
+15 : com.adguard.mac.adguard.network-extension 
+             (Allow incoming connections)
