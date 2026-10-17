@@ -34,11 +34,17 @@ func TestParseListAppsHostFixtureAndDamagedVariants(t *testing.T) {
 	if err != nil || len(blocked) != 1 || blocked[0].Allowed || blocked[0].Name != "/a b/x.app" {
 		t.Fatalf("blocked entry with a space: %+v, %v", blocked, err)
 	}
+	// Two distinct executables differing only by a trailing space stay distinct.
+	padded, err := parseListApps(renderListApps([]App{{Name: "/Users/u/server ", Allowed: false}, {Name: "/Users/u/server", Allowed: true}}))
+	if err != nil || len(padded) != 2 || padded[0].Name != "/Users/u/server " || padded[1].Name != "/Users/u/server" {
+		t.Fatalf("whitespace-distinct entries: %+v, %v", padded, err)
+	}
 	for name, damaged := range map[string]string{
 		"total too high": strings.Replace(string(raw), "= 15", "= 16", 1),
 		"unknown policy": strings.Replace(string(raw), "(Allow incoming connections)", "(Maybe incoming connections)", 1),
 		"missing header": strings.SplitN(string(raw), "\n", 2)[1],
 		"renumbered":     strings.Replace(string(raw), "2 : /usr/bin/python3", "7 : /usr/bin/python3", 1),
+		"no entry pad":   strings.Replace(string(raw), "/usr/bin/python3 \n", "/usr/bin/python3\n", 1),
 		"empty":          "",
 	} {
 		if _, err := parseListApps(damaged); err == nil {
@@ -489,13 +495,15 @@ func (r cancellingRunner) Run(ctx context.Context, path string, args ...string) 
 	return out, err
 }
 
-// Claim: when the apply's context expires after a mutation, the remaining
-// steps fail but the rollback still runs on its own budget and restores
-// the pre-apply state.
-func TestRollbackRunsAfterApplyDeadline(t *testing.T) {
+// Claim: when the apply's context is cancelled right after a reversible
+// mutation (stealth on, with the firewall already on), the remaining steps
+// fail but the rollback runs on its own context and undoes that mutation.
+func TestRollbackRunsAfterApplyCancellation(t *testing.T) {
 	cfg := ownerConfig()
 	cfg.Stealth = ptr(true)
-	host := newFakeHost(hostLikeState())
+	state := hostLikeState()
+	state.Enabled = true
+	host := newFakeHost(state)
 	pre := host.state.comparable()
 	applyCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -503,7 +511,10 @@ func TestRollbackRunsAfterApplyDeadline(t *testing.T) {
 	if report.Outcome != OutcomeRolledBack || !strings.Contains(report.Error, "context canceled") {
 		t.Fatalf("outcome = %s (%s, drift %s)", report.Outcome, report.Error, report.Drift)
 	}
-	if host.state.comparable() != pre {
+	if len(report.Commands) == 0 || strings.Join(report.Commands[0].Argv, " ") != SocketFilterFW+" --setstealthmode on" || report.Commands[0].Error != "" {
+		t.Fatalf("first command = %+v, want a successful stealth on", report.Commands)
+	}
+	if host.state.Stealth || host.state.comparable() != pre {
 		t.Fatalf("after rollback: %s, want %s", host.state.comparable(), pre)
 	}
 }
@@ -519,5 +530,29 @@ func TestComparableHasNoDelimiterCollision(t *testing.T) {
 	same := State{Apps: []App{{Name: "/tmp/b", Allowed: true}, {Name: "/tmp/a", Allowed: true}}}
 	if two.comparable() != same.comparable() {
 		t.Fatal("control: order of entries changed equality")
+	}
+}
+
+// Claim: when the firewall blocks only a whitespace-padded twin, a config
+// blocking the unpadded executable still plans that block instead of
+// reporting no_change.
+func TestPaddedTwinEntryDoesNotSatisfyConfig(t *testing.T) {
+	dir := t.TempDir()
+	server := filepath.Join(dir, "server")
+	for _, path := range []string{server, server + " "} {
+		if err := os.WriteFile(path, []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := hostLikeState()
+	state.Enabled = true
+	state.Services[0].Loaded, state.Services[0].Disabled = false, true
+	state.Apps = append(state.Apps, App{Name: server + " ", Allowed: false})
+	host := newFakeHost(state)
+	cfg := ownerConfig()
+	cfg.Apps.Block = []string{server}
+	report := Engine{Runner: host, Resolver: fakeResolver{}}.Plan(ctx, cfg)
+	if report.Outcome != OutcomePlanned || len(report.Plan.Steps) != 1 || report.Plan.Steps[0].Target != server {
+		t.Fatalf("plan = %+v (%s)", report.Plan, report.Error)
 	}
 }

@@ -26,11 +26,7 @@ const (
 	maxRequestBytes = 256 << 10
 	// maxConnections bounds the requests the root daemon serves at once;
 	// further connections are closed unread.
-	maxConnections = 16
-)
-
-// Variables so tests can shorten them.
-var (
+	maxConnections       = 16
 	requestReadTimeout   = 10 * time.Second
 	responseWriteTimeout = 10 * time.Second
 )
@@ -241,6 +237,8 @@ type serviceDaemon struct {
 	clientUID int
 	clientGID int
 	firewall  *firewallService
+	// writeTimeout overrides responseWriteTimeout when set (tests).
+	writeTimeout time.Duration
 }
 
 func (d serviceDaemon) serve() error {
@@ -315,7 +313,7 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 	decoder := json.NewDecoder(io.LimitReader(conn, maxRequestBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		writeResponse(conn, Response{Error: err.Error()})
+		d.writeResponse(conn, Response{Error: err.Error()})
 		return
 	}
 
@@ -362,13 +360,17 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 		response.Error = fmt.Sprintf("unsupported mac-infra-core action %q", request.Action)
 	}
 
-	writeResponse(conn, response)
+	d.writeResponse(conn, response)
 }
 
 // writeResponse gives up on a client that does not read its response, so a
 // stalled peer cannot hold a root goroutine and its slot.
-func writeResponse(conn net.Conn, response Response) {
-	_ = conn.SetWriteDeadline(time.Now().Add(responseWriteTimeout))
+func (d serviceDaemon) writeResponse(conn net.Conn, response Response) {
+	timeout := responseWriteTimeout
+	if d.writeTimeout > 0 {
+		timeout = d.writeTimeout
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
 	_ = json.NewEncoder(conn).Encode(response)
 }
 

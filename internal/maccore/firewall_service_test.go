@@ -227,9 +227,11 @@ func TestFirewallBusyRefusesInsteadOfQueueing(t *testing.T) {
 	}
 }
 
-// Claim: enforcement still turns the firewall on when the audit store fails
-// (intentional asymmetry with apply, which fails closed), and the failure is
-// logged instead of discarded.
+// Claim: enforcement still sends the enable command when the audit store
+// fails (intentional asymmetry with apply, which fails closed), and the
+// failure is logged instead of discarded. The static runner does not change
+// state, so this proves the attempt, not a successful readback (TestEnforceOn
+// covers readback).
 func TestEnforcementLogsAuditFailure(t *testing.T) {
 	var log strings.Builder
 	original := enforcementLog

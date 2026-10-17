@@ -89,9 +89,15 @@ running as that user can request a change. That is the point: the operator
   16 concurrent connections (further ones are closed unread). One firewall
   operation runs at a time; a request that cannot start within 30 s is
   refused as busy.
-- JSON duplicate keys resolve to the last value (Go's decoder). This gives the
-  client UID nothing it could not request directly; the CLI always sends its
-  own re-encoded config, so the plan it shows is the config it applies.
+- JSON is decoded by Go's `encoding/json` with unknown fields refused. It is
+  not a canonical-JSON validator: a duplicate key is applied again over the
+  earlier value (a repeated object merges into the earlier one, so a second
+  `apps` object with only `mode` keeps the earlier lists), field names match
+  case-insensitively, and the daemon serves the first JSON object on a
+  connection without checking for trailing data (`ParseConfig` does refuse
+  trailing data in a config file). None of this lets the client UID request
+  anything it could not request directly, and the CLI always sends its own
+  re-encoded config, so the plan it shows is the config it applies.
 
 ## Apply semantics
 

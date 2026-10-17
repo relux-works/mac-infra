@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -175,30 +176,39 @@ func TestDaemonCapsConcurrentConnections(t *testing.T) {
 	}
 }
 
-// Claim: clients that send a request but never read a large response do
-// not hold their slots forever: the write deadline frees them and a new
-// ping is served. Without the deadline all slots stay blocked.
+// Claim: clients whose requests were fully read but who never read their
+// large responses hold every slot (a new ping is refused), and the write
+// deadline then frees the slots so a new ping is served. Bounded control:
+// with SetWriteDeadline removed this test fails (mutation-03.log, M6).
 func TestDaemonFreesSlotsOfStalledReaders(t *testing.T) {
-	original := responseWriteTimeout
-	responseWriteTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { responseWriteTimeout = original })
 	socketPath := tempSocketPath(t, "mic-stall")
 	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- (serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid()}).serve()
+		errCh <- (serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid(), writeTimeout: time.Second}).serve()
 	}()
 	waitForSocket(t, cfg, errCh)
+	// The echoed unknown action makes a response far larger than the socket
+	// buffers, so an unread response blocks the handler in its write.
 	request := []byte(`{"action":"` + strings.Repeat("x", 200<<10) + `"}` + "\n")
+	var written sync.WaitGroup
 	for i := 0; i < maxConnections; i++ {
 		conn, err := net.Dial("unix", socketPath)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = conn.Close() })
-		go func() { _, _ = conn.Write(request) }()
+		written.Add(1)
+		go func() {
+			defer written.Done()
+			_, _ = conn.Write(request)
+		}()
 	}
-	if !eventuallyPings(socketPath, 3*time.Second) {
+	written.Wait()
+	if pingOnce(socketPath) {
+		t.Fatal("a ping was served while every slot should be blocked writing")
+	}
+	if !eventuallyPings(socketPath, 5*time.Second) {
 		t.Fatal("stalled readers kept every slot")
 	}
 }

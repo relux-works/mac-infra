@@ -206,16 +206,25 @@ func parseAllowSigned(raw string) (builtin, downloaded bool, err error) {
 
 var (
 	appTotalPattern  = regexp.MustCompile(`^Total number of apps = ([0-9]+)$`)
-	appEntryPattern  = regexp.MustCompile(`^([0-9]+) : (.+)$`)
+	appEntryPattern  = regexp.MustCompile(`^([0-9]+) : (.+) $`)
 	appPolicyPattern = regexp.MustCompile(`^\((Allow|Block) incoming connections\)$`)
 )
 
+// parseListApps reads `socketfilterfw --listapps`. Entry lines are matched
+// byte-exact ("N : <name> " with exactly one trailing space, as the tool
+// prints them) so that a name with its own surrounding whitespace keeps its
+// identity instead of being trimmed into a different path.
 func parseListApps(raw string) ([]App, error) {
-	lines := nonEmptyLines(raw)
+	var lines []string
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
 	if len(lines) == 0 {
 		return nil, fmt.Errorf("unrecognized firewall app list output")
 	}
-	m := appTotalPattern.FindStringSubmatch(lines[0])
+	m := appTotalPattern.FindStringSubmatch(strings.TrimSpace(lines[0]))
 	if m == nil {
 		return nil, fmt.Errorf("unrecognized firewall app list output")
 	}
@@ -226,7 +235,7 @@ func parseListApps(raw string) ([]App, error) {
 	apps := make([]App, 0, total)
 	for i := 0; i < total; i++ {
 		entry := appEntryPattern.FindStringSubmatch(lines[1+2*i])
-		policy := appPolicyPattern.FindStringSubmatch(lines[2+2*i])
+		policy := appPolicyPattern.FindStringSubmatch(strings.TrimSpace(lines[2+2*i]))
 		if entry == nil || policy == nil || entry[1] != strconv.Itoa(i+1) {
 			return nil, fmt.Errorf("unrecognized firewall app list entry %d", i+1)
 		}
