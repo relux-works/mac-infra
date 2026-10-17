@@ -245,7 +245,9 @@ launchctl bootout "gui/$(id -u)/works.relux.mac-keyvault.ssh-agent"
 ```
 
 For an upgrade, stop with `bootout`, update the binary using the normal reviewed
-release, inspect any needed ACL reauthorization interactively, then `bootstrap`
+release (`scripts/setup.sh --rebuild-keyvault`; plain `setup.sh` keeps an
+existing `bin/mac-keyvault`, and the flag refuses while a process runs it),
+inspect any needed ACL reauthorization interactively, then `bootstrap`
 the existing plist. To change selected generations or add a confirmation
 hook, stop, edit ProgramArguments, lint, and bootstrap. Do not use `kickstart -k`
 as routine rotation: normal shutdown preserves deterministic socket cleanup.

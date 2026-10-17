@@ -13,12 +13,17 @@ SKILL_RUNTIME="$HOME/.agents/skills/$SKILL_NAME"
 BUILD_VERSION="dev"
 BUILD_COMMIT="unknown"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+REBUILD_KEYVAULT=0
 
 usage() {
   cat <<EOF
-Usage: ./scripts/setup.sh [--bin-dir PATH]
+Usage: ./scripts/setup.sh [--bin-dir PATH] [--rebuild-keyvault]
 
 Builds mac-infra Go tools and installs the global agent skill.
+An existing bin/mac-keyvault is kept: keyvault keys trust exactly that
+binary, and a rebuild makes each key wait on a keychain prompt. Pass
+--rebuild-keyvault only in a planned owner sitting, after booting out
+every keyvault agent; it refuses while a process runs the binary.
 The privileged LaunchDaemon is not installed or restarted automatically.
 After first setup and after mac-infra-core updates, run:
   mac-infra-core install
@@ -30,6 +35,10 @@ while [[ $# -gt 0 ]]; do
     --bin-dir)
       BIN_DIR="$2"
       shift 2
+      ;;
+    --rebuild-keyvault)
+      REBUILD_KEYVAULT=1
+      shift
       ;;
     --help|-h)
       usage
@@ -47,6 +56,9 @@ if ! command -v go >/dev/null 2>&1; then
   echo "go is required" >&2
   exit 1
 fi
+
+# Decided before any build, so a refusal changes nothing.
+KEYVAULT_DECISION="$("$SCRIPT_DIR/keyvault-build-guard.sh" "$BUILD_DIR/mac-keyvault" "$REBUILD_KEYVAULT")"
 if [[ ! -x /usr/bin/codesign ]]; then
   echo "/usr/bin/codesign is required for the managed browser heartbeat" >&2
   exit 1
@@ -120,8 +132,12 @@ echo "Building mac-security..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-security" ./cmd/mac-security
 echo "Building mac-firewall..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-firewall" ./cmd/mac-firewall
-echo "Building mac-keyvault..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-keyvault" ./cmd/mac-keyvault
+if [[ "$KEYVAULT_DECISION" == build ]]; then
+  echo "Building mac-keyvault..."
+  go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-keyvault" ./cmd/mac-keyvault
+else
+  echo "Keeping the existing bin/mac-keyvault (keyvault keys trust exactly this binary; see --rebuild-keyvault)"
+fi
 
 ln -sf "$BUILD_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-reset"
 ln -sf "$BUILD_DIR/mac-audio-sweep" "$BIN_DIR/mac-audio-sweep"
