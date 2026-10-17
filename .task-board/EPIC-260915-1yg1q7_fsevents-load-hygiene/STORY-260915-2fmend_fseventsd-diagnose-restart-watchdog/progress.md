@@ -1,5 +1,5 @@
 ## Status
-done
+backlog
 
 ## Review
 required
@@ -31,7 +31,7 @@ Landed: PR https://github.com/relux-works/mac-infra/pull/3 merged at exact head 
 2026-09-15T08:01:21Z
 
 ## Last Update
-2026-09-15T09:21:29Z
+2026-10-18T11:18:01Z
 
 ## Assigned To
 claude-opus-5
