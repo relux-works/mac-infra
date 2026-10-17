@@ -214,6 +214,12 @@ func waitForSocket(t *testing.T, cfg ServiceConfig, errCh <-chan error) {
 	t.Fatalf("socket %s did not become reachable", cfg.SocketPath)
 }
 
+// helperRaceEnv drops the race runtime's exit sleep (atexit_sleep_ms, 1s by
+// default) in re-executed helper commands. Under -race every helper would
+// otherwise take a second to exit, which overruns the timing budgets these
+// tests assert. It has no effect without -race.
+const helperRaceEnv = "GORACE=atexit_sleep_ms=0"
+
 func withFakeCoreCommand(t *testing.T, logPath string) {
 	t.Helper()
 	original := execCommandContextCore
@@ -224,6 +230,7 @@ func withFakeCoreCommand(t *testing.T, logPath string) {
 		cmd.Env = append(os.Environ(),
 			"GO_WANT_CORE_COMMAND_HELPER=1",
 			"MAC_INFRA_TEST_COMMAND_LOG="+logPath,
+			helperRaceEnv,
 		)
 		return cmd
 	}

@@ -38,7 +38,7 @@ func withFakeInstallCommand(t *testing.T, logPath string) {
 	build := func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		argv := append([]string{"-test.run=TestInstallCommandHelper", "--", name}, args...)
 		cmd := exec.CommandContext(ctx, os.Args[0], argv...)
-		cmd.Env = append(os.Environ(), "GO_WANT_INSTALL_HELPER=1", "MAC_INFRA_INSTALL_LOG="+logPath)
+		cmd.Env = append(os.Environ(), "GO_WANT_INSTALL_HELPER=1", "MAC_INFRA_INSTALL_LOG="+logPath, helperRaceEnv)
 		return cmd
 	}
 	execCommandCore = func(name string, args ...string) *exec.Cmd { return build(context.Background(), name, args...) }
