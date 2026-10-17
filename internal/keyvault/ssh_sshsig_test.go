@@ -4,9 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -288,4 +292,121 @@ func TestSSHAgentNamespaceRefusedBeforeConfirmation(t *testing.T) {
 	if _, err := client.Sign(a.identities[0].public, sshsigBlob("git", "", "sha512", sum[:])); err != nil || asked != 1 || len(store.signs) != 1 {
 		t.Fatalf("git control: err %v, hook asked %d", err, asked)
 	}
+}
+
+// A write that stops halfway (ENOSPC/EIO) withholds its signature and
+// disables the log: after storage recovers, the next request is still
+// refused instead of continuing the broken line, and reopening the file
+// refuses its incomplete tail. Control: the first request before the fault
+// is signed and recorded.
+func TestSSHAuditPartialWriteDisablesLog(t *testing.T) {
+	a, store, _ := sshFixture(t)
+	a.RequireSSHSigNamespace("git")
+	log, path := sshAuditFile(t)
+	a.AuditTo(log)
+	client := sshClient(t, a)
+	sum := sha512.Sum512([]byte("m"))
+	data := sshsigBlob("git", "", "sha512", sum[:])
+	if _, err := client.Sign(a.identities[0].public, data); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	healthy := log.write
+	log.write = func(line []byte) (int, error) {
+		n, _ := healthy(line[:len(line)/2])
+		return n, errors.New("no space left on device")
+	}
+	if _, err := client.Sign(a.identities[0].public, data); err == nil {
+		t.Fatal("signature returned after a partial audit write")
+	}
+	log.write = healthy
+	if _, err := client.Sign(a.identities[0].public, data); err == nil {
+		t.Fatal("signature returned by a log that failed earlier")
+	}
+	if len(store.signs) != 3 {
+		t.Fatalf("private operations: %d", len(store.signs))
+	}
+	raw, _ := os.ReadFile(path)
+	if bytes.Count(raw, []byte("\n")) != 1 || raw[len(raw)-1] == '\n' {
+		t.Fatalf("log after the fault: %q", raw)
+	}
+	if reopened, err := OpenSSHAuditLog(path); err == nil {
+		reopened.Close()
+		t.Fatal("reopened a log with an incomplete record")
+	}
+}
+
+// A log that cannot be synced is refused at open, before any agent uses it,
+// and a sync failure while appending disables the log like a write failure.
+// Control: the same file opens with a working sync.
+func TestSSHAuditSyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	if log, err := openSSHAuditLog(path, func(*os.File) error { return errors.New("input/output error") }); err == nil {
+		log.Close()
+		t.Fatal("opened a log that cannot be synced")
+	}
+	log, err := OpenSSHAuditLog(path)
+	if err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	defer log.Close()
+	log.sync = func() error { return errors.New("input/output error") }
+	if log.Append(SSHAuditRecord{Outcome: SSHAuditSigned, DigestPrefix: "00"}) == nil {
+		t.Fatal("append succeeded without a sync")
+	}
+	log.sync = func() error { return nil }
+	if log.Append(SSHAuditRecord{Outcome: SSHAuditSigned, DigestPrefix: "01"}) == nil {
+		t.Fatal("log kept working after a failed sync")
+	}
+}
+
+// A request for a pinned key that is refused for nonzero flags or trailing
+// bytes is still audited (reason malformed_request) and never signed; a
+// request for an unknown key is refused unrecorded. Control: the same
+// well-formed request is signed and recorded.
+func TestSSHAgentAuditsMalformedRequestsForPinnedKeys(t *testing.T) {
+	a, store, _ := sshFixture(t)
+	a.RequireSSHSigNamespace("git")
+	log, path := sshAuditFile(t)
+	a.AuditTo(log)
+	pub := a.identities[0].public
+	sum := sha512.Sum512([]byte("m"))
+	data := sshsigBlob("git", "", "sha512", sum[:])
+	request := func(flags uint32, trailing []byte, key []byte) []byte {
+		body := ssh.Marshal(struct {
+			Key, Data []byte
+			Flags     uint32
+		}{key, data, flags})
+		return append(append([]byte{13}, body...), trailing...)
+	}
+	other, _ := ssh.NewPublicKey(&sshTestOtherKey(t).PublicKey)
+	for name, packet := range map[string][]byte{
+		"flags":       request(2, nil, pub.Marshal()),
+		"trailing":    request(0, []byte{0}, pub.Marshal()),
+		"unknown key": request(0, nil, other.Marshal()),
+	} {
+		if got := a.handleSSH(context.Background(), packet); !bytes.Equal(got, []byte{sshFailure}) {
+			t.Fatalf("%s signed", name)
+		}
+	}
+	if got := a.handleSSH(context.Background(), request(0, nil, pub.Marshal())); got[0] != 14 {
+		t.Fatal("control refused")
+	}
+	records := sshAuditRecords(t, path)
+	if len(store.signs) != 1 || len(records) != 3 || records[2].Outcome != SSHAuditSigned {
+		t.Fatalf("signs %d, records %+v", len(store.signs), records)
+	}
+	for _, r := range records[:2] {
+		if r.Outcome != SSHAuditRefused || r.Reason != "malformed_request" || r.Namespace != "git" {
+			t.Errorf("record %+v", r)
+		}
+	}
+}
+
+func sshTestOtherKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }

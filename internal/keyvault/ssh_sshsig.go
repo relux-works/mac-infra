@@ -93,19 +93,29 @@ func sshHashPrefix(hash []byte) string {
 }
 
 // SSHAuditLog appends one JSON line per record to a private file. A write
-// that fails is reported, so the agent withholds the signature it covers.
+// or sync that fails is reported, so the agent withholds the signature it
+// covers, and it disables the log for good: a partly written line is never
+// continued by a later record.
 type SSHAuditLog struct {
-	mu   sync.Mutex
-	file *os.File
+	mu     sync.Mutex
+	file   *os.File
+	write  func([]byte) (int, error)
+	sync   func() error
+	broken bool
 }
 
 // OpenSSHAuditLog opens or creates an append-only 0600 file owned by the
-// current user. It refuses symlinks, hard links and files others can write.
+// current user. It refuses symlinks, hard links, files others can write, a
+// file whose last record is incomplete, and a file it cannot sync.
 func OpenSSHAuditLog(path string) (*SSHAuditLog, error) {
+	return openSSHAuditLog(path, (*os.File).Sync)
+}
+
+func openSSHAuditLog(path string, syncFile func(*os.File) error) (*SSHAuditLog, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("SSH audit log path must be absolute")
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, errors.New("cannot open SSH audit log")
 	}
@@ -119,7 +129,18 @@ func OpenSSHAuditLog(path string) (*SSHAuditLog, error) {
 		file.Close()
 		return nil, errors.New("SSH audit log must be a regular 0600 file owned by you with one link")
 	}
-	return &SSHAuditLog{file: file}, nil
+	if st.Size() > 0 {
+		last := make([]byte, 1)
+		if _, err := file.ReadAt(last, st.Size()-1); err != nil || last[0] != '\n' {
+			file.Close()
+			return nil, errors.New("SSH audit log ends with an incomplete record; inspect it before reuse")
+		}
+	}
+	if err := syncFile(file); err != nil {
+		file.Close()
+		return nil, errors.New("SSH audit log cannot be synced")
+	}
+	return &SSHAuditLog{file: file, write: file.Write, sync: func() error { return syncFile(file) }}, nil
 }
 
 // Append writes and syncs one record as a single line.
@@ -130,10 +151,18 @@ func (l *SSHAuditLog) Append(record SSHAuditRecord) error {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if _, err := l.file.Write(append(line, '\n')); err != nil {
+	if l.broken {
+		return errors.New("SSH audit log failed earlier")
+	}
+	if _, err := l.write(append(line, '\n')); err != nil {
+		l.broken = true
 		return err
 	}
-	return l.file.Sync()
+	if err := l.sync(); err != nil {
+		l.broken = true
+		return err
+	}
+	return nil
 }
 
 func (l *SSHAuditLog) Close() error { return l.file.Close() }

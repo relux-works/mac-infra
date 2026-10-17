@@ -121,19 +121,33 @@ replaces the click with two controls:
   `address`, `version`, `fingerprint`, `namespace`, `hash_algorithm`,
   `message_hash_prefix` (first 8 bytes of the SSHSIG message hash, hex),
   `digest_prefix` (first 8 bytes of the SHA-256 of the signed data, hex), and
-  `client_pid` (kernel-reported, when available). It never contains the
-  signed data, the message or a full hash. The file is created `0600`;
-  symlinks, hard links and files that others can write are refused, and the
-  agent then exits before its socket exists. A signature is returned only
-  after its record is written and synced; if that write fails, the
-  signature is withheld. Refusals are recorded best effort. Requests for an
-  unknown key and requests refused before parsing (agent stopping or
-  expired) are not recorded.
+  `client_pid` (when available). It never contains the signed data, the
+  message or a full hash.
+  - The file is created `0600`. Symlinks, hard links, files that others can
+    write, a file whose last line is incomplete and a file that cannot be
+    synced are all refused, and the agent then exits before its socket
+    exists.
+  - A signature is returned only after its record is written and synced. If
+    the write or the sync fails, the signature is withheld and the log
+    refuses every later record, so the agent signs nothing more until it is
+    restarted with a sound log.
+  - Refusals for a pinned key are recorded best effort, including requests
+    refused for nonzero flags or trailing bytes (`malformed_request`).
+  - Not recorded: requests whose key blob cannot be parsed, requests for an
+    unknown key, and requests refused before parsing (agent stopping or
+    expired).
+  - `client_pid` is the pid the kernel reports for the peer of the
+    connection, taken once when the client connects. It is a diagnostic
+    hint, not proof of which process asked for a signature: a connection can
+    be passed to or inherited by another process, and a pid can be reused
+    after its process exits.
 
 Residuals:
 
 - Any process running as the same user can connect to the socket and
-  obtain git-namespace signatures. The socket mode (`0600` in an owned
+  obtain git-namespace signatures.
+- Namespace `git` binds the signature to git's namespace, not to a Git
+  object: such a client can have any message signed under it. The socket mode (`0600` in an owned
   `0700` directory) and the kernel UID check keep other users out, not
   other processes of this user.
 - The same user can also edit or delete the audit log. It is a record for

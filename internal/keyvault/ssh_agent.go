@@ -267,13 +267,16 @@ func (a *SSHAgent) handleSSHFrom(ctx context.Context, packet []byte, pid int) []
 			Key   []byte
 			Data  []byte
 			Flags uint32
+			Rest  []byte `ssh:"rest"`
 		}
-		if ssh.Unmarshal(packet[1:], &req) != nil || req.Flags != 0 {
+		if ssh.Unmarshal(packet[1:], &req) != nil {
 			return []byte{sshFailure}
 		}
+		// A request for a pinned key is audited even when it is refused for
+		// its flags or trailing bytes; one for no pinned key is not.
 		for _, id := range a.identities {
 			if bytes.Equal(req.Key, id.public.Marshal()) {
-				return a.signAudited(ctx, id, req.Data, pid)
+				return a.signAudited(ctx, id, req.Data, pid, req.Flags != 0 || len(req.Rest) != 0)
 			}
 		}
 	}
@@ -283,14 +286,17 @@ func (a *SSHAgent) handleSSHFrom(ctx context.Context, packet []byte, pid int) []
 // signAudited runs one signature for a pinned identity and records its
 // outcome. With an audit log, a signature whose record cannot be written is
 // withheld.
-func (a *SSHAgent) signAudited(ctx context.Context, id sshIdentity, data []byte, pid int) []byte {
+func (a *SSHAgent) signAudited(ctx context.Context, id sshIdentity, data []byte, pid int, malformed bool) []byte {
 	digest := sha256.Sum256(data)
 	record := SSHAuditRecord{Address: id.address.Service + "/" + id.address.Purpose, Version: id.address.Version,
 		Fingerprint: ssh.FingerprintSHA256(id.public), DigestPrefix: sshHashPrefix(digest[:]), ClientPID: pid}
 	if sig, err := ParseSSHSig(data); err == nil {
 		record.Namespace, record.HashAlgorithm, record.MessageHashPrefix = sig.Namespace, sig.HashAlgorithm, sshHashPrefix(sig.MessageHash)
 	}
-	response, reason := a.sign(ctx, id, digest, record.Namespace)
+	response, reason := []byte{sshFailure}, "malformed_request"
+	if !malformed {
+		response, reason = a.sign(ctx, id, digest, record.Namespace)
+	}
 	if a.audit == nil {
 		return response
 	}
