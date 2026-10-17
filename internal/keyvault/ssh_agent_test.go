@@ -844,10 +844,13 @@ type gatedStore struct {
 	blockList  atomic.Bool
 	blockSign  atomic.Bool
 	listCalled chan struct{}
+	signCalled chan struct{}
+	// listSkip lets this many armed List calls pass before one blocks.
+	listSkip atomic.Int32
 }
 
 func (s *gatedStore) List() ([]Item, error) {
-	if s.blockList.Load() {
+	if s.blockList.Load() && s.listSkip.Add(-1) < 0 {
 		select {
 		case s.listCalled <- struct{}{}:
 		default:
@@ -859,6 +862,10 @@ func (s *gatedStore) List() ([]Item, error) {
 
 func (s *gatedStore) Sign(label string, digest []byte) ([]byte, error) {
 	if s.blockSign.Load() {
+		select {
+		case s.signCalled <- struct{}{}:
+		default:
+		}
 		<-s.gate
 	}
 	return s.sshFixedStore.Sign(label, digest)
@@ -867,7 +874,7 @@ func (s *gatedStore) Sign(label string, digest []byte) ([]byte, error) {
 func gatedFixture(t *testing.T) (*SSHAgent, *gatedStore) {
 	t.Helper()
 	_, fixed, addr := sshFixture(t)
-	store := &gatedStore{sshFixedStore: fixed, gate: make(chan struct{}), listCalled: make(chan struct{}, 1)}
+	store := &gatedStore{sshFixedStore: fixed, gate: make(chan struct{}), listCalled: make(chan struct{}, 1), signCalled: make(chan struct{}, 1)}
 	t.Cleanup(func() {
 		select {
 		case <-store.gate:
@@ -927,22 +934,58 @@ func TestSSHAgentWallClockExpiry(t *testing.T) {
 }
 
 // Claim: a request whose record resolution blocks across the deadline never
-// reaches the private signing operation once it resumes.
+// reaches the private signing operation once it resumes, whether it blocks
+// in the agent's own Describe (first resolution) or in Manager.Sign's
+// resolution right before the backend call (second).
 func TestSSHAgentNoPrivateOperationAfterExpiry(t *testing.T) {
+	for name, skip := range map[string]int32{"agent describe": 0, "manager sign resolution": 1} {
+		t.Run(name, func(t *testing.T) {
+			a, store := gatedFixture(t)
+			a.ExpireAt(time.Now().Add(200 * time.Millisecond))
+			store.listSkip.Store(skip)
+			store.blockList.Store(true)
+			result := make(chan []byte, 1)
+			req := append([]byte{13}, ssh.Marshal(struct {
+				Key, Data []byte
+				Flags     uint32
+			}{a.identities[0].public.Marshal(), []byte("late"), 0})...)
+			go func() { result <- a.handleSSH(context.Background(), req) }()
+			select {
+			case <-store.listCalled:
+			case <-time.After(3 * time.Second):
+				t.Fatal("the request never blocked in the chosen resolution")
+			}
+			time.Sleep(400 * time.Millisecond)
+			close(store.gate)
+			if got := <-result; !bytes.Equal(got, []byte{sshFailure}) || len(store.signs) != 0 {
+				t.Fatalf("response %v, private signs %d", got, len(store.signs))
+			}
+		})
+	}
+}
+
+// Claim: a private operation that was already running when the deadline
+// passed (here: the backend blocks across it, with no context cancellation
+// and no watchdog) completes but its signature is not returned.
+func TestSSHAgentDiscardsSignatureFinishedAfterExpiry(t *testing.T) {
 	a, store := gatedFixture(t)
 	a.ExpireAt(time.Now().Add(200 * time.Millisecond))
-	store.blockList.Store(true)
+	store.blockSign.Store(true)
 	result := make(chan []byte, 1)
 	req := append([]byte{13}, ssh.Marshal(struct {
 		Key, Data []byte
 		Flags     uint32
-	}{a.identities[0].public.Marshal(), []byte("late"), 0})...)
+	}{a.identities[0].public.Marshal(), []byte("inflight"), 0})...)
 	go func() { result <- a.handleSSH(context.Background(), req) }()
-	<-store.listCalled
+	select {
+	case <-store.signCalled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the request never reached the backend")
+	}
 	time.Sleep(400 * time.Millisecond)
 	close(store.gate)
-	if got := <-result; !bytes.Equal(got, []byte{sshFailure}) || len(store.signs) != 0 {
-		t.Fatalf("response %v, private signs %d", got, len(store.signs))
+	if got := <-result; !bytes.Equal(got, []byte{sshFailure}) || len(store.signs) != 1 {
+		t.Fatalf("response %v, private signs %d (want the computed signature discarded)", got, len(store.signs))
 	}
 }
 

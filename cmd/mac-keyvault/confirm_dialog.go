@@ -39,7 +39,9 @@ set r to display dialog (item 1 of argv) with title "mac-keyvault" buttons {"Den
 return (button returned of r) & "|" & ((gave up of r) as text)
 end run`
 
-var confirmFields = map[string]bool{"purpose": true, "address": true, "version": true, "fingerprint": true, "sha256": true, "until": true}
+// confirmFields maps each accepted member to its JSON type: '"' string,
+// '0' non-negative integer.
+var confirmFields = map[string]byte{"purpose": '"', "address": '"', "version": '0', "fingerprint": '"', "sha256": '"', "until": '"'}
 
 var (
 	fingerprintPattern = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
@@ -92,8 +94,33 @@ func readConfirmation(r io.Reader) (keyvault.SSHConfirmation, error) {
 		return req, errors.New("malformed request")
 	}
 	for _, name := range object.Names() {
-		if !confirmFields[name] {
+		raw, _ := object.Get(name)
+		kind, known := confirmFields[name]
+		if !known {
 			return req, errors.New("unknown field")
+		}
+		// Exact JSON types: a null or another type must not collapse into
+		// a zero value that later passes as "absent".
+		first := bytes.TrimSpace(raw)
+		if len(first) == 0 || (kind == '"' && first[0] != '"') || (kind == '0' && (first[0] < '0' || first[0] > '9')) {
+			return req, errors.New("wrong field type")
+		}
+	}
+	required := []string{"purpose", "address", "version", "fingerprint"}
+	if purposeRaw, _ := object.Get("purpose"); string(bytes.TrimSpace(purposeRaw)) == `"`+keyvault.SSHConfirmUnlock+`"` {
+		required = append(required, "until")
+		if object.Has("sha256") {
+			return req, errors.New("an unlock request carries no sha256")
+		}
+	} else {
+		required = append(required, "sha256")
+		if object.Has("until") {
+			return req, errors.New("a sign request carries no until")
+		}
+	}
+	for _, name := range required {
+		if !object.Has(name) {
+			return req, errors.New("missing " + name)
 		}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))

@@ -640,6 +640,13 @@ type SignResult struct {
 // the backend signs: digest length, address inside the namespace, readable
 // and valid record, registry row, usages ∋ sign, validity unexpired.
 func (m *Manager) Sign(addr Address, digest []byte) (SignResult, error) {
+	return m.SignIf(addr, digest, nil)
+}
+
+// SignIf is Sign with a final gate: allow, when set, runs after resolution
+// and policy checks, immediately before the private operation, and its
+// error refuses the signature without touching the key.
+func (m *Manager) SignIf(addr Address, digest []byte, allow func() error) (SignResult, error) {
 	if err := ValidateDigest(digest); err != nil {
 		return SignResult{}, err
 	}
@@ -655,6 +662,11 @@ func (m *Manager) Sign(addr Address, digest []byte) (SignResult, error) {
 	}
 	if err := RequireOwnLabel(key.Label); err != nil {
 		return SignResult{}, err
+	}
+	if allow != nil {
+		if err := allow(); err != nil {
+			return SignResult{}, err
+		}
 	}
 	der, err := m.backend.Sign(key.Label, digest)
 	if err != nil {

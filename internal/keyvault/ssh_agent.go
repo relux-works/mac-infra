@@ -267,8 +267,15 @@ func (a *SSHAgent) handleSSH(ctx context.Context, packet []byte) []byte {
 			if ctx.Err() != nil || a.expired() {
 				return []byte{sshFailure}
 			}
-			result, err := a.manager.Sign(id.address, digest[:])
-			if ctx.Err() != nil || err != nil || !bytes.Equal(result.Key.SPKI, id.key.SPKI) {
+			result, err := a.manager.SignIf(id.address, digest[:], func() error {
+				if ctx.Err() != nil || a.expired() {
+					return errors.New("agent stopped or unlock expired")
+				}
+				return nil
+			})
+			// A call that was already inside Security.framework when the
+			// deadline passed is computed but never returned.
+			if ctx.Err() != nil || a.expired() || err != nil || !bytes.Equal(result.Key.SPKI, id.key.SPKI) {
 				return []byte{sshFailure}
 			}
 			ok, err := VerifyDigest(id.key.SPKI, digest[:], result.Signature)
