@@ -12,7 +12,9 @@ import (
 
 // fakeHost simulates socketfilterfw and launchctl with their real output
 // formats. Mutating commands change the state; failArgv makes one exact
-// command fail, ignoreArgv makes one exit 0 without effect.
+// command fail, ignoreArgv makes one exit 0 without effect. Like the real
+// tools it fails on a cancelled context, and like launchd it refuses to
+// bootstrap a disabled service.
 type fakeHost struct {
 	state      State
 	failArgv   map[string]bool
@@ -24,7 +26,10 @@ func newFakeHost(state State) *fakeHost {
 	return &fakeHost{state: state, failArgv: map[string]bool{}, ignoreArgv: map[string]bool{}}
 }
 
-func (h *fakeHost) Run(_ context.Context, path string, args ...string) ([]byte, error) {
+func (h *fakeHost) Run(ctx context.Context, path string, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !allowedArgv(path, args) {
 		return nil, fmt.Errorf("fake host: argv outside the allowlist: %s %v", path, args)
 	}
@@ -90,6 +95,9 @@ func (h *fakeHost) Run(_ context.Context, path string, args ...string) ([]byte, 
 			if args[0] == "bootstrap" && args[2] != "" {
 				spec, _ := LookupService(service.Name)
 				if spec.PlistPath == args[2] {
+					if service.Disabled {
+						return []byte("Bootstrap failed: 5: Input/output error\n"), &ExitError{Code: 5}
+					}
 					service.Loaded = true
 				}
 				continue

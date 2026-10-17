@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Claim: install announces the snapshot digest before any sudo call, and a
@@ -84,5 +85,120 @@ func TestDaemonRefusesUnknownRequestFields(t *testing.T) {
 	}
 	if response := send(`{"action":"ping"}`); !response.OK {
 		t.Fatalf("control ping response = %+v", response)
+	}
+}
+
+// Claim: a request larger than maxRequestBytes is refused even when it is a
+// valid ping padded with whitespace, which an unbounded reader would serve;
+// the same ping without padding is served (control).
+func TestDaemonRefusesOversizedRequest(t *testing.T) {
+	socketPath := tempSocketPath(t, "mic-big")
+	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid()}).serve()
+	}()
+	waitForSocket(t, cfg, errCh)
+	send := func(raw string) Response {
+		conn, err := net.Dial("unix", socketPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		go func() { _, _ = conn.Write([]byte(raw)) }()
+		var response Response
+		if err := json.NewDecoder(conn).Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	if response := send(`{"action":"ping"` + strings.Repeat(" ", maxRequestBytes) + `}`); response.OK || response.Error == "" {
+		t.Fatalf("oversized request response = %+v", response)
+	}
+	if response := send(`{"action":"ping"}`); !response.OK {
+		t.Fatalf("control ping response = %+v", response)
+	}
+}
+
+func pingOnce(socketPath string) bool {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Write([]byte(`{"action":"ping"}` + "\n")); err != nil {
+		return false
+	}
+	var response Response
+	return json.NewDecoder(conn).Decode(&response) == nil && response.OK
+}
+
+func eventuallyPings(socketPath string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if pingOnce(socketPath) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// Claim: the daemon serves at most maxConnections requests at once and
+// closes further connections unread; a slot freed by a client is reused
+// (control).
+func TestDaemonCapsConcurrentConnections(t *testing.T) {
+	socketPath := tempSocketPath(t, "mic-cap")
+	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid()}).serve()
+	}()
+	waitForSocket(t, cfg, errCh)
+	var idle []net.Conn
+	for i := 0; i < maxConnections; i++ {
+		conn, err := net.Dial("unix", socketPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idle = append(idle, conn)
+	}
+	if pingOnce(socketPath) {
+		t.Fatal("a connection beyond the cap was served")
+	}
+	for _, conn := range idle {
+		_ = conn.Close()
+	}
+	if !eventuallyPings(socketPath, 3*time.Second) {
+		t.Fatal("control: no slot was freed after the idle clients left")
+	}
+}
+
+// Claim: clients that send a request but never read a large response do
+// not hold their slots forever: the write deadline frees them and a new
+// ping is served. Without the deadline all slots stay blocked.
+func TestDaemonFreesSlotsOfStalledReaders(t *testing.T) {
+	original := responseWriteTimeout
+	responseWriteTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { responseWriteTimeout = original })
+	socketPath := tempSocketPath(t, "mic-stall")
+	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid()}).serve()
+	}()
+	waitForSocket(t, cfg, errCh)
+	request := []byte(`{"action":"` + strings.Repeat("x", 200<<10) + `"}` + "\n")
+	for i := 0; i < maxConnections; i++ {
+		conn, err := net.Dial("unix", socketPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		go func() { _, _ = conn.Write(request) }()
+	}
+	if !eventuallyPings(socketPath, 3*time.Second) {
+		t.Fatal("stalled readers kept every slot")
 	}
 }

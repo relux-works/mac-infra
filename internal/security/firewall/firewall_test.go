@@ -92,6 +92,7 @@ func TestParseConfigStrictness(t *testing.T) {
 		"missing mode":    strings.Replace(valid, `"mode":"listed",`, "", 1),
 		"relative path":   strings.Replace(valid, `"allow":[]`, `"allow":["Applications/X.app"]`, 1),
 		"unclean path":    strings.Replace(valid, `"allow":[]`, `"allow":["/Applications/../X.app"]`, 1),
+		"trailing space":  strings.Replace(valid, `"allow":[]`, `"allow":["/Applications/X.app "]`, 1),
 		"duplicate":       strings.Replace(valid, `"allow":[],"block":[]`, `"allow":["/X.app"],"block":["/X.app"]`, 1),
 		"unknown service": strings.Replace(valid, `["apache"]`, `["sshd"]`, 1),
 		"too large":       valid + strings.Repeat(" ", MaxConfigBytes),
@@ -414,5 +415,109 @@ func TestSeedConfigRoundTrip(t *testing.T) {
 	host := newFakeHost(state)
 	if report := (Engine{Runner: host, Resolver: fakeResolver{}}).Apply(ctx, cfg, nil); report.Outcome != OutcomeNoChange {
 		t.Fatalf("seed apply: %+v", report)
+	}
+}
+
+// swappingResolver passes the first signature check and fails later ones,
+// like an app bundle replaced right after it was verified.
+type swappingResolver struct {
+	fakeResolver
+	checks int
+}
+
+func (r *swappingResolver) VerifySigned(ctx context.Context, path string) (AppIdentity, error) {
+	r.checks++
+	if r.checks > 1 {
+		return AppIdentity{}, errors.New("code object is not signed at all")
+	}
+	return r.fakeResolver.VerifySigned(ctx, path)
+}
+
+// Claim: an allowed app is re-verified after apply; if its signature no
+// longer holds, the apply is rolled back and the entry removed. The control
+// in TestLooseningRequiresAnchoredSignature shows a stable signature applies.
+func TestAllowedAppReverifiedAfterApply(t *testing.T) {
+	signed := makeApp(t, "Swapped.app")
+	cfg := ownerConfig()
+	cfg.Apps.Allow = []string{signed}
+	host := newFakeHost(hostLikeState())
+	resolver := &swappingResolver{fakeResolver: fakeResolver{signed: map[string]AppIdentity{signed: {Identifier: "com.example.x", TeamID: "T"}}}}
+	report := Engine{Runner: host, Resolver: resolver}.Apply(ctx, cfg, nil)
+	if report.Outcome != OutcomeRolledBack || !strings.Contains(report.Error, "re-verify") {
+		t.Fatalf("outcome = %s, error = %s", report.Outcome, report.Error)
+	}
+	if host.findApp(signed) >= 0 {
+		t.Fatal("swapped app is still listed after rollback")
+	}
+}
+
+// Claim: a rollback after the service steps ran restores Apache exactly,
+// whether it was enabled or already disabled while loaded; the fake refuses
+// to bootstrap a disabled service, as launchd does.
+func TestServiceRollbackRestoresLoadedService(t *testing.T) {
+	for name, disabled := range map[string]bool{"enabled and loaded": false, "disabled and loaded": true} {
+		t.Run(name, func(t *testing.T) {
+			cfg := ownerConfig()
+			cfg.Stealth = ptr(true)
+			state := hostLikeState()
+			state.Services[0].Disabled = disabled
+			host := newFakeHost(state)
+			host.ignoreArgv[SocketFilterFW+" --setstealthmode on"] = true
+			report := Engine{Runner: host, Resolver: fakeResolver{}}.Apply(ctx, cfg, nil)
+			if report.Outcome != OutcomeRolledBack {
+				t.Fatalf("outcome = %s (%s, drift %s)", report.Outcome, report.Error, report.Drift)
+			}
+			if got := host.state.Services[0]; !got.Loaded || got.Disabled != disabled {
+				t.Fatalf("service after rollback = %+v, want loaded, disabled=%v", got, disabled)
+			}
+		})
+	}
+}
+
+// cancellingRunner cancels the apply's context right after the first
+// mutating command, as an expired request deadline would.
+type cancellingRunner struct {
+	*fakeHost
+	cancel func()
+}
+
+func (r cancellingRunner) Run(ctx context.Context, path string, args ...string) ([]byte, error) {
+	out, err := r.fakeHost.Run(ctx, path, args...)
+	if !isReadOnlyCommand(strings.Join(append([]string{path}, args...), " ")) {
+		r.cancel()
+	}
+	return out, err
+}
+
+// Claim: when the apply's context expires after a mutation, the remaining
+// steps fail but the rollback still runs on its own budget and restores
+// the pre-apply state.
+func TestRollbackRunsAfterApplyDeadline(t *testing.T) {
+	cfg := ownerConfig()
+	cfg.Stealth = ptr(true)
+	host := newFakeHost(hostLikeState())
+	pre := host.state.comparable()
+	applyCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	report := Engine{Runner: cancellingRunner{host, cancel}, Resolver: fakeResolver{}}.Apply(applyCtx, cfg, nil)
+	if report.Outcome != OutcomeRolledBack || !strings.Contains(report.Error, "context canceled") {
+		t.Fatalf("outcome = %s (%s, drift %s)", report.Outcome, report.Error, report.Drift)
+	}
+	if host.state.comparable() != pre {
+		t.Fatalf("after rollback: %s, want %s", host.state.comparable(), pre)
+	}
+}
+
+// Claim: rollback equality cannot be fooled by an entry whose name looks
+// like a list of entries; the plain two-entry state is the control.
+func TestComparableHasNoDelimiterCollision(t *testing.T) {
+	one := State{Apps: []App{{Name: "/tmp/a=true,/tmp/b", Allowed: true}}}
+	two := State{Apps: []App{{Name: "/tmp/a", Allowed: true}, {Name: "/tmp/b", Allowed: true}}}
+	if one.comparable() == two.comparable() {
+		t.Fatalf("collision: %s", one.comparable())
+	}
+	same := State{Apps: []App{{Name: "/tmp/b", Allowed: true}, {Name: "/tmp/a", Allowed: true}}}
+	if two.comparable() != same.comparable() {
+		t.Fatal("control: order of entries changed equality")
 	}
 }

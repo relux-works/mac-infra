@@ -506,3 +506,36 @@ func withInspectSleepPrevention(t *testing.T, fn func() (maccore.SleepPrevention
 		inspectSleepPrevention = original
 	})
 }
+
+// Claim: install refuses, before any install or sudo step, a stray argument
+// (which would make flag parsing drop a later --expect-sha256) and an empty
+// or malformed digest; a well-formed digest reaches the installer with that
+// exact value (control).
+func TestInstallRejectsAmbiguousDigestArguments(t *testing.T) {
+	var got []string
+	original := installService
+	installService = func(_ maccore.ServiceConfig, _ string, _, _ int, options maccore.InstallOptions) error {
+		got = append(got, options.ExpectedSHA256)
+		return errors.New("stub installer")
+	}
+	t.Cleanup(func() { installService = original })
+	digest := strings.Repeat("ab", 32)
+	for _, args := range [][]string{
+		{"install", "ignored", "--expect-sha256", digest},
+		{"install", "--expect-sha256", ""},
+		{"install", "--expect-sha256", "deadbeef"},
+		{"install", "--expect-sha256", strings.Repeat("g", 64)},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 2 {
+			t.Errorf("%q: code %d, stderr %s", args, code, stderr.String())
+		}
+	}
+	if len(got) != 0 {
+		t.Fatalf("installer reached with %q", got)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"install", "--expect-sha256", digest}, &stdout, &stderr); code != 1 || len(got) != 1 || got[0] != digest {
+		t.Fatalf("control: code %d, installer got %q, stderr %s", code, got, stderr.String())
+	}
+}

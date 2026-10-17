@@ -47,7 +47,8 @@ Exit codes: 0 success, 1 refused / failed / rolled back, 2 usage.
   - `exact` also removes path entries that are not listed. Bundle-id entries
     are reported as `unmanaged` and left untouched.
 - App paths must be clean absolute paths to an existing file or bundle, not
-  symlinks. A config path also matches an entry that socketfilterfw lists
+  symlinks, without leading or trailing whitespace (socketfilterfw pads its
+  listing, so such names could not be read back unambiguously). A config path also matches an entry that socketfilterfw lists
   under the bundle's `CFBundleIdentifier`.
 - `services.disable` accepts only names from the code-reviewed allowlist.
   v1 has `apache` = `system/org.apache.httpd`. Disabling means
@@ -68,6 +69,12 @@ running as that user can request a change. That is the point: the operator
   into the plan and the audit.
   - `--strict` is not used: it also rejects validly signed apps over Finder
     metadata (for example Google Chrome).
+  - The signature check guards against operator mistakes (allowing unsigned
+    or ad-hoc code by accident). It is not a boundary against a malicious
+    process running as the client UID: that process may replace the bundle
+    between the check and `socketfilterfw --add` (the helper re-verifies after
+    apply, but a swap-and-restore passes both checks), and it may loosen the
+    global toggles anyway.
 - Existing exceptions that stay as they are need no signature (for example an
   unsigned app that is already allowed).
 - Global loosening toggles (stealth off, block-all off, signed auto-allow on)
@@ -78,6 +85,13 @@ running as that user can request a change. That is the point: the operator
 - The helper executes only fixed argv from a vocabulary of `socketfilterfw`,
   `launchctl` (allowlisted labels only), `codesign`, `plutil` and `lsof`. It
   never runs a shell.
+- Requests are bounded: 256 KiB, a 10 s read deadline, a 10 s write deadline,
+  16 concurrent connections (further ones are closed unread). One firewall
+  operation runs at a time; a request that cannot start within 30 s is
+  refused as busy.
+- JSON duplicate keys resolve to the last value (Go's decoder). This gives the
+  client UID nothing it could not request directly; the CLI always sends its
+  own re-encoded config, so the plan it shows is the config it applies.
 
 ## Apply semantics
 
@@ -90,6 +104,10 @@ running as that user can request a change. That is the point: the operator
 4. Run the steps. Then read back and re-plan; the result must be empty.
 5. If any step or the readback fails, every started step is undone in reverse
    (best effort, continuing past failing undos) and the state is read back.
+   Rollback runs on its own two-minute budget, so an apply that ran out of
+   time can still undo its changes. Undoing a service stop enables the
+   service, loads it, and restores its disabled override, because launchd
+   will not load a disabled service.
    - `rolled_back`: equal to the pre-apply state, except that the firewall
      stays on if this apply turned it on.
    - `rollback_failed`: an incident; the report carries the drift.
@@ -105,6 +123,8 @@ A second apply of the same config plans zero steps.
 Once a firewall is marked managed, the helper checks every five minutes and
 turns it back on if anything turned it off. This is tightening only, it is
 audited as `enforce`, and it does nothing before the first successful apply.
+Unlike apply, it is not gated on the audit: a full or broken audit store must
+not keep the firewall off. Audit failures go to the daemon's stderr log.
 
 The audit trail and marker live in
 `/Library/PrivilegedHelperTools/works.relux.mac-infra/firewall/`:
@@ -126,7 +146,8 @@ mac-firewall status
 ```
 
 `install` refuses before sudo if the executable differs from the reviewed
-digest.
+digest. It also refuses stray arguments (they would end flag parsing before a
+later `--expect-sha256`) and an empty or malformed digest.
 
 ## Limits
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/relux-works/mac-infra/internal/maccore"
 )
@@ -18,6 +19,7 @@ var (
 
 var (
 	inspectService                = maccore.InspectService
+	installService                = maccore.InstallService
 	inspectSleepPrevention        = maccore.InspectSleepPrevention
 	inspectDisplaySleepPrevention = maccore.InspectDisplaySleepPrevention
 	inspectIdleLockPrevention     = maccore.InspectIdleLockPrevention
@@ -96,6 +98,18 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// A stray argument stops flag parsing and would silently drop a later
+	// --expect-sha256; an empty value (an unset variable) would unpin.
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "install takes no arguments, got %q\n", fs.Args())
+		return 2
+	}
+	pinned := false
+	fs.Visit(func(f *flag.Flag) { pinned = pinned || f.Name == "expect-sha256" })
+	if pinned && !isSHA256Hex(*expected) {
+		fmt.Fprintf(stderr, "--expect-sha256 must be 64 hex characters, got %q\n", *expected)
+		return 2
+	}
 
 	path, err := resolveExecutablePath()
 	if err != nil {
@@ -109,7 +123,7 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "installing: %s\nsha256: %s\nsize: %d bytes\n", path, sha, size)
 		},
 	}
-	if err := maccore.InstallService(cfg, path, os.Getuid(), os.Getgid(), options); err != nil {
+	if err := installService(cfg, path, os.Getuid(), os.Getgid(), options); err != nil {
 		fmt.Fprintf(stderr, "install failed: %v\n", err)
 		return 1
 	}
@@ -148,6 +162,18 @@ func runInstallDigest(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "executable: %s\nversion: %s %s %s\nsha256: %s\nsize: %d bytes\n", path, Version, Commit, BuildDate, digest, size)
 	fmt.Fprintf(stdout, "install with: mac-infra-core install --expect-sha256 %s\n", digest)
 	return 0
+}
+
+func isSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+			return false
+		}
+	}
+	return true
 }
 
 func runUninstall(args []string, stdout, stderr io.Writer) int {

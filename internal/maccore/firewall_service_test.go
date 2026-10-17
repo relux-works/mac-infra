@@ -66,7 +66,9 @@ func (s *memoryFirewallStore) Managed() (bool, error)     { return s.managed, ni
 func (s *memoryFirewallStore) MarkManaged(_ []byte) error { s.managed = true; return nil }
 
 func testFirewallService(runner firewall.Runner, store firewallStore) *firewallService {
-	return &firewallService{engine: firewall.Engine{Runner: runner}, store: store, now: func() time.Time { return time.Unix(0, 0) }}
+	service := newFirewallServiceWith(firewall.Engine{Runner: runner}, store)
+	service.now = func() time.Time { return time.Unix(0, 0) }
+	return service
 }
 
 func ownerFirewallConfig() *firewall.Config {
@@ -206,4 +208,61 @@ func TestTrustedFirewallStoreRefusesUntrustedPaths(t *testing.T) {
 			t.Fatal("append below a group-writable parent succeeded")
 		}
 	})
+}
+
+// Claim: a firewall request that cannot get the turn in time is refused as
+// busy without running a command; once the turn is free the same request
+// is served (control).
+func TestFirewallBusyRefusesInsteadOfQueueing(t *testing.T) {
+	runner := &staticFirewallRunner{}
+	service := testFirewallService(runner, &memoryFirewallStore{})
+	service.queueTimeout = 20 * time.Millisecond
+	service.turn <- struct{}{}
+	if response := service.handle(ActionFirewallPlan, ownerFirewallConfig(), 501, 1); response.OK || !strings.Contains(response.Error, "busy") || len(runner.calls) != 0 {
+		t.Fatalf("busy response = %+v, calls %v", response, runner.calls)
+	}
+	service.release()
+	if response := service.handle(ActionFirewallPlan, ownerFirewallConfig(), 501, 1); !response.OK {
+		t.Fatalf("control plan = %+v", response)
+	}
+}
+
+// Claim: enforcement still turns the firewall on when the audit store fails
+// (intentional asymmetry with apply, which fails closed), and the failure is
+// logged instead of discarded.
+func TestEnforcementLogsAuditFailure(t *testing.T) {
+	var log strings.Builder
+	original := enforcementLog
+	enforcementLog = &log
+	t.Cleanup(func() { enforcementLog = original })
+	runner := &staticFirewallRunner{}
+	testFirewallService(runner, &memoryFirewallStore{managed: true, appendErr: errors.New("disk full")}).enforce()
+	if got := strings.Join(runner.mutations(), ";"); got != firewall.SocketFilterFW+" --setglobalstate on" {
+		t.Fatalf("mutations = %q", got)
+	}
+	if !strings.Contains(log.String(), "audit failed: disk full") {
+		t.Fatalf("log = %q", log.String())
+	}
+}
+
+// Claim: a hard-linked managed marker is refused before it is truncated, so
+// the other link keeps its bytes.
+func TestMarkManagedRefusalPreservesHardLink(t *testing.T) {
+	store, parent := testStore(t)
+	if err := store.Append([]byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(parent, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(sentinel, filepath.Join(parent, firewallStateDirectory, firewallManagedFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkManaged([]byte(`{}`)); err == nil {
+		t.Fatal("marker write through a hard link succeeded")
+	}
+	if data, _ := os.ReadFile(sentinel); string(data) != "keep me\n" {
+		t.Fatalf("sentinel = %q", data)
+	}
 }

@@ -144,8 +144,13 @@ func BuildPlan(ctx context.Context, cfg Config, current State, resolver Resolver
 				Argv: [][]string{{Launchctl, "disable", target}}, Undo: [][]string{{Launchctl, "enable", target}}})
 		}
 		if service.Loaded {
+			// The service is disabled by the time it is stopped, and launchd
+			// refuses to bootstrap a disabled service: undo enables, loads,
+			// then restores the disabled override. Undoing the disable step
+			// (if any) runs after this and enables it again.
 			plan.Steps = append(plan.Steps, Step{Kind: StepServiceStop, Target: spec.Label,
-				Argv: [][]string{{Launchctl, "bootout", target}}, Undo: [][]string{{Launchctl, "bootstrap", "system", spec.PlistPath}}})
+				Argv: [][]string{{Launchctl, "bootout", target}},
+				Undo: [][]string{{Launchctl, "enable", target}, {Launchctl, "bootstrap", "system", spec.PlistPath}, {Launchctl, "disable", target}}})
 		}
 	}
 	return plan, nil

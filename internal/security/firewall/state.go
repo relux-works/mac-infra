@@ -269,16 +269,17 @@ func nonEmptyLines(raw string) []string {
 }
 
 // comparable reduces a state to what rollback must restore. The global
-// enabled state is excluded on purpose: the firewall stays on.
+// enabled state is excluded on purpose: the firewall stays on. Names are
+// quoted so that no legal path can collide with a list of other entries.
 func (s State) comparable() string {
 	apps := make([]string, 0, len(s.Apps))
 	for _, app := range s.Apps {
-		apps = append(apps, fmt.Sprintf("%s=%t", app.Name, app.Allowed))
+		apps = append(apps, fmt.Sprintf("%q=%t", app.Name, app.Allowed))
 	}
 	sort.Strings(apps)
 	services := make([]string, 0, len(s.Services))
 	for _, service := range s.Services {
-		services = append(services, fmt.Sprintf("%s=%t/%t", service.Label, service.Loaded, service.Disabled))
+		services = append(services, fmt.Sprintf("%q=%t/%t", service.Label, service.Loaded, service.Disabled))
 	}
 	sort.Strings(services)
 	return fmt.Sprintf("block_all=%t stealth=%t signed=%t/%t apps=[%s] services=[%s]",

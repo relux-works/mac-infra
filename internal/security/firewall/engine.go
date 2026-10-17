@@ -4,7 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
+
+// RollbackTimeout bounds the undo commands and the readback that follow a
+// failed apply, independent of the apply's own deadline.
+const RollbackTimeout = 2 * time.Minute
 
 const (
 	OutcomeStatus         = "status"
@@ -99,6 +104,8 @@ func (e Engine) Apply(ctx context.Context, cfg Config, beforeMutation func(Plan)
 			failure = fmt.Errorf("readback plan: %w", err)
 		} else if len(residual.Steps) > 0 {
 			failure = fmt.Errorf("readback still differs from the config: %s", describeSteps(residual.Steps))
+		} else if err := e.reverifyAllowed(ctx, report.Plan.Steps); err != nil {
+			failure = err
 		} else {
 			report.Outcome = OutcomeApplied
 			report.After = &after
@@ -106,14 +113,18 @@ func (e Engine) Apply(ctx context.Context, cfg Config, beforeMutation func(Plan)
 		}
 	}
 	report.Error = failure.Error()
+	// Recovery gets its own budget: an apply that ran out of time must still
+	// be able to undo what it changed.
+	recovery, cancel := context.WithTimeout(context.WithoutCancel(ctx), RollbackTimeout)
+	defer cancel()
 	for i := len(started) - 1; i >= 0; i-- {
 		for _, argv := range started[i].Undo {
 			// Best effort: a failing undo must not stop the remaining ones.
-			result, _ := e.run(ctx, argv)
+			result, _ := e.run(recovery, argv)
 			report.Rollback = append(report.Rollback, result)
 		}
 	}
-	after, err := Observe(ctx, e.Runner)
+	after, err := Observe(recovery, e.Runner)
 	if err != nil {
 		report.Outcome = OutcomeRollbackFailed
 		report.Drift = "readback after rollback failed: " + err.Error()
@@ -127,6 +138,26 @@ func (e Engine) Apply(ctx context.Context, cfg Config, beforeMutation func(Plan)
 	}
 	report.Outcome = OutcomeRolledBack
 	return report
+}
+
+// reverifyAllowed closes most of the window between the signature check and
+// socketfilterfw recording the app: the bytes it now points at must still
+// carry the same Apple-anchored identity.
+func (e Engine) reverifyAllowed(ctx context.Context, steps []Step) error {
+	for _, step := range steps {
+		if step.Identity == nil {
+			continue
+		}
+		identity, err := e.Resolver.VerifySigned(ctx, step.Target)
+		if err != nil {
+			return fmt.Errorf("re-verify %s after apply: %w", step.Target, err)
+		}
+		if identity != *step.Identity {
+			return fmt.Errorf("re-verify %s after apply: signing identity changed from %s/%s to %s/%s",
+				step.Target, step.Identity.Identifier, step.Identity.TeamID, identity.Identifier, identity.TeamID)
+		}
+	}
+	return nil
 }
 
 // EnforceOn turns the firewall back on if something turned it off. It is

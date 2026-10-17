@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -20,7 +21,19 @@ import (
 	"github.com/relux-works/mac-infra/internal/security/firewall"
 )
 
-const commandTimeout = 10 * time.Second
+const (
+	commandTimeout  = 10 * time.Second
+	maxRequestBytes = 256 << 10
+	// maxConnections bounds the requests the root daemon serves at once;
+	// further connections are closed unread.
+	maxConnections = 16
+)
+
+// Variables so tests can shorten them.
+var (
+	requestReadTimeout   = 10 * time.Second
+	responseWriteTimeout = 10 * time.Second
+)
 
 var execCommandContextCore = exec.CommandContext
 var execCommandCore = exec.Command
@@ -258,6 +271,7 @@ func (d serviceDaemon) serve() error {
 	defer signal.Stop(sigCh)
 
 	errCh := make(chan error, 1)
+	slots := make(chan struct{}, maxConnections)
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -265,7 +279,15 @@ func (d serviceDaemon) serve() error {
 				errCh <- err
 				return
 			}
-			go d.handleConn(conn)
+			select {
+			case slots <- struct{}{}:
+				go func() {
+					defer func() { <-slots }()
+					d.handleConn(conn)
+				}()
+			default:
+				_ = conn.Close()
+			}
 		}
 	}()
 
@@ -286,11 +308,14 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 		return
 	}
 
+	// A request is one small JSON object; a slow or oversized client must
+	// not pin memory or a goroutine in the root daemon.
+	_ = conn.SetReadDeadline(time.Now().Add(requestReadTimeout))
 	var request Request
-	decoder := json.NewDecoder(conn)
+	decoder := json.NewDecoder(io.LimitReader(conn, maxRequestBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		_ = json.NewEncoder(conn).Encode(Response{Error: err.Error()})
+		writeResponse(conn, Response{Error: err.Error()})
 		return
 	}
 
@@ -337,6 +362,13 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 		response.Error = fmt.Sprintf("unsupported mac-infra-core action %q", request.Action)
 	}
 
+	writeResponse(conn, response)
+}
+
+// writeResponse gives up on a client that does not read its response, so a
+// stalled peer cannot hold a root goroutine and its slot.
+func writeResponse(conn net.Conn, response Response) {
+	_ = conn.SetWriteDeadline(time.Now().Add(responseWriteTimeout))
 	_ = json.NewEncoder(conn).Encode(response)
 }
 

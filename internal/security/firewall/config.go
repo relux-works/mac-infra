@@ -114,5 +114,10 @@ func validateAppPath(path string) error {
 	if strings.ContainsAny(path, "\x00\n\r") {
 		return fmt.Errorf("app path %q contains a control character", path)
 	}
+	// socketfilterfw pads its --listapps lines, so a name with surrounding
+	// whitespace could not be told apart from the trimmed one on readback.
+	if strings.TrimSpace(path) != path {
+		return fmt.Errorf("app path %q has leading or trailing whitespace", path)
+	}
 	return nil
 }

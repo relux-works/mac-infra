@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/relux-works/mac-infra/internal/security/firewall"
@@ -19,7 +19,12 @@ const (
 	firewallManagedFile    = "managed.json"
 	firewallEnforceEvery   = 5 * time.Minute
 	firewallActionTimeout  = 2 * time.Minute
+	firewallQueueTimeout   = 30 * time.Second
 )
+
+// enforcementLog receives enforcement problems; the daemon's stderr goes to
+// its launchd log.
+var enforcementLog io.Writer = os.Stderr
 
 // firewallStore keeps the audit trail and the "managed" marker that turns on
 // keep-on enforcement. Production storage is root-owned and trust-checked.
@@ -29,11 +34,15 @@ type firewallStore interface {
 	MarkManaged(record []byte) error
 }
 
+// firewallService runs one firewall operation at a time. A request that
+// cannot get the turn within queueTimeout is refused as busy instead of
+// queueing without bound.
 type firewallService struct {
-	mu     sync.Mutex
-	engine firewall.Engine
-	store  firewallStore
-	now    func() time.Time
+	turn         chan struct{}
+	queueTimeout time.Duration
+	engine       firewall.Engine
+	store        firewallStore
+	now          func() time.Time
 }
 
 type firewallAuditEntry struct {
@@ -52,18 +61,33 @@ type firewallAuditEntry struct {
 
 func newFirewallService(store firewallStore) *firewallService {
 	runner := firewall.ExecRunner{}
-	return &firewallService{
-		engine: firewall.Engine{Runner: runner, Resolver: firewall.SystemResolver{Runner: runner}},
-		store:  store,
-		now:    time.Now,
+	return newFirewallServiceWith(firewall.Engine{Runner: runner, Resolver: firewall.SystemResolver{Runner: runner}}, store)
+}
+
+func newFirewallServiceWith(engine firewall.Engine, store firewallStore) *firewallService {
+	return &firewallService{turn: make(chan struct{}, 1), queueTimeout: firewallQueueTimeout, engine: engine, store: store, now: time.Now}
+}
+
+func (s *firewallService) acquire() bool {
+	timer := time.NewTimer(s.queueTimeout)
+	defer timer.Stop()
+	select {
+	case s.turn <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
+
+func (s *firewallService) release() { <-s.turn }
 
 // handle serves one firewall request. Every config is re-validated here: the
 // client's own parsing is a convenience, never a trust boundary.
 func (s *firewallService) handle(action Action, cfg *firewall.Config, peerUID, peerPID int) Response {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if !s.acquire() {
+		return Response{Error: "firewall busy: another firewall operation is running; retry"}
+	}
+	defer s.release()
 	ctx, cancel := context.WithTimeout(context.Background(), firewallActionTimeout)
 	defer cancel()
 
@@ -115,18 +139,30 @@ func (s *firewallService) handle(action Action, cfg *firewall.Config, peerUID, p
 // enforce keeps the firewall on once an apply has succeeded. It never runs
 // before the operator applied a config, so installing the helper alone
 // changes nothing.
+//
+// Turning the firewall back on is not gated on the audit: a full or broken
+// audit store must not keep the firewall off. Audit and marker failures go
+// to the daemon's stderr log instead.
 func (s *firewallService) enforce() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if !s.acquire() {
+		return // an operation is running; the next tick checks again
+	}
+	defer s.release()
 	managed, err := s.store.Managed()
-	if err != nil || !managed {
+	if err != nil {
+		fmt.Fprintf(enforcementLog, "mac-infra-core: firewall enforcement skipped: managed marker: %v\n", err)
+		return
+	}
+	if !managed {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), firewallActionTimeout)
 	defer cancel()
 	report, acted := s.engine.EnforceOn(ctx)
 	if acted {
-		_ = s.audit(firewallAuditEntry{Event: "enforce", Outcome: report.Outcome, Error: report.Error, Commands: report.Commands})
+		if err := s.audit(firewallAuditEntry{Event: "enforce", Outcome: report.Outcome, Error: report.Error, Commands: report.Commands}); err != nil {
+			fmt.Fprintf(enforcementLog, "mac-infra-core: firewall enforcement %s, audit failed: %v\n", report.Outcome, err)
+		}
 	}
 }
 
@@ -219,12 +255,17 @@ func (s trustedFirewallStore) Managed() (bool, error) {
 	return true, file.Close()
 }
 
+// MarkManaged truncates only after the descriptor passed the trust checks,
+// so a refused file (for example a hard link) keeps its bytes.
 func (s trustedFirewallStore) MarkManaged(record []byte) error {
-	file, err := s.openFile(firewallManagedFile, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC)
+	file, err := s.openFile(firewallManagedFile, unix.O_WRONLY|unix.O_CREAT)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
 	_, err = file.Write(append(record, '\n'))
 	return err
 }
