@@ -23,7 +23,8 @@ Builds mac-infra Go tools and installs the global agent skill.
 An existing bin/mac-keyvault is kept: keyvault keys trust exactly that
 binary, and a rebuild makes each key wait on a keychain prompt. Pass
 --rebuild-keyvault only in a planned owner sitting, after booting out
-every keyvault agent; it refuses while a process runs the binary.
+every keyvault agent; it refuses while a process uses the binary or a
+keyvault LaunchAgent is loaded.
 The privileged LaunchDaemon is not installed or restarted automatically.
 After first setup and after mac-infra-core updates, run:
   mac-infra-core install
@@ -57,7 +58,16 @@ if ! command -v go >/dev/null 2>&1; then
   exit 1
 fi
 
-# Decided before any build, so a refusal changes nothing.
+# Linking the build directory onto itself would replace every binary with a
+# symlink to itself.
+mkdir -p "$BIN_DIR"
+if [[ "$(cd "$BIN_DIR" && pwd -P)" == "$(cd "$PROJECT_ROOT" && pwd -P)/bin" ]]; then
+  echo "--bin-dir must not be the build directory $BUILD_DIR" >&2
+  exit 1
+fi
+
+# Decided before any build, so a refusal changes nothing; checked again right
+# before mac-keyvault is built. Two setup.sh runs at once are not coordinated.
 KEYVAULT_DECISION="$("$SCRIPT_DIR/keyvault-build-guard.sh" "$BUILD_DIR/mac-keyvault" "$REBUILD_KEYVAULT")"
 if [[ ! -x /usr/bin/codesign ]]; then
   echo "/usr/bin/codesign is required for the managed browser heartbeat" >&2
@@ -133,6 +143,9 @@ go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-sec
 echo "Building mac-firewall..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-firewall" ./cmd/mac-firewall
 if [[ "$KEYVAULT_DECISION" == build ]]; then
+  KEYVAULT_DECISION="$("$SCRIPT_DIR/keyvault-build-guard.sh" "$BUILD_DIR/mac-keyvault" "$REBUILD_KEYVAULT")"
+fi
+if [[ "$KEYVAULT_DECISION" == build ]]; then
   echo "Building mac-keyvault..."
   go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-keyvault" ./cmd/mac-keyvault
 else
@@ -152,7 +165,14 @@ ln -sf "$BUILD_DIR/mac-document-sanitize" "$BIN_DIR/mac-document-sanitize"
 ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
 ln -sf "$BUILD_DIR/mac-security" "$BIN_DIR/mac-security"
 ln -sf "$BUILD_DIR/mac-firewall" "$BIN_DIR/mac-firewall"
-ln -sf "$BUILD_DIR/mac-keyvault" "$BIN_DIR/mac-keyvault"
+# An installed mac-keyvault that points at another checkout's binary is kept
+# unless a rebuild was requested: its keys trust that binary.
+KEYVAULT_LINK="$BIN_DIR/mac-keyvault"
+if [[ "$REBUILD_KEYVAULT" == 1 || ! -e "$KEYVAULT_LINK" || "$KEYVAULT_LINK" -ef "$BUILD_DIR/mac-keyvault" ]]; then
+  ln -sf "$BUILD_DIR/mac-keyvault" "$KEYVAULT_LINK"
+else
+  echo "Keeping $KEYVAULT_LINK -> $(readlink "$KEYVAULT_LINK" || echo "a regular file") (see --rebuild-keyvault)"
+fi
 echo "Installed binary symlinks:"
 echo "  $BIN_DIR/mac-audio-reset -> $BUILD_DIR/mac-audio-reset"
 echo "  $BIN_DIR/mac-audio-sweep -> $BUILD_DIR/mac-audio-sweep"

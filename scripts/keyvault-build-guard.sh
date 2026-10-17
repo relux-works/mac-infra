@@ -5,11 +5,13 @@
 # it (its cdhash). After a rebuild, the next private-key use of every key
 # waits on a macOS keychain prompt, so an unattended signing agent stops
 # until the owner answers it. An existing binary is therefore kept unless a
-# rebuild is requested explicitly, and never replaced while a process runs it.
+# rebuild is requested explicitly, and a requested rebuild is refused while
+# anything still uses the binary. Inspection errors refuse too.
 #
 # usage: keyvault-build-guard.sh BINARY REBUILD
 #   REBUILD is 1 (requested) or 0.
 # Prints "build" or "keep" and exits 0; refuses with exit 1; usage exit 2.
+# KEYVAULT_GUARD_LSOF, _PS and _LAUNCHCTL replace the tools in tests only.
 set -euo pipefail
 
 if [[ $# -ne 2 || ( "$2" != 0 && "$2" != 1 ) ]]; then
@@ -18,8 +20,16 @@ if [[ $# -ne 2 || ( "$2" != 0 && "$2" != 1 ) ]]; then
 fi
 binary="$1"
 rebuild="$2"
+lsof_tool="${KEYVAULT_GUARD_LSOF:-/usr/sbin/lsof}"
+ps_tool="${KEYVAULT_GUARD_PS:-/bin/ps}"
+launchctl_tool="${KEYVAULT_GUARD_LAUNCHCTL:-/bin/launchctl}"
 
-if [[ ! -e "$binary" ]]; then
+refuse() {
+  echo "refusing to rebuild $binary: $1" >&2
+  exit 1
+}
+
+if [[ ! -e "$binary" && ! -L "$binary" ]]; then
   echo build
   exit 0
 fi
@@ -27,10 +37,40 @@ if [[ "$rebuild" != 1 ]]; then
   echo keep
   exit 0
 fi
-# lsof reports every process that has the file open, including as its
-# executable, whichever path or symlink started it.
-if /usr/sbin/lsof -t -- "$binary" >/dev/null 2>&1; then
-  echo "refusing to rebuild $binary: a running process uses it; boot out its keyvault agents first" >&2
-  exit 1
+
+# 1. Processes that have this file open, including as their executable,
+#    whichever path or symlink started them. lsof exits 1 with no output and
+#    no diagnostics when nothing has it open; anything else refuses.
+lsof_err="$(mktemp)"
+trap 'rm -f "$lsof_err"' EXIT
+set +e
+pids="$("$lsof_tool" -t -- "$binary" 2>"$lsof_err")"
+lsof_status=$?
+set -e
+if [[ -n "$pids" ]]; then
+  refuse "a running process uses it (pid ${pids//$'\n'/, }); boot out its keyvault agents first"
+fi
+if [[ $lsof_status -ne 1 || -s "$lsof_err" ]]; then
+  refuse "cannot tell whether a process uses it (lsof exit $lsof_status)"
+fi
+
+# 2. Processes started by this path whose file was replaced since: their
+#    argv still names the path although lsof sees a different file now.
+if ! listing="$("$ps_tool" -axo args= 2>/dev/null)"; then
+  refuse "cannot list processes"
+fi
+while IFS= read -r args; do
+  if [[ "$args" == "$binary" || "$args" == "$binary "* ]]; then
+    refuse "a process was started from this path; boot out its keyvault agents first"
+  fi
+done <<<"$listing"
+
+# 3. Loaded keyvault LaunchAgents, running or not: they start this binary
+#    again on their own.
+if ! jobs="$("$launchctl_tool" list 2>/dev/null)"; then
+  refuse "cannot list LaunchAgents"
+fi
+if grep -q 'works\.relux\.mac-keyvault\.' <<<"$jobs"; then
+  refuse "a works.relux.mac-keyvault.* LaunchAgent is loaded; boot it out first"
 fi
 echo build
