@@ -66,6 +66,14 @@ while IFS= read -r program; do
     refuse "a mac-keyvault process is running; boot out its keyvault agents first"
   fi
 done <<<"$listing"
+# When ps cannot read a process's arguments it prints "(name)" instead; the
+# kernel's accounting name (ucomm) is always available.
+if ! names="$("$ps_tool" -axo ucomm= 2>/dev/null)"; then
+  refuse "cannot list processes"
+fi
+if grep -qx '[[:space:]]*mac-keyvault[[:space:]]*' <<<"$names"; then
+  refuse "a mac-keyvault process is running; boot out its keyvault agents first"
+fi
 
 # 3. Loaded keyvault LaunchAgents, running or not: they start this binary
 #    again on their own.

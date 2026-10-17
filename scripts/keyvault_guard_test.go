@@ -53,7 +53,8 @@ func startStandIn(t *testing.T, path string) {
 // keyvault agents of this host do not decide the test.
 func scopedPS(t *testing.T, tools, dir string) string {
 	t.Helper()
-	return "KEYVAULT_GUARD_PS=" + fakeTool(t, tools, "ps-scoped", "/bin/ps -axo comm= | /usr/bin/grep -F -- '"+dir+"' || true")
+	// ucomm has no path; the scoped stand-ins are found by comm and lsof.
+	return "KEYVAULT_GUARD_PS=" + fakeTool(t, tools, "ps-scoped", `if [ "$2" = ucomm= ]; then exit 0; fi; /bin/ps -axo comm= | /usr/bin/grep -F -- '`+dir+`' || true`)
 }
 
 func waitRefusal(t *testing.T, env []string, binary, want string) {
@@ -76,9 +77,10 @@ func waitRefusal(t *testing.T, env []string, binary, want string) {
 // existing binary unless a rebuild is requested, and allows a requested
 // rebuild only when nothing uses the binary (control). It refuses a
 // requested rebuild when a process has the file open (also when started
-// through a symlink), when a process was started from the path and the file
-// was replaced since, when a keyvault LaunchAgent is loaded, and when any of
-// lsof, ps or launchctl cannot answer. Malformed arguments are usage errors.
+// through a symlink), when ps shows a mac-keyvault process only as "(name)"
+// or by its kernel accounting name, when a keyvault LaunchAgent is loaded,
+// and when any of lsof, ps or launchctl cannot answer. Malformed arguments are
+// usage errors. Replacement after start is TestKeyvaultBuildGuardReplacedBinary.
 // Limit: it sees what lsof, ps and launchctl report for the current user.
 func TestKeyvaultBuildGuard(t *testing.T) {
 	dir := t.TempDir()
@@ -109,6 +111,11 @@ func TestKeyvaultBuildGuard(t *testing.T) {
 		"lsof diagnostics": "KEYVAULT_GUARD_LSOF=" + fakeTool(t, tools, "lsof-denied", `echo "lsof: permission denied" >&2; exit 1`),
 		"lsof failure":     "KEYVAULT_GUARD_LSOF=" + fakeTool(t, tools, "lsof-broken", `exit 2`),
 		"ps failure":       "KEYVAULT_GUARD_PS=" + fakeTool(t, tools, "ps-broken", `exit 1`),
+		"ucomm failure":    "KEYVAULT_GUARD_PS=" + fakeTool(t, tools, "ps-ucomm-broken", `if [ "$2" = ucomm= ]; then exit 1; fi`),
+		// A replaced binary whose arguments ps cannot read: comm shows
+		// "(mac-keyvault)", ucomm shows the plain name.
+		"arguments hidden": "KEYVAULT_GUARD_PS=" + fakeTool(t, tools, "ps-hidden", `if [ "$2" = ucomm= ]; then echo mac-keyvault; else echo "(mac-keyvault)"; fi`),
+		"ucomm only":       "KEYVAULT_GUARD_PS=" + fakeTool(t, tools, "ps-ucomm", `if [ "$2" = ucomm= ]; then echo "    mac-keyvault"; fi`),
 		"launchctl fails":  "KEYVAULT_GUARD_LAUNCHCTL=" + fakeTool(t, tools, "launchctl-broken", `exit 1`),
 		"agent loaded":     "KEYVAULT_GUARD_LAUNCHCTL=" + fakeTool(t, tools, "launchctl-agent", `echo "-	0	works.relux.mac-keyvault.relux-release"`),
 	} {
