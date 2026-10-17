@@ -54,14 +54,16 @@ if [[ $lsof_status -ne 1 || -s "$lsof_err" ]]; then
   refuse "cannot tell whether a process uses it (lsof exit $lsof_status)"
 fi
 
-# 2. Processes started by this path whose file was replaced since: their
-#    argv still names the path although lsof sees a different file now.
+# 2. Any running mac-keyvault program, by the name it was started with: a
+#    process whose file was replaced since (lsof then sees a different file)
+#    still names this path or an alias of it, such as ~/.local/bin.
 if ! listing="$("$ps_tool" -axo args= 2>/dev/null)"; then
   refuse "cannot list processes"
 fi
 while IFS= read -r args; do
-  if [[ "$args" == "$binary" || "$args" == "$binary "* ]]; then
-    refuse "a process was started from this path; boot out its keyvault agents first"
+  program="${args%% *}"
+  if [[ "$args" == "$binary" || "$args" == "$binary "* || "${program##*/}" == mac-keyvault ]]; then
+    refuse "a mac-keyvault process is running; boot out its keyvault agents first"
   fi
 done <<<"$listing"
 

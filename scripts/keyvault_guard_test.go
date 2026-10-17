@@ -49,6 +49,13 @@ func startStandIn(t *testing.T, path string) {
 	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
 }
 
+// scopedPS lists only processes whose arguments mention dir, so the live
+// keyvault agents of this host do not decide the test.
+func scopedPS(t *testing.T, tools, dir string) string {
+	t.Helper()
+	return "KEYVAULT_GUARD_PS=" + fakeTool(t, tools, "ps-scoped", "/bin/ps -axo args= | /usr/bin/grep -F -- '"+dir+"' || true")
+}
+
 func waitRefusal(t *testing.T, env []string, binary, want string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -78,7 +85,8 @@ func TestKeyvaultBuildGuard(t *testing.T) {
 	tools := t.TempDir()
 	binary := filepath.Join(dir, "mac-keyvault")
 	noJobs := "KEYVAULT_GUARD_LAUNCHCTL=" + fakeTool(t, tools, "launchctl-none", `echo "PID	Status	Label"; echo "-	0	com.example.other"`)
-	env := []string{noJobs}
+	ps := scopedPS(t, tools, dir)
+	env := []string{noJobs, ps}
 
 	if out, _, code := runKeyvaultGuard(t, env, binary, "0"); code != 0 || out != "build" {
 		t.Fatalf("absent binary: %q %d", out, code)
@@ -104,7 +112,7 @@ func TestKeyvaultBuildGuard(t *testing.T) {
 		"launchctl fails":  "KEYVAULT_GUARD_LAUNCHCTL=" + fakeTool(t, tools, "launchctl-broken", `exit 1`),
 		"agent loaded":     "KEYVAULT_GUARD_LAUNCHCTL=" + fakeTool(t, tools, "launchctl-agent", `echo "-	0	works.relux.mac-keyvault.relux-release"`),
 	} {
-		if out, _, code := runKeyvaultGuard(t, append([]string{noJobs}, extra), binary, "1"); code != 1 || out != "" {
+		if out, _, code := runKeyvaultGuard(t, append([]string{noJobs, ps}, extra), binary, "1"); code != 1 || out != "" {
 			t.Errorf("%s: %q exit %d", name, out, code)
 		}
 	}
@@ -126,34 +134,45 @@ func TestKeyvaultBuildGuard(t *testing.T) {
 	}
 }
 
-// Claim: a process started from the path still blocks a rebuild after the
-// file at that path was replaced, although lsof now sees a different file.
-// Control: the replaced file alone (no process) is not reported by lsof.
+// Claim: a mac-keyvault process still blocks a rebuild after the file it was
+// started from was replaced, although lsof now sees a different file:
+// started by the path itself, or through an installed alias named
+// mac-keyvault (like ~/.local/bin). Control: lsof alone no longer reports it.
 func TestKeyvaultBuildGuardReplacedBinary(t *testing.T) {
-	dir := t.TempDir()
-	tools := t.TempDir()
-	binary := filepath.Join(dir, "mac-keyvault")
-	env := []string{"KEYVAULT_GUARD_LAUNCHCTL=" + fakeTool(t, tools, "launchctl-none", `echo "PID	Status	Label"`)}
 	self, err := os.ReadFile(os.Args[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(binary, self, 0o755); err != nil {
-		t.Fatal(err)
+	for _, viaAlias := range []bool{false, true} {
+		dir := t.TempDir()
+		tools := t.TempDir()
+		binary := filepath.Join(dir, "mac-keyvault")
+		env := []string{"KEYVAULT_GUARD_LAUNCHCTL=" + fakeTool(t, tools, "launchctl-none", `echo "PID	Status	Label"`), scopedPS(t, tools, dir)}
+		if err := os.WriteFile(binary, self, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		start := binary
+		if viaAlias {
+			start = filepath.Join(dir, "alias", "mac-keyvault")
+			os.Mkdir(filepath.Dir(start), 0o700)
+			if err := os.Symlink(binary, start); err != nil {
+				t.Fatal(err)
+			}
+		}
+		startStandIn(t, start)
+		waitRefusal(t, env, binary, "a running process uses it")
+		replacement := filepath.Join(dir, "next")
+		if err := os.WriteFile(replacement, self, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, binary); err != nil {
+			t.Fatal(err)
+		}
+		if out, _ := exec.Command("/usr/sbin/lsof", "-t", "--", binary).Output(); len(out) != 0 {
+			t.Fatalf("control: lsof still sees a process on the replaced file: %s", out)
+		}
+		waitRefusal(t, env, binary, "a mac-keyvault process is running")
 	}
-	startStandIn(t, binary)
-	waitRefusal(t, env, binary, "a running process uses it")
-	replacement := filepath.Join(dir, "next")
-	if err := os.WriteFile(replacement, self, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(replacement, binary); err != nil {
-		t.Fatal(err)
-	}
-	if out, _ := exec.Command("/usr/sbin/lsof", "-t", "--", binary).Output(); len(out) != 0 {
-		t.Fatalf("control: lsof still sees a process on the replaced file: %s", out)
-	}
-	waitRefusal(t, env, binary, "a process was started from this path")
 }
 
 // TestKeyvaultGuardSleepHelper is the long-running stand-in process; it does

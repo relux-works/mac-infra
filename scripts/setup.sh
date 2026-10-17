@@ -61,7 +61,7 @@ fi
 # Linking the build directory onto itself would replace every binary with a
 # symlink to itself.
 mkdir -p "$BIN_DIR"
-if [[ "$(cd "$BIN_DIR" && pwd -P)" == "$(cd "$PROJECT_ROOT" && pwd -P)/bin" ]]; then
+if [[ -e "$BUILD_DIR" && "$BIN_DIR" -ef "$BUILD_DIR" ]]; then
   echo "--bin-dir must not be the build directory $BUILD_DIR" >&2
   exit 1
 fi
@@ -69,6 +69,15 @@ fi
 # Decided before any build, so a refusal changes nothing; checked again right
 # before mac-keyvault is built. Two setup.sh runs at once are not coordinated.
 KEYVAULT_DECISION="$("$SCRIPT_DIR/keyvault-build-guard.sh" "$BUILD_DIR/mac-keyvault" "$REBUILD_KEYVAULT")"
+# Repointing an installed mac-keyvault at this checkout replaces the binary its
+# users run, so the binary it points at now must pass the same guard.
+keyvault_link_guard() {
+  local link="$BIN_DIR/mac-keyvault"
+  if [[ "$REBUILD_KEYVAULT" == 1 && -e "$link" && ! "$link" -ef "$BUILD_DIR/mac-keyvault" ]]; then
+    "$SCRIPT_DIR/keyvault-build-guard.sh" "$(cd "$(dirname "$link")" && pwd -P)/$(basename "$link")" 1 >/dev/null
+  fi
+}
+keyvault_link_guard
 if [[ ! -x /usr/bin/codesign ]]; then
   echo "/usr/bin/codesign is required for the managed browser heartbeat" >&2
   exit 1
@@ -169,6 +178,7 @@ ln -sf "$BUILD_DIR/mac-firewall" "$BIN_DIR/mac-firewall"
 # unless a rebuild was requested: its keys trust that binary.
 KEYVAULT_LINK="$BIN_DIR/mac-keyvault"
 if [[ "$REBUILD_KEYVAULT" == 1 || ! -e "$KEYVAULT_LINK" || "$KEYVAULT_LINK" -ef "$BUILD_DIR/mac-keyvault" ]]; then
+  keyvault_link_guard
   ln -sf "$BUILD_DIR/mac-keyvault" "$KEYVAULT_LINK"
 else
   echo "Keeping $KEYVAULT_LINK -> $(readlink "$KEYVAULT_LINK" || echo "a regular file") (see --rebuild-keyvault)"
