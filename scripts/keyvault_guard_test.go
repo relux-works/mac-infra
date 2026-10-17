@@ -53,7 +53,7 @@ func startStandIn(t *testing.T, path string) {
 // keyvault agents of this host do not decide the test.
 func scopedPS(t *testing.T, tools, dir string) string {
 	t.Helper()
-	return "KEYVAULT_GUARD_PS=" + fakeTool(t, tools, "ps-scoped", "/bin/ps -axo args= | /usr/bin/grep -F -- '"+dir+"' || true")
+	return "KEYVAULT_GUARD_PS=" + fakeTool(t, tools, "ps-scoped", "/bin/ps -axo comm= | /usr/bin/grep -F -- '"+dir+"' || true")
 }
 
 func waitRefusal(t *testing.T, env []string, binary, want string) {
@@ -137,13 +137,14 @@ func TestKeyvaultBuildGuard(t *testing.T) {
 // Claim: a mac-keyvault process still blocks a rebuild after the file it was
 // started from was replaced, although lsof now sees a different file:
 // started by the path itself, or through an installed alias named
-// mac-keyvault (like ~/.local/bin). Control: lsof alone no longer reports it.
+// mac-keyvault (like ~/.local/bin), also one whose directory contains
+// spaces. Control: lsof alone no longer reports it.
 func TestKeyvaultBuildGuardReplacedBinary(t *testing.T) {
 	self, err := os.ReadFile(os.Args[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, viaAlias := range []bool{false, true} {
+	for _, alias := range []string{"", "alias", "Application Support/tools"} {
 		dir := t.TempDir()
 		tools := t.TempDir()
 		binary := filepath.Join(dir, "mac-keyvault")
@@ -152,9 +153,9 @@ func TestKeyvaultBuildGuardReplacedBinary(t *testing.T) {
 			t.Fatal(err)
 		}
 		start := binary
-		if viaAlias {
-			start = filepath.Join(dir, "alias", "mac-keyvault")
-			os.Mkdir(filepath.Dir(start), 0o700)
+		if alias != "" {
+			start = filepath.Join(dir, alias, "mac-keyvault")
+			os.MkdirAll(filepath.Dir(start), 0o700)
 			if err := os.Symlink(binary, start); err != nil {
 				t.Fatal(err)
 			}
