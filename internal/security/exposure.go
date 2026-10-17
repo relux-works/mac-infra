@@ -175,7 +175,7 @@ func parseListeners(raw string) ([]Listener, bool) {
 			return nil, false
 		}
 	}
-	if !flush() || pid == 0 || !hasUID || len(result) == 0 {
+	if !flush() || pid == 0 || !hasUID || !processHasFile || len(result) == 0 {
 		return nil, false
 	}
 	return result, true

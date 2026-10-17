@@ -62,6 +62,14 @@ func TestExposureListenerParserRealLsof(t *testing.T) {
 	if !ok || !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v %v", got, ok)
 	}
+	// A trailing process without a file record refuses the whole listing; a
+	// complete ninth record is the positive control.
+	if got, ok := parseListeners(string(raw) + "p999\nu0\nf3\nPTCP\nn*:22\nTST=LISTEN\nTQR=0\nTQS=0\n"); !ok || len(got) != 9 {
+		t.Fatalf("complete ninth record refused: %v", ok)
+	}
+	if result, ok := parseListeners(string(raw) + "p999\nu0\n"); ok || result != nil {
+		t.Fatal("accepted a trailing process without a file record")
+	}
 	r := checksOutput(listenerCommand, string(raw))
 	if c := listenerExposure(context.Background(), r); c.Status != "partial" {
 		t.Fatalf("real output check %#v", c)
