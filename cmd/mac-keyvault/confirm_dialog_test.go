@@ -46,6 +46,7 @@ func TestConfirmDialogGrantsOnlyExplicitButton(t *testing.T) {
 	for _, tc := range []struct{ name, stdin, grant string }{
 		{"sign", signRequest(), "Sign"},
 		{"unlock", unlockRequest(), "Unlock"},
+		{"unlock spelled with an escape", strings.Replace(unlockRequest(), `"unlock"`, `"\u0075nlock"`, 1), "Unlock"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := stubDialog(t, tc.stdin, tc.grant+"|false\n", nil)

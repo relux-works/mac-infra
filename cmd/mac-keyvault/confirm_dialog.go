@@ -107,7 +107,11 @@ func readConfirmation(r io.Reader) (keyvault.SSHConfirmation, error) {
 		}
 	}
 	required := []string{"purpose", "address", "version", "fingerprint"}
-	if purposeRaw, _ := object.Get("purpose"); string(bytes.TrimSpace(purposeRaw)) == `"`+keyvault.SSHConfirmUnlock+`"` {
+	var purpose string
+	if raw, ok := object.Get("purpose"); ok {
+		_ = json.Unmarshal(raw, &purpose)
+	}
+	if purpose == keyvault.SSHConfirmUnlock {
 		required = append(required, "until")
 		if object.Has("sha256") {
 			return req, errors.New("an unlock request carries no sha256")
