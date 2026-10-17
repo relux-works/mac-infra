@@ -123,16 +123,18 @@ replaces the click with two controls:
   `digest_prefix` (first 8 bytes of the SHA-256 of the signed data, hex), and
   `client_pid` (when available). It never contains the signed data, the
   message or a full hash.
-  - The file is created `0600`. Symlinks, hard links, files that others can
-    write, a file whose last line is incomplete and a file that cannot be
-    synced are all refused, and the agent then exits before its socket
-    exists.
+  - The file is created `0600` and held with an exclusive lock, so give
+    each agent its own log. Symlinks, hard links, files that others can
+    write, a file another agent holds, a file whose last line is incomplete
+    and a file that cannot be synced are all refused, and the agent then
+    exits before its socket exists.
   - A signature is returned only after its record is written and synced. If
     the write or the sync fails, the signature is withheld and the log
     refuses every later record, so the agent signs nothing more until it is
     restarted with a sound log.
   - Refusals for a pinned key are recorded best effort, including requests
-    refused for nonzero flags or trailing bytes (`malformed_request`).
+    with nonzero flags, trailing bytes or a missing or truncated field
+    (`malformed_request`).
   - Not recorded: requests whose key blob cannot be parsed, requests for an
     unknown key, and requests refused before parsing (agent stopping or
     expired).

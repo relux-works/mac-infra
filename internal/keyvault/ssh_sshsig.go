@@ -105,8 +105,9 @@ type SSHAuditLog struct {
 }
 
 // OpenSSHAuditLog opens or creates an append-only 0600 file owned by the
-// current user. It refuses symlinks, hard links, files others can write, a
-// file whose last record is incomplete, and a file it cannot sync.
+// current user and holds an exclusive lock on it until Close. It refuses
+// symlinks, hard links, files others can write, a file another agent holds,
+// a file whose last record is incomplete, and a file it cannot sync.
 func OpenSSHAuditLog(path string) (*SSHAuditLog, error) {
 	return openSSHAuditLog(path, (*os.File).Sync)
 }
@@ -128,6 +129,12 @@ func openSSHAuditLog(path string, syncFile func(*os.File) error) (*SSHAuditLog, 
 	if !ok || !st.Mode().IsRegular() || stat.Uid != uint32(os.Getuid()) || st.Mode().Perm()&0077 != 0 || stat.Nlink != 1 {
 		file.Close()
 		return nil, errors.New("SSH audit log must be a regular 0600 file owned by you with one link")
+	}
+	// One agent per log: a second writer could continue a line the first
+	// one left incomplete. The lock is released when the file is closed.
+	if syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		file.Close()
+		return nil, errors.New("SSH audit log is in use by another agent")
 	}
 	if st.Size() > 0 {
 		last := make([]byte, 1)

@@ -263,21 +263,27 @@ func (a *SSHAgent) handleSSHFrom(ctx context.Context, packet []byte, pid int) []
 		}
 		return response
 	case 13:
-		var req struct {
-			Key   []byte
-			Data  []byte
-			Flags uint32
-			Rest  []byte `ssh:"rest"`
+		// The key is identified first: any later decoding failure of a
+		// request for a pinned key is refused with an audit record; a
+		// request for no pinned key is refused unrecorded.
+		var head struct {
+			Key  []byte
+			Rest []byte `ssh:"rest"`
 		}
-		if ssh.Unmarshal(packet[1:], &req) != nil {
+		if ssh.Unmarshal(packet[1:], &head) != nil {
 			return []byte{sshFailure}
 		}
-		// A request for a pinned key is audited even when it is refused for
-		// its flags or trailing bytes; one for no pinned key is not.
 		for _, id := range a.identities {
-			if bytes.Equal(req.Key, id.public.Marshal()) {
-				return a.signAudited(ctx, id, req.Data, pid, req.Flags != 0 || len(req.Rest) != 0)
+			if !bytes.Equal(head.Key, id.public.Marshal()) {
+				continue
 			}
+			var req struct {
+				Data  []byte
+				Flags uint32
+				Rest  []byte `ssh:"rest"`
+			}
+			malformed := ssh.Unmarshal(head.Rest, &req) != nil || req.Flags != 0 || len(req.Rest) != 0
+			return a.signAudited(ctx, id, req.Data, pid, malformed)
 		}
 	}
 	return []byte{sshFailure}

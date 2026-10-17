@@ -329,6 +329,8 @@ func TestSSHAuditPartialWriteDisablesLog(t *testing.T) {
 	if bytes.Count(raw, []byte("\n")) != 1 || raw[len(raw)-1] == '\n' {
 		t.Fatalf("log after the fault: %q", raw)
 	}
+	// Closed first, so the refusal comes from the tail, not from the lock.
+	log.Close()
 	if reopened, err := OpenSSHAuditLog(path); err == nil {
 		reopened.Close()
 		t.Fatal("reopened a log with an incomplete record")
@@ -359,10 +361,11 @@ func TestSSHAuditSyncFailure(t *testing.T) {
 	}
 }
 
-// A request for a pinned key that is refused for nonzero flags or trailing
-// bytes is still audited (reason malformed_request) and never signed; a
-// request for an unknown key is refused unrecorded. Control: the same
-// well-formed request is signed and recorded.
+// A request for a pinned key that is refused for nonzero flags, trailing
+// bytes, or a missing or truncated flags or data field is still audited
+// (reason malformed_request) and never signed or confirmed; a request for an
+// unknown key is refused unrecorded. Control: the same well-formed request is
+// signed and recorded.
 func TestSSHAgentAuditsMalformedRequestsForPinnedKeys(t *testing.T) {
 	a, store, _ := sshFixture(t)
 	a.RequireSSHSigNamespace("git")
@@ -378,25 +381,35 @@ func TestSSHAgentAuditsMalformedRequestsForPinnedKeys(t *testing.T) {
 		}{key, data, flags})
 		return append(append([]byte{13}, body...), trailing...)
 	}
+	asked := 0
+	a.confirm = func(context.Context, SSHConfirmation) error { asked++; return nil }
 	other, _ := ssh.NewPublicKey(&sshTestOtherKey(t).PublicKey)
+	valid := request(0, nil, pub.Marshal())
+	keyOnly := append([]byte{13}, ssh.Marshal(struct{ Key []byte }{pub.Marshal()})...)
 	for name, packet := range map[string][]byte{
-		"flags":       request(2, nil, pub.Marshal()),
-		"trailing":    request(0, []byte{0}, pub.Marshal()),
-		"unknown key": request(0, nil, other.Marshal()),
+		"flags":           request(2, nil, pub.Marshal()),
+		"trailing":        request(0, []byte{0}, pub.Marshal()),
+		"missing flags":   valid[:len(valid)-4],
+		"truncated flags": valid[:len(valid)-1],
+		"missing data":    keyOnly,
+		"unknown key":     request(0, nil, other.Marshal()),
 	} {
 		if got := a.handleSSH(context.Background(), packet); !bytes.Equal(got, []byte{sshFailure}) {
 			t.Fatalf("%s signed", name)
 		}
 	}
-	if got := a.handleSSH(context.Background(), request(0, nil, pub.Marshal())); got[0] != 14 {
+	if asked != 0 || len(store.signs) != 0 {
+		t.Fatalf("malformed requests reached confirmation %d or signing %d", asked, len(store.signs))
+	}
+	if got := a.handleSSH(context.Background(), valid); got[0] != 14 {
 		t.Fatal("control refused")
 	}
 	records := sshAuditRecords(t, path)
-	if len(store.signs) != 1 || len(records) != 3 || records[2].Outcome != SSHAuditSigned {
-		t.Fatalf("signs %d, records %+v", len(store.signs), records)
+	if len(store.signs) != 1 || asked != 1 || len(records) != 6 || records[5].Outcome != SSHAuditSigned {
+		t.Fatalf("signs %d, asked %d, records %+v", len(store.signs), asked, records)
 	}
-	for _, r := range records[:2] {
-		if r.Outcome != SSHAuditRefused || r.Reason != "malformed_request" || r.Namespace != "git" {
+	for _, r := range records[:5] {
+		if r.Outcome != SSHAuditRefused || r.Reason != "malformed_request" {
 			t.Errorf("record %+v", r)
 		}
 	}
@@ -409,4 +422,21 @@ func sshTestOtherKey(t *testing.T) *ecdsa.PrivateKey {
 		t.Fatal(err)
 	}
 	return key
+}
+
+// Only one agent can hold a log: a second open is refused while the first is
+// open, so two agents cannot interleave or continue each other's lines.
+// Control: after the first closes, the file opens again.
+func TestSSHAuditLogSingleWriter(t *testing.T) {
+	log, path := sshAuditFile(t)
+	if second, err := OpenSSHAuditLog(path); err == nil {
+		second.Close()
+		t.Fatal("second writer opened a held log")
+	}
+	log.Close()
+	again, err := OpenSSHAuditLog(path)
+	if err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	again.Close()
 }
