@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha512"
 	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -19,9 +21,10 @@ import (
 
 // CLI validation refuses missing/unpinned identities, invalid hook options,
 // an --unlock-for outside (0, 24h], and any explicit --confirm-when (even
-// "sign") without a hook or an unlock confirmation without --unlock-for, all
-// before opening the backend. Adjacent valid pub
-// output is parseable.
+// "sign") without a hook or an unlock confirmation without --unlock-for, an
+// invalid --sign-namespace (including an explicit empty one) and a relative
+// --audit-log, all before opening the backend. Adjacent valid pub output is
+// parseable.
 func TestRunSSHAgentArgumentsAndPublicKey(t *testing.T) {
 	store := newMemStore(tl("ssh-agent", 1))
 	old := newBackend
@@ -39,6 +42,10 @@ func TestRunSSHAgentArgumentsAndPublicKey(t *testing.T) {
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-when", "sign"},
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-exec", "/usr/bin/true", "--confirm-when", "unlock"},
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-exec", "/usr/bin/true", "--confirm-when", "both"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--sign-namespace", ""},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--sign-namespace", "g it"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--sign-namespace", "-git"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--audit-log", "audit.jsonl"},
 	} {
 		var out, err bytes.Buffer
 		code := run(append([]string{"--json", "ssh-agent"}, args...), &out, &err)
@@ -286,5 +293,88 @@ func TestRunSSHAgentConfirmWhenSelectsPurposes(t *testing.T) {
 			cmd.Process.Signal(syscall.SIGTERM)
 			waitExit(t, cmd, 3*time.Second)
 		})
+	}
+}
+
+func sshsigRequest(namespace string) []byte {
+	sum := sha512.Sum512([]byte("tag"))
+	return append([]byte("SSHSIG"), ssh.Marshal(struct {
+		Namespace, Reserved, Algorithm string
+		Hash                           []byte
+	}{namespace, "", "sha512", sum[:]})...)
+}
+
+// Claim: the CLI agent started with --sign-namespace git and --audit-log
+// signs a git SSHSIG request (positive control, verified), refuses a file
+// namespace and an authentication-style request, and writes one audit record
+// per request with the client pid; its readiness line names both settings.
+func TestRunSSHAgentGitNamespaceAndAudit(t *testing.T) {
+	auditDir, err := os.MkdirTemp("/tmp", "kv-audit-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(auditDir)
+	audit := filepath.Join(auditDir, "audit.jsonl")
+	cmd, socket, logs := startSSHHelper(t, "--sign-namespace", "git", "--audit-log", audit)
+	conn := dialSSHHelper(t, socket, logs)
+	client := agent.NewClient(conn)
+	keys, err := client.List()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("identities: %v %v", keys, err)
+	}
+	pub, _ := ssh.ParsePublicKey(keys[0].Blob)
+	git := sshsigRequest("git")
+	sig, err := client.Sign(pub, git)
+	if err != nil || pub.Verify(git, sig) != nil {
+		t.Fatalf("git request: %v %s", err, logs)
+	}
+	if _, err := client.Sign(pub, sshsigRequest("file")); err == nil {
+		t.Fatal("file namespace signed")
+	}
+	if _, err := client.Sign(pub, append(ssh.Marshal(struct{ Session []byte }{bytes.Repeat([]byte{1}, 32)}), 50)); err == nil {
+		t.Fatal("authentication-style request signed")
+	}
+	conn.Close()
+	cmd.Process.Signal(syscall.SIGTERM)
+	if code, exited := waitExit(t, cmd, 10*time.Second); !exited || code != 0 {
+		t.Fatalf("exit %d %v: %s", code, exited, logs)
+	}
+	raw, err := os.ReadFile(audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	want := []string{`"outcome":"signed"`, `"reason":"namespace"`, `"reason":"not_sshsig"`}
+	if len(lines) != len(want) {
+		t.Fatalf("audit lines: %q", raw)
+	}
+	for i, fragment := range want {
+		if !strings.Contains(lines[i], fragment) || !strings.Contains(lines[i], `"client_pid":`+strconv.Itoa(os.Getpid())) {
+			t.Errorf("record %d: %s", i, lines[i])
+		}
+	}
+	if !strings.Contains(logs.String(), "; signs only SSHSIG namespace git; audit log "+audit+"\n") {
+		t.Fatalf("readiness: %s", logs)
+	}
+}
+
+// Claim: an audit log the agent cannot use (here a symlink) stops the CLI
+// before the socket exists, so no client can reach an unaudited agent.
+func TestRunSSHAgentRefusesUnusableAuditLog(t *testing.T) {
+	auditDir, err := os.MkdirTemp("/tmp", "kv-audit-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(auditDir)
+	target := filepath.Join(auditDir, "real.jsonl")
+	os.WriteFile(target, nil, 0600)
+	link := filepath.Join(auditDir, "audit.jsonl")
+	os.Symlink(target, link)
+	cmd, socket, logs := startSSHHelper(t, "--sign-namespace", "git", "--audit-log", link)
+	if code, exited := waitExit(t, cmd, 15*time.Second); !exited || code == 0 {
+		t.Fatalf("exit %d %v: %s", code, exited, logs)
+	}
+	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
+		t.Fatal("socket created with an unusable audit log")
 	}
 }

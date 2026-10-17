@@ -103,6 +103,43 @@ The dialog is consent UX, not a hardware boundary. A process running as the
 same user with Accessibility permission could press the button by script.
 `--user-presence` (Touch ID) needs a provisioned, signed build.
 
+### Autonomous signing keys: SSHSIG namespace only and audit
+
+A key that agents use without a human click (for example a release-tag key)
+replaces the click with two controls:
+
+- `--sign-namespace git` signs only requests made by `ssh-keygen -Y sign -n
+  git` (OpenSSH `PROTOCOL.sshsig` signed data: the `SSHSIG` magic, the
+  namespace, an empty reserved field, `sha256` or `sha512`, and a hash of
+  exactly that length, nothing after it). An SSH authentication challenge, any
+  other namespace and any other data are refused before the confirmation hook
+  and before any private-key operation. Without the flag the agent signs any
+  data for its pinned identities, as before. Git uses namespace `git` for
+  commit and tag signatures.
+- `--audit-log ABSOLUTE_PATH` appends one JSON line per signature request for
+  a pinned identity: `time`, `outcome` (`signed` or `refused`), `reason`,
+  `address`, `version`, `fingerprint`, `namespace`, `hash_algorithm`,
+  `message_hash_prefix` (first 8 bytes of the SSHSIG message hash, hex),
+  `digest_prefix` (first 8 bytes of the SHA-256 of the signed data, hex), and
+  `client_pid` (kernel-reported, when available). It never contains the
+  signed data, the message or a full hash. The file is created `0600`;
+  symlinks, hard links and files that others can write are refused, and the
+  agent then exits before its socket exists. A signature is returned only
+  after its record is written and synced; if that write fails, the
+  signature is withheld. Refusals are recorded best effort. Requests for an
+  unknown key and requests refused before parsing (agent stopping or
+  expired) are not recorded.
+
+Residuals:
+
+- Any process running as the same user can connect to the socket and
+  obtain git-namespace signatures. The socket mode (`0600` in an owned
+  `0700` directory) and the kernel UID check keep other users out, not
+  other processes of this user.
+- The same user can also edit or delete the audit log. It is a record for
+  review, not tamper-proof evidence.
+- The log has no rotation and grows by one short line per request.
+
 ## 1. Create new vault keys and public files
 
 Run as the owner with the installed reviewed `mac-keyvault`; use the same

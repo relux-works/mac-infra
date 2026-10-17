@@ -104,8 +104,26 @@ type SSHAgent struct {
 	identities []sshIdentity
 	confirm    func(context.Context, SSHConfirmation) error
 	until      time.Time
+	namespace  string
+	audit      *SSHAuditLog
 	mu         sync.Mutex
 }
+
+// RequireSSHSigNamespace makes the agent sign only SSHSIG requests
+// (ssh-keygen -Y sign) with this namespace. Authentication challenges and
+// any other data are refused before confirmation or private use.
+func (a *SSHAgent) RequireSSHSigNamespace(namespace string) error {
+	if !ValidSSHSigNamespace(namespace) {
+		return errors.New("invalid SSHSIG namespace")
+	}
+	a.namespace = namespace
+	return nil
+}
+
+// AuditTo records every signature request for a pinned identity. A signature
+// is returned only after its record is written; refusals are recorded best
+// effort.
+func (a *SSHAgent) AuditTo(log *SSHAuditLog) { a.audit = log }
 
 // ExpireAt makes the agent refuse every signature from until on (wall
 // clock) and makes Serve stop at that time even across machine sleep.
@@ -183,7 +201,11 @@ func SSHPublicKey(spki []byte) ([]byte, error) {
 // REQUEST_IDENTITIES(11) and SIGN_REQUEST(13). Every other operation,
 // including mutation, lock, smartcard and extensions, receives FAILURE(5).
 // Forwarded connections receive the exact same subset and no export path.
-func (a *SSHAgent) ServeConn(ctx context.Context, conn net.Conn) {
+func (a *SSHAgent) ServeConn(ctx context.Context, conn net.Conn) { a.serveConn(ctx, conn, 0) }
+
+// serveConn serves one client; pid is the kernel-reported client pid for the
+// audit, 0 when unknown.
+func (a *SSHAgent) serveConn(ctx context.Context, conn net.Conn, pid int) {
 	defer conn.Close()
 	done := make(chan struct{})
 	defer close(done)
@@ -208,7 +230,7 @@ func (a *SSHAgent) ServeConn(ctx context.Context, conn net.Conn) {
 		if _, err := io.ReadFull(conn, packet); err != nil {
 			return
 		}
-		response := a.handleSSH(ctx, packet)
+		response := a.handleSSHFrom(ctx, packet, pid)
 		binary.BigEndian.PutUint32(head[:], uint32(len(response)))
 		if _, err := conn.Write(append(head[:], response...)); err != nil {
 			return
@@ -217,6 +239,10 @@ func (a *SSHAgent) ServeConn(ctx context.Context, conn net.Conn) {
 }
 
 func (a *SSHAgent) handleSSH(ctx context.Context, packet []byte) []byte {
+	return a.handleSSHFrom(ctx, packet, 0)
+}
+
+func (a *SSHAgent) handleSSHFrom(ctx context.Context, packet []byte, pid int) []byte {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if ctx.Err() != nil || len(packet) == 0 || a.expired() {
@@ -246,48 +272,90 @@ func (a *SSHAgent) handleSSH(ctx context.Context, packet []byte) []byte {
 			return []byte{sshFailure}
 		}
 		for _, id := range a.identities {
-			if !bytes.Equal(req.Key, id.public.Marshal()) {
-				continue
+			if bytes.Equal(req.Key, id.public.Marshal()) {
+				return a.signAudited(ctx, id, req.Data, pid)
 			}
-			digest := sha256.Sum256(req.Data)
-			if a.confirm != nil && a.confirm(ctx, SSHConfirmation{Purpose: SSHConfirmSign, Address: id.address.Service + "/" + id.address.Purpose, Version: id.address.Version, Fingerprint: ssh.FingerprintSHA256(id.public), SHA256: hex.EncodeToString(digest[:])}) != nil {
-				return []byte{sshFailure}
-			}
-			if ctx.Err() != nil {
-				return []byte{sshFailure}
-			}
-			// Recheck the pinned public half before private use, then bind the
-			// returned signature to that same identity before emitting it.
-			current, err := a.manager.Describe(id.address)
-			if err != nil || !bytes.Equal(current.SPKI, id.key.SPKI) {
-				return []byte{sshFailure}
-			}
-			// Confirmation and resolution may block; the private operation
-			// must not start once the unlock or the server has ended.
-			if ctx.Err() != nil || a.expired() {
-				return []byte{sshFailure}
-			}
-			result, err := a.manager.SignIf(id.address, digest[:], func() error {
-				if ctx.Err() != nil || a.expired() {
-					return errors.New("agent stopped or unlock expired")
-				}
-				return nil
-			})
-			// A call that was already inside Security.framework when the
-			// deadline passed is computed but never returned.
-			if ctx.Err() != nil || a.expired() || err != nil || !bytes.Equal(result.Key.SPKI, id.key.SPKI) {
-				return []byte{sshFailure}
-			}
-			ok, err := VerifyDigest(id.key.SPKI, digest[:], result.Signature)
-			if err != nil || !ok {
-				return []byte{sshFailure}
-			}
-			// SSH ECDSA signatures carry two mpints, not ASN.1 DER.
-			sig := ssh.Signature{Format: ssh.KeyAlgoECDSA256, Blob: ssh.Marshal(struct{ R, S *big.Int }{result.Signature.R, result.Signature.S})}
-			return append([]byte{14}, ssh.Marshal(struct{ Signature []byte }{ssh.Marshal(sig)})...)
 		}
 	}
 	return []byte{sshFailure}
+}
+
+// signAudited runs one signature for a pinned identity and records its
+// outcome. With an audit log, a signature whose record cannot be written is
+// withheld.
+func (a *SSHAgent) signAudited(ctx context.Context, id sshIdentity, data []byte, pid int) []byte {
+	digest := sha256.Sum256(data)
+	record := SSHAuditRecord{Address: id.address.Service + "/" + id.address.Purpose, Version: id.address.Version,
+		Fingerprint: ssh.FingerprintSHA256(id.public), DigestPrefix: sshHashPrefix(digest[:]), ClientPID: pid}
+	if sig, err := ParseSSHSig(data); err == nil {
+		record.Namespace, record.HashAlgorithm, record.MessageHashPrefix = sig.Namespace, sig.HashAlgorithm, sshHashPrefix(sig.MessageHash)
+	}
+	response, reason := a.sign(ctx, id, digest, record.Namespace)
+	if a.audit == nil {
+		return response
+	}
+	record.Time = sshAuditTime()
+	if reason != "" {
+		record.Outcome, record.Reason = SSHAuditRefused, reason
+		a.audit.Append(record)
+		return response
+	}
+	record.Outcome = SSHAuditSigned
+	if a.audit.Append(record) != nil {
+		return []byte{sshFailure}
+	}
+	return response
+}
+
+// sign returns the agent response and, on refusal, a short reason for the
+// audit. namespace is the parsed SSHSIG namespace, "" when the data is not
+// an SSHSIG request.
+func (a *SSHAgent) sign(ctx context.Context, id sshIdentity, digest [32]byte, namespace string) ([]byte, string) {
+	failure := []byte{sshFailure}
+	if a.namespace != "" && namespace == "" {
+		return failure, "not_sshsig"
+	}
+	if a.namespace != "" && namespace != a.namespace {
+		return failure, "namespace"
+	}
+	if a.confirm != nil && a.confirm(ctx, SSHConfirmation{Purpose: SSHConfirmSign, Address: id.address.Service + "/" + id.address.Purpose, Version: id.address.Version, Fingerprint: ssh.FingerprintSHA256(id.public), SHA256: hex.EncodeToString(digest[:])}) != nil {
+		return failure, "not_confirmed"
+	}
+	if ctx.Err() != nil {
+		return failure, "stopped"
+	}
+	// Recheck the pinned public half before private use, then bind the
+	// returned signature to that same identity before emitting it.
+	current, err := a.manager.Describe(id.address)
+	if err != nil || !bytes.Equal(current.SPKI, id.key.SPKI) {
+		return failure, "key_changed"
+	}
+	// Confirmation and resolution may block; the private operation
+	// must not start once the unlock or the server has ended.
+	if ctx.Err() != nil || a.expired() {
+		return failure, "expired"
+	}
+	result, err := a.manager.SignIf(id.address, digest[:], func() error {
+		if ctx.Err() != nil || a.expired() {
+			return errors.New("agent stopped or unlock expired")
+		}
+		return nil
+	})
+	// A call that was already inside Security.framework when the
+	// deadline passed is computed but never returned.
+	if ctx.Err() != nil || a.expired() {
+		return failure, "expired"
+	}
+	if err != nil || !bytes.Equal(result.Key.SPKI, id.key.SPKI) {
+		return failure, "sign_failed"
+	}
+	ok, err := VerifyDigest(id.key.SPKI, digest[:], result.Signature)
+	if err != nil || !ok {
+		return failure, "sign_failed"
+	}
+	// SSH ECDSA signatures carry two mpints, not ASN.1 DER.
+	sig := ssh.Signature{Format: ssh.KeyAlgoECDSA256, Blob: ssh.Marshal(struct{ R, S *big.Int }{result.Signature.R, result.Signature.S})}
+	return append([]byte{14}, ssh.Marshal(struct{ Signature []byte }{ssh.Marshal(sig)})...), ""
 }
 
 // ListenSSH creates a 0600 Unix socket in an owned 0700 directory. It
@@ -408,5 +476,5 @@ func (a *SSHAgent) serveSSHPeer(ctx context.Context, conn *net.UnixConn, ownerUI
 		conn.Close()
 		return
 	}
-	a.ServeConn(ctx, conn)
+	a.serveConn(ctx, conn, sshPeerPID(conn))
 }

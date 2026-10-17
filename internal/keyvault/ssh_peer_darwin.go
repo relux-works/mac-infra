@@ -38,3 +38,18 @@ func sshPeerUID(conn *net.UnixConn) (uint32, error) {
 	}
 	return uid, nil
 }
+
+// sshPeerPID is the client pid for the audit only; 0 when unavailable.
+func sshPeerPID(conn *net.UnixConn) int {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0
+	}
+	pid := 0
+	raw.Control(func(fd uintptr) {
+		if value, err := unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID); err == nil && value > 0 {
+			pid = value
+		}
+	})
+	return pid
+}
