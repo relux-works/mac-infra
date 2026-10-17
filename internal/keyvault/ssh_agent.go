@@ -26,13 +26,22 @@ import (
 const SSHMaxPacket = 256 * 1024
 const sshFailure = 5
 
+// Confirmation purposes: one signature, or opening an agent until a deadline.
+const (
+	SSHConfirmSign   = "sign"
+	SSHConfirmUnlock = "unlock"
+)
+
 // SSHConfirmation is sent to an explicitly configured executable on stdin.
 // It contains public metadata and a digest, never the client's message.
+// A sign request carries SHA256; an unlock request carries Until instead.
 type SSHConfirmation struct {
+	Purpose     string `json:"purpose"`
 	Address     string `json:"address"`
 	Version     int    `json:"version"`
 	Fingerprint string `json:"fingerprint"`
-	SHA256      string `json:"sha256"`
+	SHA256      string `json:"sha256,omitempty"`
+	Until       string `json:"until,omitempty"`
 }
 
 // SSHConfirmHook executes a fixed absolute executable without a shell. Exit 0
@@ -115,6 +124,23 @@ func NewSSHAgent(manager *Manager, addresses []Address, confirm func(context.Con
 		a.identities = append(a.identities, sshIdentity{parsed, key, public})
 	}
 	return a, nil
+}
+
+// ConfirmUnlock asks confirm once per pinned identity whether the agent may
+// sign with it until the deadline. Any refusal refuses the whole unlock, so
+// the caller must not open its socket.
+func (a *SSHAgent) ConfirmUnlock(ctx context.Context, confirm func(context.Context, SSHConfirmation) error, until time.Time) error {
+	if confirm == nil {
+		return errors.New("unlock confirmation requires a confirmation hook")
+	}
+	for _, id := range a.identities {
+		req := SSHConfirmation{Purpose: SSHConfirmUnlock, Address: id.address.Service + "/" + id.address.Purpose, Version: id.address.Version,
+			Fingerprint: ssh.FingerprintSHA256(id.public), Until: until.UTC().Format(time.RFC3339)}
+		if err := confirm(ctx, req); err != nil || ctx.Err() != nil {
+			return errors.New("unlock refused")
+		}
+	}
+	return nil
 }
 
 // SSHPublicKey renders a public-only OpenSSH identity for IdentityFile,
@@ -202,7 +228,7 @@ func (a *SSHAgent) handleSSH(ctx context.Context, packet []byte) []byte {
 				continue
 			}
 			digest := sha256.Sum256(req.Data)
-			if a.confirm != nil && a.confirm(ctx, SSHConfirmation{id.address.Service + "/" + id.address.Purpose, id.address.Version, ssh.FingerprintSHA256(id.public), hex.EncodeToString(digest[:])}) != nil {
+			if a.confirm != nil && a.confirm(ctx, SSHConfirmation{Purpose: SSHConfirmSign, Address: id.address.Service + "/" + id.address.Purpose, Version: id.address.Version, Fingerprint: ssh.FingerprintSHA256(id.public), SHA256: hex.EncodeToString(digest[:])}) != nil {
 				return []byte{sshFailure}
 			}
 			if ctx.Err() != nil {

@@ -449,7 +449,7 @@ func TestSSHAgentConfirmation(t *testing.T) {
 	a.confirm = func(ctx context.Context, req SSHConfirmation) error {
 		count++
 		sum := sha256.Sum256([]byte("message"))
-		if req.SHA256 != fmt.Sprintf("%x", sum) || req.Version != 1 {
+		if req.Purpose != SSHConfirmSign || req.SHA256 != fmt.Sprintf("%x", sum) || req.Version != 1 || req.Until != "" {
 			t.Error("wrong confirmation metadata")
 		}
 		return errors.New("secret hook output must never be emitted")
@@ -756,5 +756,81 @@ func TestSSHAgentKernelPeerCredentials(t *testing.T) {
 				t.Fatal("closed socket yielded credentials")
 			}
 		})
+	}
+}
+
+// Claim: ConfirmUnlock asks the hook once per pinned identity with purpose
+// unlock, the deadline and no digest; any refusal refuses the unlock, and a
+// missing hook is refused. Granting is the positive control. No signature is
+// made while confirming.
+func TestSSHAgentConfirmUnlock(t *testing.T) {
+	a, store, addr := sshFixture(t)
+	until := time.Date(2026, 10, 18, 17, 0, 0, 0, time.UTC)
+	var seen []SSHConfirmation
+	grant := func(_ context.Context, req SSHConfirmation) error { seen = append(seen, req); return nil }
+	if err := a.ConfirmUnlock(context.Background(), grant, until); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0].Purpose != SSHConfirmUnlock || seen[0].Until != "2026-10-18T17:00:00Z" || seen[0].SHA256 != "" ||
+		seen[0].Address != addr.Service+"/"+addr.Purpose || seen[0].Version != 1 || !strings.HasPrefix(seen[0].Fingerprint, "SHA256:") {
+		t.Fatalf("unlock requests = %+v", seen)
+	}
+	deny := func(context.Context, SSHConfirmation) error { return errors.New("no") }
+	if err := a.ConfirmUnlock(context.Background(), deny, until); err == nil {
+		t.Fatal("denied unlock accepted")
+	}
+	if err := a.ConfirmUnlock(context.Background(), nil, until); err == nil {
+		t.Fatal("unlock without a hook accepted")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := a.ConfirmUnlock(cancelled, grant, until); err == nil {
+		t.Fatal("unlock confirmed after cancellation")
+	}
+	if len(store.signs) != 0 {
+		t.Fatal("unlock confirmation signed")
+	}
+}
+
+// Claim: an agent served with a deadline signs before it and, once it
+// passes, stops serving on its own (Serve returns nil, the listener is
+// closed) and refuses a signing request that is still handled.
+func TestSSHAgentStopsAtDeadline(t *testing.T) {
+	a, store, _ := sshFixture(t)
+	path := filepath.Join(sshTempDir(t), "private", "agent.sock")
+	listener, cleanup, err := ListenSSH(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { err := a.Serve(ctx, listener); cleanup(); done <- err }()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client := agent.NewClient(conn)
+	if _, err := client.Sign(a.identities[0].public, []byte("before")); err != nil || len(store.signs) != 1 {
+		t.Fatalf("control: sign before the deadline: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve at deadline: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent kept serving past its deadline")
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatal("socket survived the deadline")
+	}
+	req := append([]byte{13}, ssh.Marshal(struct {
+		Key, Data []byte
+		Flags     uint32
+	}{a.identities[0].public.Marshal(), []byte("after"), 0})...)
+	if !bytes.Equal(a.handleSSH(ctx, req), []byte{sshFailure}) || len(store.signs) != 1 {
+		t.Fatal("signed after the deadline")
 	}
 }

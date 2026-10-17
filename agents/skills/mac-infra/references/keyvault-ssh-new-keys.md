@@ -54,17 +54,48 @@ and `session-bind@openssh.com` are not implemented: extensions are refused.
 Keep `ForwardAgent no` unless deliberately granting that capability. This
 agent does not replace an existing platform agent or modify the environment.
 
-An optional per-use hook uses `--confirm-exec /absolute/executable`, repeatable
-`--confirm-arg ARG` and `--confirm-timeout 15s` (positive, maximum one minute).
-It is executed directly, without shell evaluation, with only a fixed system
-PATH environment. One JSON object on stdin contains `address`, `version`,
-`fingerprint` (OpenSSH SHA256 fingerprint) and `sha256` (the exact SSH request
-data's digest). No message bytes are passed. Exit 0 grants this one request;
-nonzero exit, missing executable, timeout or cancellation refuse it. Output
-is discarded. Cancellation kills the process group; hooks must not daemonize
-or detach. Supply a reviewed executable that obtains the owner's explicit
-consent; `/usr/bin/true` would authorize every use and is not confirmation.
-There is no built-in GUI prompt and no implicit approve-by-default fallback.
+An optional confirmation hook uses `--confirm-exec /absolute/executable`,
+repeatable `--confirm-arg ARG` and `--confirm-timeout 15s` (positive, maximum
+one minute). It is executed directly, without shell evaluation, with only a
+fixed system PATH environment. One JSON object on stdin contains `purpose`,
+`address`, `version` and `fingerprint` (OpenSSH SHA256 fingerprint), plus
+`sha256` (the exact SSH request data's digest) for `purpose: sign` or `until`
+(RFC 3339) for `purpose: unlock`. No message bytes are passed. Exit 0 grants;
+nonzero exit, missing executable, timeout or cancellation refuse. Output is
+discarded. Cancellation kills the process group; hooks must not daemonize or
+detach. `/usr/bin/true` would authorize every use and is not confirmation.
+
+`--confirm-when` selects when the hook is asked: `sign` (default, every
+signature), `unlock` (once per selected identity before the socket is
+created) or `both`. `unlock` and `both` require `--unlock-for`.
+
+`--unlock-for DURATION` (greater than zero, at most 24h) makes the agent an
+expiring unlock: it serves until the deadline, then refuses, closes its
+connections, removes its socket and exits 0. With `--confirm-when unlock` a
+refused or timed-out confirmation exits 3 (`confirmation_required`) before
+any socket exists. Run such a job on demand (no `RunAtLoad`; `KeepAlive`
+`SuccessfulExit: false` does not restart a clean exit at the deadline).
+Combine it with a record `--not-after` so that the key itself also expires.
+
+### Reviewed confirmation dialog
+
+`mac-keyvault confirm-dialog [--wait 12s]` is the reviewed hook:
+
+```sh
+--confirm-exec "$HOME/.local/bin/mac-keyvault" --confirm-arg confirm-dialog
+```
+
+It reads one request (at most 4 KiB, known fields only, no trailing data,
+the fields its purpose requires, a future `until`) and shows a macOS dialog
+built only from those validated fields. They are passed to a fixed
+`osascript` script as arguments, never as script text. `Deny` is the default
+and the cancel button, and the dialog gives up after `--wait` (1s to 55s; keep
+it below `--confirm-timeout`). Only an explicit `Sign` or `Unlock` press exits
+0. Malformed input shows no dialog.
+
+The dialog is consent UX, not a hardware boundary. A process running as the
+same user with Accessibility permission could press the button by script.
+`--user-presence` (Touch ID) needs a provisioned, signed build.
 
 ## 1. Create new vault keys and public files
 

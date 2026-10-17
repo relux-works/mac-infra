@@ -68,22 +68,23 @@ func usagef(format string, args ...any) error {
 // usageLines are the per-command usage lines the error contract hands back
 // as the hint of a usage error.
 var usageLines = map[string]string{
-	"init":         "mac-keyvault [--json] init --service S --purpose P [--kind key] [--algorithm ec-p256] [--title T] [--description D] [--usages a,b] [--format-public F] [--format-signature F] [--format-envelope F] [--extraction none|human|agent] [--not-after RFC3339] [--meta k=v]... [--meta-json FILE] [--generate SPEC] [--keychain|--enclave] [--user-presence]",
-	"list":         "mac-keyvault [--json] list [--service S] [--kind K]",
-	"describe":     "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
-	"pub":          "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk|ssh]",
-	"sign":         "mac-keyvault [--json] sign <service>/<purpose> (--digest <hex|@file> | --data-file FILE | --stdin) [--raw | --format ecdsa-der-low-s|ecdsa-raw] [--out FILE] [--kind K] [--version N]",
-	"verify":       "mac-keyvault [--json] verify (<service>/<purpose> [--kind K] [--version N] | --spki FILE) (--digest <hex|@file> | --data-file FILE | --stdin) --sig <hex|@file> [--raw] [--allow-high-s]",
-	"rotate":       "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
-	"delete":       "mac-keyvault [--json] delete <service>/<purpose> --confirm [--kind K] [--version N]",
-	"meta":         "mac-keyvault [--json] meta get|set|unset <service>/<purpose> [key] [value] [--kind K] [--version N] [--json-value]",
-	"meta get":     "mac-keyvault [--json] meta get <service>/<purpose> [key] [--kind K] [--version N]",
-	"meta set":     "mac-keyvault [--json] meta set <service>/<purpose> <key> <value> [--json-value] [--kind K] [--version N]",
-	"meta unset":   "mac-keyvault [--json] meta unset <service>/<purpose> <key> [--kind K] [--version N]",
-	"signer":       "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
-	"signer serve": "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
-	"ssh-agent":    "mac-keyvault ssh-agent --socket PATH --key service/purpose@VERSION [--key ...] [--confirm-exec /absolute/executable] [--confirm-arg ARG] [--confirm-timeout 15s]",
-	"version":      "mac-keyvault [--json] version",
+	"init":           "mac-keyvault [--json] init --service S --purpose P [--kind key] [--algorithm ec-p256] [--title T] [--description D] [--usages a,b] [--format-public F] [--format-signature F] [--format-envelope F] [--extraction none|human|agent] [--not-after RFC3339] [--meta k=v]... [--meta-json FILE] [--generate SPEC] [--keychain|--enclave] [--user-presence]",
+	"list":           "mac-keyvault [--json] list [--service S] [--kind K]",
+	"describe":       "mac-keyvault [--json] describe <service>/<purpose> [--kind K] [--version N]",
+	"pub":            "mac-keyvault [--json] pub <service>/<purpose> [--kind K] [--version N] [--out FILE] [--format spki-der|spki-pem|jwk|ssh]",
+	"sign":           "mac-keyvault [--json] sign <service>/<purpose> (--digest <hex|@file> | --data-file FILE | --stdin) [--raw | --format ecdsa-der-low-s|ecdsa-raw] [--out FILE] [--kind K] [--version N]",
+	"verify":         "mac-keyvault [--json] verify (<service>/<purpose> [--kind K] [--version N] | --spki FILE) (--digest <hex|@file> | --data-file FILE | --stdin) --sig <hex|@file> [--raw] [--allow-high-s]",
+	"rotate":         "mac-keyvault [--json] rotate <service>/<purpose> [--kind K]",
+	"delete":         "mac-keyvault [--json] delete <service>/<purpose> --confirm [--kind K] [--version N]",
+	"meta":           "mac-keyvault [--json] meta get|set|unset <service>/<purpose> [key] [value] [--kind K] [--version N] [--json-value]",
+	"meta get":       "mac-keyvault [--json] meta get <service>/<purpose> [key] [--kind K] [--version N]",
+	"meta set":       "mac-keyvault [--json] meta set <service>/<purpose> <key> <value> [--json-value] [--kind K] [--version N]",
+	"meta unset":     "mac-keyvault [--json] meta unset <service>/<purpose> <key> [--kind K] [--version N]",
+	"signer":         "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
+	"signer serve":   "mac-keyvault signer serve --address <service>/<purpose> [--kind K] [--version N]",
+	"ssh-agent":      "mac-keyvault ssh-agent --socket PATH --key service/purpose@VERSION [--key ...] [--confirm-exec /absolute/executable] [--confirm-arg ARG] [--confirm-timeout 15s] [--confirm-when sign|unlock|both] [--unlock-for DURATION]",
+	"confirm-dialog": "mac-keyvault confirm-dialog [--wait 12s]   (ssh-agent confirmation hook: one request on stdin, exit 0 only on the grant button)",
+	"version":        "mac-keyvault [--json] version",
 }
 
 // response is the JSON envelope every command emits in --json mode.
@@ -259,6 +260,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runMeta(rest, out)
 	case "ssh-agent":
 		return runSSHAgent(rest, out)
+	case "confirm-dialog":
+		return runConfirmDialog(rest, out)
 	case "signer":
 		return runSigner(rest, out)
 	case "version":
@@ -1054,6 +1057,7 @@ Usage:
   %s
   %s
   %s
+  %s
 
 sign takes a SHA-256 digest (--digest) or hashes --data-file/--stdin itself and says so;
 it emits strict DER with low-S (or --raw r||s). verify judges the digest, the signature
@@ -1067,7 +1071,7 @@ consumer such as kvctl: hello line, then {id, op: describe|pub|sign|verify, ...}
 
 Exit codes: 0 ok, 1 failure, 2 usage, 3 refused by a policy gate. Every error is
 {code, message, hint, os_status}; text mode prints "error: <code>: <message>" and "hint: <hint>".
-`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["signer"], usageLines["ssh-agent"], usageLines["version"])
+`, keyvault.LabelPrefix, usageLines["init"], usageLines["list"], usageLines["describe"], usageLines["pub"], usageLines["sign"], usageLines["verify"], usageLines["rotate"], usageLines["delete"], usageLines["meta"], usageLines["signer"], usageLines["ssh-agent"], usageLines["confirm-dialog"], usageLines["version"])
 }
 
 // runSigner dispatches the signer subcommands; serve is the only one in

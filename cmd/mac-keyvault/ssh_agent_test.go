@@ -17,8 +17,10 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
-// CLI validation refuses missing/unpinned identities and invalid hook
-// options before opening the backend. Adjacent valid pub output is parseable.
+// CLI validation refuses missing/unpinned identities, invalid hook options,
+// an --unlock-for outside (0, 24h] and an unlock confirmation without a hook
+// or without --unlock-for, all before opening the backend. Adjacent valid pub
+// output is parseable.
 func TestRunSSHAgentArgumentsAndPublicKey(t *testing.T) {
 	store := newMemStore(tl("ssh-agent", 1))
 	old := newBackend
@@ -28,6 +30,13 @@ func TestRunSSHAgentArgumentsAndPublicKey(t *testing.T) {
 		{}, {"--socket", "/tmp/test.sock"}, {"--socket", "/tmp/test.sock", "--key", "test/ssh-agent"},
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@0"}, {"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-arg", "x"},
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-exec", "relative"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--unlock-for", "0s"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--unlock-for", "-1s"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--unlock-for", "25h"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-exec", "/usr/bin/true", "--confirm-when", "always"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--unlock-for", "1h", "--confirm-when", "unlock"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-exec", "/usr/bin/true", "--confirm-when", "unlock"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-exec", "/usr/bin/true", "--confirm-when", "both"},
 	} {
 		var out, err bytes.Buffer
 		code := run(append([]string{"--json", "ssh-agent"}, args...), &out, &err)
@@ -66,7 +75,11 @@ func TestSSHAgentCLIHelper(t *testing.T) {
 	store := newMemStore(tl("ssh-agent", 1))
 	newBackend = func() keyvault.Backend { return store }
 	lockPath = func() (string, error) { return filepath.Join(os.Getenv("MAC_KEYVAULT_SSH_HELPER_DIR"), "lock"), nil }
-	os.Exit(run([]string{"ssh-agent", "--socket", os.Getenv("MAC_KEYVAULT_SSH_HELPER_SOCKET"), "--key", "test/ssh-agent@1"}, os.Stdout, os.Stderr))
+	args := []string{"ssh-agent", "--socket", os.Getenv("MAC_KEYVAULT_SSH_HELPER_SOCKET"), "--key", "test/ssh-agent@1"}
+	if extra := os.Getenv("MAC_KEYVAULT_SSH_HELPER_EXTRA"); extra != "" {
+		args = append(args, strings.Split(extra, "\x1f")...)
+	}
+	os.Exit(run(args, os.Stdout, os.Stderr))
 }
 
 // The actual CLI serves identities, handles SIGTERM cleanly and removes its
@@ -137,5 +150,139 @@ func TestRunSSHAgentLifecycle(t *testing.T) {
 	content, _ := os.ReadFile(socket)
 	if string(content) != "foreign" {
 		t.Fatal("foreign path changed")
+	}
+}
+
+// startSSHHelper runs the CLI agent in a child process with a memory backend
+// and the given extra arguments.
+func startSSHHelper(t *testing.T, extra ...string) (*exec.Cmd, string, *bytes.Buffer) {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "kv-cli-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "agent.sock")
+	logs := &bytes.Buffer{}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSSHAgentCLIHelper$")
+	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "MAC_KEYVAULT_SSH_HELPER=1", "MAC_KEYVAULT_SSH_HELPER_DIR=" + dir,
+		"MAC_KEYVAULT_SSH_HELPER_SOCKET=" + socket, "MAC_KEYVAULT_SSH_HELPER_EXTRA=" + strings.Join(extra, "\x1f")}
+	cmd.Stdout = logs
+	cmd.Stderr = logs
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}
+	})
+	return cmd, socket, logs
+}
+
+// dialSSHHelper waits for the child agent's socket. The bound is generous:
+// under a loaded full-suite run, starting the test binary and a hook takes
+// seconds.
+func dialSSHHelper(t *testing.T, socket string, logs *bytes.Buffer) net.Conn {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if conn, err := net.Dial("unix", socket); err == nil {
+			return conn
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("agent did not open its socket: %s", logs)
+	return nil
+}
+
+func waitExit(t *testing.T, cmd *exec.Cmd, within time.Duration) (int, bool) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+		return cmd.ProcessState.ExitCode(), true
+	case <-time.After(within):
+		return 0, false
+	}
+}
+
+// Claim: with --unlock-for the CLI agent serves its identities, then stops
+// by itself at the deadline with exit 0 and removes its socket; the plain
+// agent in TestRunSSHAgentLifecycle keeps running until signalled.
+func TestRunSSHAgentUnlockExpires(t *testing.T) {
+	cmd, socket, logs := startSSHHelper(t, "--unlock-for", "6s")
+	conn := dialSSHHelper(t, socket, logs)
+	keys, err := agent.NewClient(conn).List()
+	conn.Close()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("identities before the deadline: %v %v", keys, err)
+	}
+	code, exited := waitExit(t, cmd, 15*time.Second)
+	if !exited || code != 0 {
+		t.Fatalf("exited=%v code=%d logs %s", exited, code, logs)
+	}
+	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
+		t.Fatal("socket survived the unlock deadline")
+	}
+	if !strings.Contains(logs.String(), " until ") {
+		t.Fatalf("readiness line does not state the deadline: %s", logs)
+	}
+}
+
+// Claim: when the unlock is not confirmed the agent exits refused and never
+// creates its socket; a granting hook is the positive control.
+func TestRunSSHAgentUnlockConfirmation(t *testing.T) {
+	cmd, socket, logs := startSSHHelper(t, "--unlock-for", "1h", "--confirm-when", "unlock", "--confirm-exec", "/usr/bin/false")
+	code, exited := waitExit(t, cmd, 10*time.Second)
+	if !exited || code != exitRefused {
+		t.Fatalf("denied unlock: exited=%v code=%d logs %s", exited, code, logs)
+	}
+	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
+		t.Fatal("a socket exists after a denied unlock")
+	}
+	control, controlSocket, controlLogs := startSSHHelper(t, "--unlock-for", "1h", "--confirm-when", "unlock", "--confirm-exec", "/usr/bin/true")
+	dialSSHHelper(t, controlSocket, controlLogs).Close()
+	control.Process.Signal(syscall.SIGTERM)
+	if code, exited := waitExit(t, control, 3*time.Second); !exited || code != 0 {
+		t.Fatalf("control shutdown: exited=%v code=%d", exited, code)
+	}
+}
+
+// Claim: --confirm-when decides which requests reach the hook. With a hook
+// that grants only unlock requests, `unlock` lets signatures through without
+// asking, while `both` also asks for each signature and so refuses it.
+func TestRunSSHAgentConfirmWhenSelectsPurposes(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "kv-hook-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	hook := filepath.Join(dir, "unlock-only")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexec /usr/bin/grep -q '\"purpose\":\"unlock\"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		when   string
+		signOK bool
+	}{{"unlock", true}, {"both", false}} {
+		t.Run(tc.when, func(t *testing.T) {
+			cmd, socket, logs := startSSHHelper(t, "--unlock-for", "1h", "--confirm-when", tc.when, "--confirm-exec", hook)
+			conn := dialSSHHelper(t, socket, logs)
+			defer conn.Close()
+			client := agent.NewClient(conn)
+			keys, err := client.List()
+			if err != nil || len(keys) != 1 {
+				t.Fatalf("identities: %v %v", keys, err)
+			}
+			_, signErr := client.Sign(keys[0], []byte("message"))
+			if (signErr == nil) != tc.signOK {
+				t.Fatalf("sign error = %v, want ok=%v", signErr, tc.signOK)
+			}
+			cmd.Process.Signal(syscall.SIGTERM)
+			waitExit(t, cmd, 3*time.Second)
+		})
 	}
 }

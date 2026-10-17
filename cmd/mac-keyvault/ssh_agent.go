@@ -15,6 +15,10 @@ import (
 	"github.com/relux-works/mac-infra/internal/keyvault"
 )
 
+// maxSSHUnlock bounds --unlock-for: an unlock is a working session, not a
+// standing grant.
+const maxSSHUnlock = 24 * time.Hour
+
 type sshRepeated []string
 
 func (s *sshRepeated) String() string         { return strings.Join(*s, ",") }
@@ -28,6 +32,8 @@ func runSSHAgent(args []string, out output) int {
 	hookPath := fs.String("confirm-exec", "", "absolute confirmation executable; exit 0 grants each use")
 	fs.Var(&hookArgs, "confirm-arg", "literal confirmation argument (repeatable)")
 	hookTimeout := fs.Duration("confirm-timeout", 15*time.Second, "confirmation deadline (at most 1m)")
+	confirmWhen := fs.String("confirm-when", "sign", "when the hook is asked: sign (each signature), unlock (once at start), both")
+	unlockFor := fs.Duration("unlock-for", 0, "serve only this long (at most 24h), then refuse, remove the socket and exit 0")
 	positional, err := parseFlags(fs, args)
 	if err != nil {
 		return out.fail(err)
@@ -48,26 +54,63 @@ func runSSHAgent(args []string, out output) int {
 		}
 		addresses = append(addresses, addr)
 	}
+	unlockSet := false
+	fs.Visit(func(f *flag.Flag) { unlockSet = unlockSet || f.Name == "unlock-for" })
+	if unlockSet && (*unlockFor <= 0 || *unlockFor > maxSSHUnlock) {
+		return out.fail(usagef("--unlock-for must be in (0, 24h]"))
+	}
+	confirmSign, confirmUnlock := false, false
+	switch *confirmWhen {
+	case "sign":
+		confirmSign = true
+	case "unlock":
+		confirmUnlock = true
+	case "both":
+		confirmSign, confirmUnlock = true, true
+	default:
+		return out.fail(usagef("--confirm-when must be sign, unlock or both"))
+	}
+	if confirmUnlock && !unlockSet {
+		return out.fail(usagef("--confirm-when %s requires --unlock-for", *confirmWhen))
+	}
 	var hook func(context.Context, keyvault.SSHConfirmation) error
 	if *hookPath != "" {
 		hook, err = keyvault.SSHConfirmHook(*hookPath, hookArgs, *hookTimeout)
 		if err != nil {
 			return out.fail(usagef("%s", err))
 		}
-	} else if len(hookArgs) != 0 || *hookTimeout != 15*time.Second {
+	} else if len(hookArgs) != 0 || *hookTimeout != 15*time.Second || *confirmWhen != "sign" {
 		return out.fail(usagef("confirmation options require --confirm-exec"))
+	}
+	signHook := hook
+	if !confirmSign {
+		signHook = nil
 	}
 	manager, err := newManager()
 	if err != nil {
 		return out.fail(errors.New("SSH keyvault unavailable"))
 	}
-	agent, err := keyvault.NewSSHAgent(manager, addresses, hook)
+	agent, err := keyvault.NewSSHAgent(manager, addresses, signHook)
 	if err != nil {
 		classified := keyvault.ClassifyError(err)
 		return out.fail(&keyvault.Refusal{Code: classified.Code, Failure: classified.Failure, Status: classified.Status, Message: "SSH identities unavailable or signing policy refused", Hint: "use describe to inspect the selected records"})
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var until time.Time
+	if unlockSet {
+		until = time.Now().Add(*unlockFor)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, until)
+		defer cancel()
+	}
+	// The unlock is granted before the socket exists: a refusal leaves no
+	// socket for any client to reach.
+	if confirmUnlock {
+		if err := agent.ConfirmUnlock(ctx, hook, until); err != nil {
+			return out.fail(&keyvault.Refusal{Code: keyvault.CodeConfirmationRequired, Message: "unlock was not confirmed", Hint: "the agent did not open its socket"})
+		}
+	}
 	listener, cleanup, err := keyvault.ListenSSH(*socket)
 	if err != nil {
 		return out.fail(err)
@@ -75,7 +118,13 @@ func runSSHAgent(args []string, out output) int {
 	defer cleanup()
 	// Readiness is public metadata. Protocol traffic only uses the socket.
 	if out.json {
-		out.success(map[string]any{"socket": *socket, "identities": len(addresses)}, nil)
+		ready := map[string]any{"socket": *socket, "identities": len(addresses)}
+		if unlockSet {
+			ready["until"] = until.UTC().Format(time.RFC3339)
+		}
+		out.success(ready, nil)
+	} else if unlockSet {
+		fmt.Fprintf(out.stderr, "SSH agent listening on %s until %s\n", *socket, until.UTC().Format(time.RFC3339))
 	} else {
 		fmt.Fprintf(out.stderr, "SSH agent listening on %s\n", *socket)
 	}

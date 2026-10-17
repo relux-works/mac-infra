@@ -80,7 +80,7 @@ var ErrorContract = []ErrorCode{
 	{CodeNotFound, ExitFailure, true, "no record for address/kind/version: the hello when the address does not resolve, a response when the generation vanished after the hello"},
 	{CodeForeignLabel, ExitRefused, true, "the address is a raw label or resolves outside the vault prefix (startup hello)"},
 	{CodeDuplicate, ExitRefused, false, "(kind, service, purpose, version) exists on init"},
-	{CodeConfirmationRequired, ExitRefused, false, "delete without --confirm"},
+	{CodeConfirmationRequired, ExitRefused, false, "delete without --confirm; ssh-agent unlock not confirmed"},
 	{CodeMissingEntitlement, ExitFailure, true, "Security returned -34018 (enclave / data-protection keychain); hello when list fails so, response when sign does"},
 	{CodeUnsupportedStore, ExitRefused, false, "a store this revision does not create"},
 	{CodeSecurity, ExitFailure, true, "any other Security.framework failure (os_status set), or its output is untrusted: unreadable public half on pub/verify, a signature that does not parse or verify under the key on sign (no os_status)"},
