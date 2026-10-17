@@ -20,6 +20,8 @@ type fakeHost struct {
 	failArgv   map[string]bool
 	ignoreArgv map[string]bool
 	commands   []string
+	// lsof is the listener output; empty means nothing listens (exit 1).
+	lsof string
 }
 
 func newFakeHost(state State) *fakeHost {
@@ -129,6 +131,12 @@ func (h *fakeHost) Run(ctx context.Context, path string, args ...string) ([]byte
 			return []byte(b.String()), nil
 		}
 		return nil, nil
+	}
+	if path == Lsof {
+		if h.lsof == "" {
+			return nil, &ExitError{Code: 1}
+		}
+		return []byte(h.lsof), nil
 	}
 	return nil, fmt.Errorf("fake host: unsupported %s", path)
 }

@@ -42,7 +42,7 @@ func (r *staticFirewallRunner) Run(_ context.Context, path string, args ...strin
 func (r *staticFirewallRunner) mutations() []string {
 	var result []string
 	for _, call := range r.calls {
-		if !strings.Contains(call, " --get") && !strings.HasSuffix(call, "--listapps") && !strings.Contains(call, " print") {
+		if !strings.Contains(call, " --get") && !strings.HasSuffix(call, "--listapps") && !strings.Contains(call, " print") && !strings.HasPrefix(call, firewall.Lsof+" ") {
 			result = append(result, call)
 		}
 	}
@@ -266,5 +266,17 @@ func TestMarkManagedRefusalPreservesHardLink(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(sentinel); string(data) != "keep me\n" {
 		t.Fatalf("sentinel = %q", data)
+	}
+}
+
+// Claim: the helper answers a status whose listener listing is unrecognized
+// (this runner answers lsof with "ok") as OK with the state and the
+// listener_error, so callers can still read the firewall state; error stays
+// empty and nothing is mutated.
+func TestFirewallStatusListenerErrorStaysOK(t *testing.T) {
+	runner := &staticFirewallRunner{}
+	response := testFirewallService(runner, &memoryFirewallStore{}).handle(ActionFirewallStatus, nil, 501, 1)
+	if !response.OK || response.Error != "" || response.Firewall == nil || response.Firewall.Before == nil || response.Firewall.ListenerError == "" || len(runner.mutations()) != 0 {
+		t.Fatalf("status: %+v, mutations %v", response, runner.mutations())
 	}
 }

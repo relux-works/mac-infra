@@ -17,7 +17,8 @@ type Listener struct {
 }
 
 // Status reads the firewall state and the TCP listeners. Run as root inside
-// the helper it sees every process; UDP is not inspected.
+// the helper it sees every process; UDP is not inspected. A failed listener
+// inspection goes to ListenerError and leaves the state report intact.
 func (e Engine) Status(ctx context.Context) Report {
 	state, err := Observe(ctx, e.Runner)
 	if err != nil {
@@ -27,12 +28,12 @@ func (e Engine) Status(ctx context.Context) Report {
 	out, err := e.Runner.Run(ctx, Lsof, lsofListenerArgs...)
 	// lsof exits 1 with no output when nothing listens.
 	if err != nil && !(exitCode(err) == 1 && len(out) == 0) {
-		report.Error = fmt.Sprintf("listener inspection: %v", err)
+		report.ListenerError = fmt.Sprintf("listener inspection: %v", err)
 		return report
 	}
 	listeners, ok := security.ParseListeners(string(out))
 	if !ok {
-		report.Error = "listener output was not recognized"
+		report.ListenerError = "listener output was not recognized"
 		return report
 	}
 	for _, l := range listeners {

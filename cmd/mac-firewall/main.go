@@ -88,7 +88,12 @@ func run(args []string, out, errOut io.Writer) int {
 	switch command {
 	case "status":
 		response, err := firewallStatus(service)
-		return report(out, errOut, *asJSON, response, err, printStatus)
+		code := report(out, errOut, *asJSON, response, err, printStatus)
+		if code == 0 && response.Firewall.ListenerError != "" {
+			fmt.Fprintf(errOut, "mac-firewall: %s\n", response.Firewall.ListenerError)
+			return 1
+		}
+		return code
 	case "init-config":
 		return initConfig(out, errOut, service, path)
 	}
@@ -134,7 +139,13 @@ func loadConfig(path string) (firewall.Config, error) {
 
 func initConfig(out, errOut io.Writer, service maccore.ServiceConfig, path string) int {
 	response, err := firewallStatus(service)
-	if err != nil || response.Firewall == nil || response.Firewall.Before == nil {
+	// A status report carries Before only when the state was read; any error
+	// next to it concerns the listener listing (a helper installed before
+	// listener_error put it in error), so the state is still a valid seed.
+	if response.Firewall == nil || response.Firewall.Outcome != firewall.OutcomeStatus || response.Firewall.Before == nil {
+		if err == nil {
+			err = errors.New("no firewall state in the report")
+		}
 		fmt.Fprintf(errOut, "read firewall state through mac-infra-core: %v\n", err)
 		return 1
 	}
@@ -225,6 +236,11 @@ func printState(out io.Writer, s firewall.State) {
 func printStatus(out io.Writer, r firewall.Report) {
 	if r.Before != nil {
 		printState(out, *r.Before)
+	}
+	// An empty list must not read as "nothing listens" when inspection failed.
+	if r.ListenerError != "" || r.Error != "" {
+		fmt.Fprintln(out, "TCP listeners: not inspected (error below)")
+		return
 	}
 	fmt.Fprintln(out, "TCP listeners on non-loopback addresses (UDP not inspected):")
 	for _, l := range r.Listeners {

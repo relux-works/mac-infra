@@ -556,3 +556,48 @@ func TestPaddedTwinEntryDoesNotSatisfyConfig(t *testing.T) {
 		t.Fatalf("plan = %+v (%s)", report.Plan, report.Error)
 	}
 }
+
+// Claim: status parses real macOS lsof 4.91 listener output (TQR/TQS lines
+// included) into listeners with the non-loopback flag. Nothing listening
+// (lsof exit 1, no output) is an empty list, not an error.
+func TestStatusParsesRealLsofOutput(t *testing.T) {
+	raw, err := os.ReadFile("../testdata/lsof-listen-host-261018.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := newFakeHost(hostLikeState())
+	host.lsof = string(raw)
+	report := Engine{Runner: host}.Status(ctx)
+	if report.Outcome != OutcomeStatus || report.Error != "" || report.ListenerError != "" || report.Before == nil || len(report.Listeners) != 8 {
+		t.Fatalf("status: %+v", report)
+	}
+	if !report.Listeners[0].NonLoopback || report.Listeners[7].NonLoopback || report.Listeners[7].Bind != "127.0.0.1:9001" {
+		t.Fatalf("listeners: %+v", report.Listeners)
+	}
+	host.lsof = ""
+	if report = (Engine{Runner: host}).Status(ctx); report.ListenerError != "" || report.Listeners == nil || len(report.Listeners) != 0 {
+		t.Fatalf("nothing listening: %+v", report)
+	}
+}
+
+// Claim: a listener inspection that fails or is not recognized is reported in
+// listener_error only: the status keeps its outcome and state, error stays
+// empty, no listener is invented, and the helper response stays OK.
+func TestStatusListenerFailureKeepsState(t *testing.T) {
+	for name, setup := range map[string]func(*fakeHost){
+		"unrecognized": func(h *fakeHost) { h.lsof = "p1\nu0\nf3\nPTCP\nn*:22\nTST=LISTEN\nccommand\n" },
+		"failed": func(h *fakeHost) {
+			h.lsof = "x"
+			h.failArgv[strings.Join(append([]string{Lsof}, lsofListenerArgs...), " ")] = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := newFakeHost(hostLikeState())
+			setup(host)
+			report := Engine{Runner: host}.Status(ctx)
+			if report.Outcome != OutcomeStatus || report.Error != "" || report.ListenerError == "" || report.Before == nil || len(report.Listeners) != 0 {
+				t.Fatalf("status: %+v", report)
+			}
+		})
+	}
+}

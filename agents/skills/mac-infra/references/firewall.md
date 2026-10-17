@@ -10,8 +10,8 @@ convenience.
 
 | Command | Effect |
 | --- | --- |
-| `mac-firewall status [--json]` | Firewall state, app exceptions, allowlisted services, TCP listeners (root view, so every process; UDP is not inspected). Listener entries carry pid, uid and bind only, never process names or argv. |
-| `mac-firewall init-config [--config PATH]` | Writes a `0600` config seeded from the current state with `apps.mode: listed`, so applying it unchanged is a no-op. Never overwrites. Entries that socketfilterfw reports by bundle id cannot be listed by path and are printed instead. |
+| `mac-firewall status [--json]` | Firewall state, app exceptions, allowlisted services, TCP listeners (root view, so every process; UDP is not inspected). Listener entries carry pid, uid and bind only, never process names or argv. If the listener listing fails, the state is still printed, `--json` carries `listener_error`, and the exit code is 1. |
+| `mac-firewall init-config [--config PATH]` | Writes a `0600` config seeded from the current state with `apps.mode: listed`, so applying it unchanged is a no-op. Never overwrites. Entries that socketfilterfw reports by bundle id cannot be listed by path and are printed instead. Needs only the firewall state: a failed listener listing does not block it. |
 | `mac-firewall plan [--config PATH] [--json]` | Dry run: prints each step marked `tightens` or `LOOSENS`. Runs no mutating command. |
 | `mac-firewall apply [--config PATH] [--apply] [--json]` | Without `--apply`, the same as `plan`. With it, applies (see below). |
 

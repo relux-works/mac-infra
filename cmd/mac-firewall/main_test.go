@@ -120,3 +120,61 @@ func TestUsageErrors(t *testing.T) {
 		t.Fatalf("usage errors contacted the helper: %+v", *c)
 	}
 }
+
+func stubStatus(t *testing.T, response maccore.Response, err error) {
+	t.Helper()
+	orig := firewallStatus
+	firewallStatus = func(maccore.ServiceConfig) (maccore.Response, error) { return response, err }
+	t.Cleanup(func() { firewallStatus = orig })
+}
+
+// Claim: init-config seeds from the state of a status report even when the
+// helper flagged its listener listing, including a helper installed before
+// listener_error existed (error in "error", OK false). Without a state, or
+// for a non-status outcome, it refuses and writes nothing.
+func TestInitConfigToleratesListenerFailureOnly(t *testing.T) {
+	state := &firewall.State{Apps: []firewall.App{{Name: "/usr/sbin/cupsd", Allowed: true}}}
+	cases := []struct {
+		name     string
+		response maccore.Response
+		err      error
+		want     int
+	}{
+		{"new helper", maccore.Response{OK: true, Firewall: &firewall.Report{Outcome: firewall.OutcomeStatus, Before: state, ListenerError: "listener output was not recognized"}}, nil, 0},
+		{"old helper", maccore.Response{Error: "listener output was not recognized", Firewall: &firewall.Report{Outcome: firewall.OutcomeStatus, Before: state, Error: "listener output was not recognized"}}, errors.New("listener output was not recognized"), 0},
+		{"state unreadable", maccore.Response{Error: "socketfilterfw failed", Firewall: &firewall.Report{Outcome: firewall.OutcomeRefused, Error: "socketfilterfw failed"}}, errors.New("socketfilterfw failed"), 1},
+		{"status without state", maccore.Response{OK: true, Firewall: &firewall.Report{Outcome: firewall.OutcomeStatus}}, nil, 1},
+		{"not a status", maccore.Response{OK: true, Firewall: &firewall.Report{Outcome: firewall.OutcomePlanned, Before: state}}, nil, 1},
+		{"helper unreachable", maccore.Response{}, errors.New("dial: no such file"), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubStatus(t, tc.response, tc.err)
+			path := filepath.Join(t.TempDir(), "firewall.json")
+			var out, errOut bytes.Buffer
+			code := run([]string{"init-config", "--config", path}, &out, &errOut)
+			_, statErr := os.Stat(path)
+			if code != tc.want || (code == 0) != (statErr == nil) {
+				t.Fatalf("code %d (want %d), file err %v, stderr %s", code, tc.want, statErr, errOut.String())
+			}
+		})
+	}
+}
+
+// Claim: status exits 1 and says the listeners were not inspected when the
+// listener listing failed, while still printing the firewall state; a clean
+// report exits 0 with the listener section (control).
+func TestStatusListenerErrorExitsNonZero(t *testing.T) {
+	state := &firewall.State{Enabled: true}
+	stubStatus(t, maccore.Response{OK: true, Firewall: &firewall.Report{Outcome: firewall.OutcomeStatus, Before: state, ListenerError: "listener output was not recognized"}}, nil)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"status"}, &out, &errOut); code != 1 || !strings.Contains(out.String(), "firewall: on") || !strings.Contains(out.String(), "not inspected") || strings.Contains(out.String(), "non-loopback addresses") || !strings.Contains(errOut.String(), "not recognized") {
+		t.Fatalf("code %d, out %s, stderr %s", code, out.String(), errOut.String())
+	}
+	stubStatus(t, maccore.Response{OK: true, Firewall: &firewall.Report{Outcome: firewall.OutcomeStatus, Before: state, Listeners: []firewall.Listener{}}}, nil)
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"status"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "non-loopback addresses") {
+		t.Fatalf("control: code %d, out %s, stderr %s", code, out.String(), errOut.String())
+	}
+}

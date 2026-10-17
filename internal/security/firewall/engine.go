@@ -38,6 +38,9 @@ type Report struct {
 	After     *State          `json:"after,omitempty"`
 	Drift     string          `json:"drift,omitempty"`
 	Listeners []Listener      `json:"listeners,omitempty"`
+	// ListenerError reports a failed listener inspection in a status; the
+	// firewall state in Before is still valid.
+	ListenerError string `json:"listener_error,omitempty"`
 }
 
 type Engine struct {

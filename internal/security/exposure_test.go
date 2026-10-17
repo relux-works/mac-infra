@@ -49,6 +49,50 @@ func TestExposureListenerParser(t *testing.T) {
 	}
 }
 
+// Real macOS lsof 4.91 output (testdata, captured 2026-10-18) carries TQR=/TQS=
+// after TST=LISTEN despite -Ts; it parses to one listener per file record.
+// Limit: the fixture is a user-view capture; root output has the same fields.
+func TestExposureListenerParserRealLsof(t *testing.T) {
+	raw, err := os.ReadFile("testdata/lsof-listen-host-261018.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := parseListeners(string(raw))
+	want := []Listener{{1037, 501, "*:49173", "TCP"}, {1037, 501, "*:49173", "TCP"}, {1041, 501, "*:7000", "TCP"}, {1041, 501, "*:7000", "TCP"}, {1041, 501, "*:5000", "TCP"}, {1041, 501, "*:5000", "TCP"}, {1123, 501, "127.0.0.1:11434", "TCP"}, {1125, 501, "127.0.0.1:9001", "TCP"}}
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v %v", got, ok)
+	}
+	r := checksOutput(listenerCommand, string(raw))
+	if c := listenerExposure(context.Background(), r); c.Status != "partial" {
+		t.Fatalf("real output check %#v", c)
+	}
+}
+
+// The queue fields are accepted only in their exact numeric form, once per
+// file and inside a file record; ST=LISTEN stays mandatory, and an unknown T
+// field or line kind still refuses the whole output (control: the first case).
+func TestExposureListenerParserQueueFields(t *testing.T) {
+	base := "p7\nu0\nf3\nPTCP\nn*:22\nTST=LISTEN\n"
+	if got, ok := parseListeners(base + "TQR=0\nTQS=12\n"); !ok || len(got) != 1 {
+		t.Fatalf("control refused: %#v %v", got, ok)
+	}
+	for name, raw := range map[string]string{
+		"unknown T field":      base + "TQR=0\nTQS=0\nTWIN=65535\n",
+		"duplicate QR":         base + "TQR=0\nTQR=0\n",
+		"duplicate QS":         base + "TQS=0\nTQS=1\n",
+		"non-numeric QR":       base + "TQR=-1\n",
+		"empty QS":             base + "TQS=\n",
+		"queue without LISTEN": "p7\nu0\nf3\nPTCP\nn*:22\nTQR=0\nTQS=0\n",
+		"queue before file":    "p7\nu0\nTQR=0\nf3\nPTCP\nn*:22\nTST=LISTEN\n",
+		"unknown line kind":    base + "TQR=0\nTQS=0\nccommand-name\n",
+		"duplicate ST":         base + "TST=LISTEN\n",
+	} {
+		if result, ok := parseListeners(raw); ok || result != nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 // Loopback controls remain unflagged, while IPv4/IPv6 wildcard, non-loopback,
 // and scoped IPv6 binds produce warnings without claiming network reachability.
 func TestExposureBindClassificationAndVisibility(t *testing.T) {

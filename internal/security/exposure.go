@@ -89,6 +89,7 @@ func parseListeners(raw string) ([]Listener, bool) {
 	current := Listener{}
 	inFile := false
 	hasProtocol, hasBind, hasState := false, false, false
+	hasRecvQueue, hasSendQueue := false, false
 	flush := func() bool {
 		if !inFile {
 			return true
@@ -142,6 +143,7 @@ func parseListeners(raw string) ([]Listener, bool) {
 			hasProtocol = false
 			hasBind = false
 			hasState = false
+			hasRecvQueue, hasSendQueue = false, false
 		case 'P':
 			if !inFile || hasProtocol || v != "TCP" {
 				return nil, false
@@ -155,10 +157,20 @@ func parseListeners(raw string) ([]Listener, bool) {
 			current.Bind = v
 			hasBind = true
 		case 'T':
-			if !inFile || hasState || v != "ST=LISTEN" {
+			// lsof 4.91 on macOS adds the queue sizes (QR=, QS=) even with
+			// -Ts; they are checked and dropped.
+			switch {
+			case !inFile:
+				return nil, false
+			case v == "ST=LISTEN" && !hasState:
+				hasState = true
+			case strings.HasPrefix(v, "QR=") && !hasRecvQueue && listenerDigitsPattern.MatchString(v[3:]):
+				hasRecvQueue = true
+			case strings.HasPrefix(v, "QS=") && !hasSendQueue && listenerDigitsPattern.MatchString(v[3:]):
+				hasSendQueue = true
+			default:
 				return nil, false
 			}
-			hasState = true
 		default:
 			return nil, false
 		}

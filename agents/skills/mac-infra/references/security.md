@@ -38,7 +38,9 @@ without opening those files. Agent key count is read using `ssh-add -l`;
 comments and fingerprints are suppressed because comments may contain secrets.
 
 Listeners show visible TCP PID/UID/bind/protocol only, with wildcard and
-non-loopback warnings. UDP, complete root process visibility, router mappings
+non-loopback warnings. The queue sizes (`TQR=`/`TQS=`) that macOS lsof adds
+even with `-Ts` are validated and dropped; any other unknown field refuses
+the whole listing. UDP, complete root process visibility, router mappings
 and WAN reachability are not established. Sharing shows explicit launchd
 overrides only, not active service state. Protection checks recognize only
 known replies; absent preferences and custom/transitional protection responses
