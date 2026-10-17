@@ -109,10 +109,12 @@ type SSHAuditLog struct {
 // symlinks, hard links, files others can write, a file another agent holds,
 // a file whose last record is incomplete, and a file it cannot sync.
 func OpenSSHAuditLog(path string) (*SSHAuditLog, error) {
-	return openSSHAuditLog(path, (*os.File).Sync)
+	return openSSHAuditLog(path, (*os.File).Sync, nil)
 }
 
-func openSSHAuditLog(path string, syncFile func(*os.File) error) (*SSHAuditLog, error) {
+// openSSHAuditLog takes the sync function and a hook that runs just before
+// the lock is taken; tests use them to inject faults and races.
+func openSSHAuditLog(path string, syncFile func(*os.File) error, beforeLock func()) (*SSHAuditLog, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("SSH audit log path must be absolute")
 	}
@@ -130,11 +132,20 @@ func openSSHAuditLog(path string, syncFile func(*os.File) error) (*SSHAuditLog, 
 		file.Close()
 		return nil, errors.New("SSH audit log must be a regular 0600 file owned by you with one link")
 	}
+	if beforeLock != nil {
+		beforeLock()
+	}
 	// One agent per log: a second writer could continue a line the first
 	// one left incomplete. The lock is released when the file is closed.
 	if syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 		file.Close()
 		return nil, errors.New("SSH audit log is in use by another agent")
+	}
+	// The previous holder may have written until it released the lock, so
+	// the tail is checked against the size seen under the lock.
+	if st, err = file.Stat(); err != nil {
+		file.Close()
+		return nil, errors.New("cannot inspect SSH audit log")
 	}
 	if st.Size() > 0 {
 		last := make([]byte, 1)

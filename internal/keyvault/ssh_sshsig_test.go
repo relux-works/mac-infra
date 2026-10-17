@@ -342,7 +342,7 @@ func TestSSHAuditPartialWriteDisablesLog(t *testing.T) {
 // Control: the same file opens with a working sync.
 func TestSSHAuditSyncFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	if log, err := openSSHAuditLog(path, func(*os.File) error { return errors.New("input/output error") }); err == nil {
+	if log, err := openSSHAuditLog(path, func(*os.File) error { return errors.New("input/output error") }, nil); err == nil {
 		log.Close()
 		t.Fatal("opened a log that cannot be synced")
 	}
@@ -439,4 +439,39 @@ func TestSSHAuditLogSingleWriter(t *testing.T) {
 		t.Fatalf("control: %v", err)
 	}
 	again.Close()
+}
+
+// A writer that looked at the file before the previous holder finished must
+// judge the tail by what it sees under the lock: when the holder leaves an
+// incomplete line (on an empty file or after complete records) and exits
+// between the second open and its lock, the second open is refused.
+// Control: a holder that leaves a complete line hands the log over.
+func TestSSHAuditLogHandoffChecksTailUnderLock(t *testing.T) {
+	for _, tc := range []struct {
+		name, existing, written string
+		wantOpen                bool
+	}{
+		{"empty then partial", "", `{"outcome":"sig`, false},
+		{"complete then partial", "{\"outcome\":\"signed\",\"digest_prefix\":\"00\"}\n", `{"outcome":"sig`, false},
+		{"complete handoff", "", "{\"outcome\":\"signed\",\"digest_prefix\":\"01\"}\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			os.WriteFile(path, []byte(tc.existing), 0600)
+			holder, err := OpenSSHAuditLog(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := openSSHAuditLog(path, (*os.File).Sync, func() {
+				holder.file.Write([]byte(tc.written))
+				holder.Close()
+			})
+			if (err == nil) != tc.wantOpen {
+				t.Fatalf("second open: %v", err)
+			}
+			if second != nil {
+				second.Close()
+			}
+		})
+	}
 }
