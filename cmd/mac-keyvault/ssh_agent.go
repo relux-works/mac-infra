@@ -54,8 +54,11 @@ func runSSHAgent(args []string, out output) int {
 		}
 		addresses = append(addresses, addr)
 	}
-	unlockSet := false
-	fs.Visit(func(f *flag.Flag) { unlockSet = unlockSet || f.Name == "unlock-for" })
+	unlockSet, whenSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		unlockSet = unlockSet || f.Name == "unlock-for"
+		whenSet = whenSet || f.Name == "confirm-when"
+	})
 	if unlockSet && (*unlockFor <= 0 || *unlockFor > maxSSHUnlock) {
 		return out.fail(usagef("--unlock-for must be in (0, 24h]"))
 	}
@@ -79,7 +82,9 @@ func runSSHAgent(args []string, out output) int {
 		if err != nil {
 			return out.fail(usagef("%s", err))
 		}
-	} else if len(hookArgs) != 0 || *hookTimeout != 15*time.Second || *confirmWhen != "sign" {
+	} else if len(hookArgs) != 0 || *hookTimeout != 15*time.Second || whenSet {
+		// An explicit --confirm-when without a hook would silently sign
+		// unconfirmed; only the absent flag keeps hook-free signing.
 		return out.fail(usagef("confirmation options require --confirm-exec"))
 	}
 	signHook := hook
@@ -100,6 +105,7 @@ func runSSHAgent(args []string, out output) int {
 	var until time.Time
 	if unlockSet {
 		until = time.Now().Add(*unlockFor)
+		agent.ExpireAt(until)
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, until)
 		defer cancel()

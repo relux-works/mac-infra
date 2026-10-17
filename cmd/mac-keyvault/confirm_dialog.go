@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/relux-works/mac-infra/internal/keyvault"
+	"github.com/relux-works/mac-infra/internal/keyvault/signerclient"
 )
 
 // confirm-dialog is the reviewed consent hook for `ssh-agent --confirm-exec`.
@@ -37,6 +38,8 @@ const dialogScript = `on run argv
 set r to display dialog (item 1 of argv) with title "mac-keyvault" buttons {"Deny", (item 2 of argv)} default button "Deny" cancel button "Deny" giving up after ((item 3 of argv) as integer) with icon caution
 return (button returned of r) & "|" & ((gave up of r) as text)
 end run`
+
+var confirmFields = map[string]bool{"purpose": true, "address": true, "version": true, "fingerprint": true, "sha256": true, "until": true}
 
 var (
 	fingerprintPattern = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
@@ -81,13 +84,22 @@ func readConfirmation(r io.Reader) (keyvault.SSHConfirmation, error) {
 	if err != nil || len(data) > maxConfirmInput {
 		return req, errors.New("input unreadable or too large")
 	}
+	// One document, one object, no repeated (or escape-equivalent) member,
+	// exact member names: a struct decode alone would collapse duplicates
+	// and match names case-insensitively.
+	object, err := signerclient.DecodeObject(data)
+	if err != nil {
+		return req, errors.New("malformed request")
+	}
+	for _, name := range object.Names() {
+		if !confirmFields[name] {
+			return req, errors.New("unknown field")
+		}
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		return req, errors.New("malformed request")
-	}
-	if decoder.More() {
-		return req, errors.New("trailing data")
 	}
 	if _, err := keyvault.ParseAddress(req.Address, keyvault.KindKey, req.Version); err != nil || req.Version < 1 {
 		return req, errors.New("invalid address or version")

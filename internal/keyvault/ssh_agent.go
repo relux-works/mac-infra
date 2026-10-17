@@ -26,6 +26,21 @@ import (
 const SSHMaxPacket = 256 * 1024
 const sshFailure = 5
 
+const (
+	// sshExpiryPoll is how often a serving agent with an unlock deadline
+	// compares the wall clock with it.
+	sshExpiryPoll = time.Second
+	// SSHShutdownGrace bounds how long Serve waits for in-flight requests
+	// after it stops; a Security.framework call cannot be cancelled, so a
+	// blocked one is abandoned (its connection is already closed).
+	SSHShutdownGrace = 2 * time.Second
+)
+
+// sshNow is the agent's wall clock. Expiry compares wall time (Round(0)
+// drops the monotonic reading): Go's monotonic clock and timers on darwin
+// do not advance while the machine sleeps, the wall clock does.
+var sshNow = func() time.Time { return time.Now().Round(0) }
+
 // Confirmation purposes: one signature, or opening an agent until a deadline.
 const (
 	SSHConfirmSign   = "sign"
@@ -88,8 +103,15 @@ type SSHAgent struct {
 	manager    *Manager
 	identities []sshIdentity
 	confirm    func(context.Context, SSHConfirmation) error
+	until      time.Time
 	mu         sync.Mutex
 }
+
+// ExpireAt makes the agent refuse every signature from until on (wall
+// clock) and makes Serve stop at that time even across machine sleep.
+func (a *SSHAgent) ExpireAt(until time.Time) { a.until = until.Round(0) }
+
+func (a *SSHAgent) expired() bool { return !a.until.IsZero() && !sshNow().Before(a.until) }
 
 func NewSSHAgent(manager *Manager, addresses []Address, confirm func(context.Context, SSHConfirmation) error) (*SSHAgent, error) {
 	if manager == nil || len(addresses) == 0 || len(addresses) > 32 {
@@ -197,7 +219,7 @@ func (a *SSHAgent) ServeConn(ctx context.Context, conn net.Conn) {
 func (a *SSHAgent) handleSSH(ctx context.Context, packet []byte) []byte {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if ctx.Err() != nil || len(packet) == 0 {
+	if ctx.Err() != nil || len(packet) == 0 || a.expired() {
 		return []byte{sshFailure}
 	}
 	switch packet[0] {
@@ -238,6 +260,11 @@ func (a *SSHAgent) handleSSH(ctx context.Context, packet []byte) []byte {
 			// returned signature to that same identity before emitting it.
 			current, err := a.manager.Describe(id.address)
 			if err != nil || !bytes.Equal(current.SPKI, id.key.SPKI) {
+				return []byte{sshFailure}
+			}
+			// Confirmation and resolution may block; the private operation
+			// must not start once the unlock or the server has ended.
+			if ctx.Err() != nil || a.expired() {
 				return []byte{sshFailure}
 			}
 			result, err := a.manager.Sign(id.address, digest[:])
@@ -318,7 +345,24 @@ func (a *SSHAgent) Serve(ctx context.Context, listener *net.UnixListener) error 
 		case <-done:
 		}
 	}()
-	defer wg.Wait()
+	if !a.until.IsZero() {
+		go func() {
+			ticker := time.NewTicker(sshExpiryPoll)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if a.expired() {
+						cancel()
+						return
+					}
+				case <-done:
+					return
+				}
+			}
+		}()
+	}
+	defer waitBounded(&wg, SSHShutdownGrace)
 	defer cancel()
 	for {
 		conn, err := listener.AcceptUnix()
@@ -335,6 +379,16 @@ func (a *SSHAgent) Serve(ctx context.Context, listener *net.UnixListener) error 
 		default:
 			conn.Close()
 		}
+	}
+}
+
+// waitBounded waits for in-flight handlers, but not past grace.
+func waitBounded(wg *sync.WaitGroup, grace time.Duration) {
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(grace):
 	}
 }
 

@@ -41,8 +41,10 @@ Existing files,
 symlinks and live or stale sockets are never replaced. The agent supports at
 most 16 connected clients, 32 selected identities and 256 KiB per request;
 idle/incomplete connections expire after two minutes. SIGINT/SIGTERM close
-connections and remove only this process's socket inode. Security.framework
-may finish an in-flight call before shutdown; it cannot be canceled by Go.
+connections and remove only this process's socket inode. A Security.framework
+call cannot be cancelled by Go: shutdown waits at most two seconds for an
+in-flight call, then removes the socket and exits; the abandoned call's
+connection is already closed, so its signature reaches no client.
 After a crash, inspect and remove a stale socket manually before restarting.
 Never remove a socket while its agent is still running.
 
@@ -71,7 +73,11 @@ created) or `both`. `unlock` and `both` require `--unlock-for`.
 
 `--unlock-for DURATION` (greater than zero, at most 24h) makes the agent an
 expiring unlock: it serves until the deadline, then refuses, closes its
-connections, removes its socket and exits 0. With `--confirm-when unlock` a
+connections, removes its socket and exits 0. The deadline is wall-clock time,
+checked on every request (again right before the private operation) and by a
+one-second watchdog, so machine sleep does not extend it; Go's own timers on
+macOS pause during sleep. A signature already inside Security.framework when
+the deadline passes is discarded, not returned. With `--confirm-when unlock` a
 refused or timed-out confirmation exits 3 (`confirmation_required`) before
 any socket exists. Run such a job on demand (no `RunAtLoad`; `KeepAlive`
 `SuccessfulExit: false` does not restart a clean exit at the deadline).

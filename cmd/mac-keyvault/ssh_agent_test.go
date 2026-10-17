@@ -18,8 +18,9 @@ import (
 )
 
 // CLI validation refuses missing/unpinned identities, invalid hook options,
-// an --unlock-for outside (0, 24h] and an unlock confirmation without a hook
-// or without --unlock-for, all before opening the backend. Adjacent valid pub
+// an --unlock-for outside (0, 24h], and any explicit --confirm-when (even
+// "sign") without a hook or an unlock confirmation without --unlock-for, all
+// before opening the backend. Adjacent valid pub
 // output is parseable.
 func TestRunSSHAgentArgumentsAndPublicKey(t *testing.T) {
 	store := newMemStore(tl("ssh-agent", 1))
@@ -35,6 +36,7 @@ func TestRunSSHAgentArgumentsAndPublicKey(t *testing.T) {
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--unlock-for", "25h"},
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-exec", "/usr/bin/true", "--confirm-when", "always"},
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--unlock-for", "1h", "--confirm-when", "unlock"},
+		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-when", "sign"},
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-exec", "/usr/bin/true", "--confirm-when", "unlock"},
 		{"--socket", "/tmp/test.sock", "--key", "test/ssh-agent@1", "--confirm-exec", "/usr/bin/true", "--confirm-when", "both"},
 	} {

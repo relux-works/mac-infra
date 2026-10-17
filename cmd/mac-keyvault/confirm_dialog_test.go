@@ -94,14 +94,23 @@ func TestConfirmDialogRefusesEverythingElse(t *testing.T) {
 	}
 }
 
-// Claim: malformed or incomplete requests are refused before any dialog is
-// shown; the valid requests above are the positive control.
+// Claim: malformed, ambiguous or incomplete requests are refused before any
+// dialog is shown: trailing data including closing delimiters, duplicate or
+// escape-equivalent members, case-variant names, wrong types, and missing or
+// purpose-inconsistent fields. The valid requests above are the positive
+// control.
 func TestConfirmDialogRefusesMalformedRequests(t *testing.T) {
 	sign, unlock := signRequest(), unlockRequest()
 	for name, stdin := range map[string]string{
 		"not json":           "sign please",
 		"unknown field":      strings.Replace(sign, `"purpose"`, `"command":"x","purpose"`, 1),
 		"trailing object":    sign + sign,
+		"closing bracket":    sign + "]",
+		"closing brace":      sign + "}",
+		"duplicate address":  strings.Replace(sign, `"version"`, `"address":"other/key","version"`, 1),
+		"escaped duplicate":  strings.Replace(sign, `"version"`, `"addr\u0065ss":"other/key","version"`, 1),
+		"case alias":         strings.Replace(sign, `"address"`, `"Address"`, 1),
+		"version as string":  strings.Replace(sign, `"version":1`, `"version":"1"`, 1),
 		"oversized":          sign + strings.Repeat(" ", maxConfirmInput),
 		"unknown purpose":    strings.Replace(sign, `"sign"`, `"export"`, 1),
 		"version zero":       strings.Replace(sign, `"version":1`, `"version":0`, 1),

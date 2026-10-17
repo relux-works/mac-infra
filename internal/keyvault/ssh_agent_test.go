@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -832,5 +833,153 @@ func TestSSHAgentStopsAtDeadline(t *testing.T) {
 	}{a.identities[0].public.Marshal(), []byte("after"), 0})...)
 	if !bytes.Equal(a.handleSSH(ctx, req), []byte{sshFailure}) || len(store.signs) != 1 {
 		t.Fatal("signed after the deadline")
+	}
+}
+
+// gatedStore blocks List (record resolution) or Sign once armed, until the
+// gate is closed, to hold a request inside the agent across its deadline.
+type gatedStore struct {
+	*sshFixedStore
+	gate       chan struct{}
+	blockList  atomic.Bool
+	blockSign  atomic.Bool
+	listCalled chan struct{}
+}
+
+func (s *gatedStore) List() ([]Item, error) {
+	if s.blockList.Load() {
+		select {
+		case s.listCalled <- struct{}{}:
+		default:
+		}
+		<-s.gate
+	}
+	return s.sshFixedStore.List()
+}
+
+func (s *gatedStore) Sign(label string, digest []byte) ([]byte, error) {
+	if s.blockSign.Load() {
+		<-s.gate
+	}
+	return s.sshFixedStore.Sign(label, digest)
+}
+
+func gatedFixture(t *testing.T) (*SSHAgent, *gatedStore) {
+	t.Helper()
+	_, fixed, addr := sshFixture(t)
+	store := &gatedStore{sshFixedStore: fixed, gate: make(chan struct{}), listCalled: make(chan struct{}, 1)}
+	t.Cleanup(func() {
+		select {
+		case <-store.gate:
+		default:
+			close(store.gate)
+		}
+	})
+	a, err := NewSSHAgent(NewManager(store, nil, testOrigin), []Address{addr}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, store
+}
+
+// Claim: the unlock deadline is enforced by the agent's own wall-clock check
+// and watchdog, not only by the caller's context timer: with a context that
+// never expires, Serve stops by itself shortly after ExpireAt's time, the
+// socket is gone and signing is refused. (Sleep itself cannot be simulated
+// here; this proves the expiry does not depend on a monotonic timer firing.)
+func TestSSHAgentWallClockExpiry(t *testing.T) {
+	a, store := gatedFixture(t)
+	a.ExpireAt(time.Now().Add(300 * time.Millisecond))
+	path := filepath.Join(sshTempDir(t), "private", "agent.sock")
+	listener, cleanup, err := ListenSSH(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { err := a.Serve(context.Background(), listener); cleanup(); done <- err }()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.NewClient(conn).Sign(a.identities[0].public, []byte("before")); err != nil {
+		t.Fatalf("control: sign before expiry: %v", err)
+	}
+	conn.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent kept serving past ExpireAt with a context that never expires")
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatal("socket survived expiry")
+	}
+	before := len(store.signs)
+	req := append([]byte{13}, ssh.Marshal(struct {
+		Key, Data []byte
+		Flags     uint32
+	}{a.identities[0].public.Marshal(), []byte("after"), 0})...)
+	if !bytes.Equal(a.handleSSH(context.Background(), req), []byte{sshFailure}) || len(store.signs) != before {
+		t.Fatal("signed after expiry")
+	}
+}
+
+// Claim: a request whose record resolution blocks across the deadline never
+// reaches the private signing operation once it resumes.
+func TestSSHAgentNoPrivateOperationAfterExpiry(t *testing.T) {
+	a, store := gatedFixture(t)
+	a.ExpireAt(time.Now().Add(200 * time.Millisecond))
+	store.blockList.Store(true)
+	result := make(chan []byte, 1)
+	req := append([]byte{13}, ssh.Marshal(struct {
+		Key, Data []byte
+		Flags     uint32
+	}{a.identities[0].public.Marshal(), []byte("late"), 0})...)
+	go func() { result <- a.handleSSH(context.Background(), req) }()
+	<-store.listCalled
+	time.Sleep(400 * time.Millisecond)
+	close(store.gate)
+	if got := <-result; !bytes.Equal(got, []byte{sshFailure}) || len(store.signs) != 0 {
+		t.Fatalf("response %v, private signs %d", got, len(store.signs))
+	}
+}
+
+// Claim: a private operation that blocks past the deadline does not keep
+// Serve (and so the socket) alive: Serve returns within the shutdown grace
+// and the blocked request's client gets no signature.
+func TestSSHAgentShutdownDoesNotWaitForBlockedSign(t *testing.T) {
+	a, store := gatedFixture(t)
+	store.blockSign.Store(true)
+	path := filepath.Join(sshTempDir(t), "private", "agent.sock")
+	listener, cleanup, err := ListenSSH(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { err := a.Serve(ctx, listener); cleanup(); done <- err }()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	signErr := make(chan error, 1)
+	go func() {
+		_, err := agent.NewClient(conn).Sign(a.identities[0].public, []byte("blocked"))
+		signErr <- err
+	}()
+	select {
+	case <-done:
+	case <-time.After(300*time.Millisecond + SSHShutdownGrace + 2*time.Second):
+		t.Fatal("Serve waited for a blocked private operation")
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatal("socket survived shutdown")
+	}
+	if err := <-signErr; err == nil {
+		t.Fatal("the blocked request returned a signature")
 	}
 }
