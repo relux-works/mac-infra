@@ -24,6 +24,7 @@ import (
 // refuses one that is not a directory, belongs to someone else or is open to
 // group or other. A missing directory is os.ErrNotExist.
 func openEnclaveDir(path string) (*os.File, error) {
+	enclaveBeforeOpen("")
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) {
@@ -59,6 +60,7 @@ func openEnclaveDir(path string) (*os.File, error) {
 // this user, no group or other bits, at most max bytes; judged by fstat on
 // the opened descriptor. A missing file is os.ErrNotExist.
 func readEnclaveFileAt(dir *os.File, name string, max int) ([]byte, error) {
+	enclaveBeforeOpen(name)
 	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) {
@@ -95,6 +97,15 @@ func readEnclaveFileAt(dir *os.File, name string, max int) ([]byte, error) {
 	return data, nil
 }
 
+// Test seams: enclaveBeforeOpen runs right before a store path is opened
+// (name "" for the directory) so a test can swap what is there; nothing
+// judged earlier may decide what is read. enclaveAfterPublish runs right
+// after a key file is published, before any cleanup.
+var (
+	enclaveBeforeOpen   = func(name string) {}
+	enclaveAfterPublish = func(dir *os.File, name string) {}
+)
+
 // enclaveWriteAll writes data to a temporary key file; tests replace it to
 // inject a failed write.
 var enclaveWriteAll = func(file *os.File, data []byte) error {
@@ -103,10 +114,10 @@ var enclaveWriteAll = func(file *os.File, data []byte) error {
 }
 
 // writeEnclaveFileAt publishes data as name in dir: a fresh 0600 temporary
-// file is written and synced, then linked to name (create: fails if name
-// exists) or renamed over it (replace), and the directory is synced. Any
-// failure before publication leaves name untouched and removes the
-// temporary file.
+// file is written and synced, then renamed to name, exclusively for a create
+// (fails if name exists) or over it for a replace, and the directory is
+// synced. Either way the published file has one link. Any failure before
+// publication leaves name untouched and removes the temporary file.
 func writeEnclaveFileAt(dir *os.File, name string, data []byte, replace bool) (err error) {
 	random := make([]byte, 8)
 	if _, err := rand.Read(random); err != nil {
@@ -136,7 +147,7 @@ func writeEnclaveFileAt(dir *os.File, name string, data []byte, replace bool) (e
 	if replace {
 		err = unix.Renameat(int(dir.Fd()), tmp, int(dir.Fd()), name)
 	} else {
-		err = unix.Linkat(int(dir.Fd()), tmp, int(dir.Fd()), name, 0)
+		err = publishNoReplace(int(dir.Fd()), tmp, name)
 		if errors.Is(err, unix.EEXIST) {
 			return os.ErrExist
 		}
@@ -144,6 +155,7 @@ func writeEnclaveFileAt(dir *os.File, name string, data []byte, replace bool) (e
 	if err != nil {
 		return err
 	}
+	enclaveAfterPublish(dir, name)
 	return dir.Sync()
 }
 

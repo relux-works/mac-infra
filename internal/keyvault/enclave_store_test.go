@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -660,5 +661,113 @@ func TestManagerSignsInTheAuthorizedStore(t *testing.T) {
 	calls := len(helper.requests)
 	if _, err := m.Sign(Address{Kind: KindKey, Service: TestService, Purpose: "plain"}, digest[:]); err != nil || len(keychain.signs) != 1 || len(helper.requests) != calls {
 		t.Fatalf("sign: %v keychain signs %v helper calls %d -> %d", err, keychain.signs, calls, len(helper.requests))
+	}
+}
+
+// Review r2 F1: at the moment a new key file is published it already has
+// exactly one link and no temporary file is left in the directory, so an
+// interruption after publication leaves a key the reader accepts.
+func TestEnclaveCreatePublishesOneLink(t *testing.T) {
+	m, _, enclave, _ := enclaveFixture(t)
+	var links uint64
+	var leftovers []string
+	previous := enclaveAfterPublish
+	enclaveAfterPublish = func(dir *os.File, name string) {
+		info, err := os.Lstat(filepath.Join(enclave.Dir, name))
+		if err == nil {
+			links = uint64(info.Sys().(*syscall.Stat_t).Nlink)
+		}
+		entries, _ := os.ReadDir(enclave.Dir)
+		for _, e := range entries {
+			if e.Name() != name {
+				leftovers = append(leftovers, e.Name())
+			}
+		}
+	}
+	t.Cleanup(func() { enclaveAfterPublish = previous })
+	if _, err := m.Init(enclaveSpec("owner", true)); err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 || len(leftovers) != 0 {
+		t.Fatalf("at publication: links=%d leftovers=%v", links, leftovers)
+	}
+}
+
+// Review r2 F2: what is read is judged on the opened descriptor. A key file
+// swapped for a group-readable copy, or the directory swapped for a symlink
+// to a private copy, between every earlier check and the signature's own
+// open is refused with no helper call; a swap for an identical private copy
+// (control) still signs. A check-by-path-then-open implementation fails it.
+func TestEnclaveSwapBeforeOpenIsJudgedOnTheDescriptor(t *testing.T) {
+	addr := Address{Kind: KindKey, Service: TestService, Purpose: "owner"}
+	digest := sha256.Sum256([]byte("swap before open"))
+	for _, tc := range []struct {
+		name  string
+		swap  func(t *testing.T, dir, file string)
+		which string
+		signs bool
+	}{
+		{"file swapped for a 0644 copy", func(t *testing.T, dir, file string) {
+			data, _ := os.ReadFile(file)
+			os.WriteFile(file+".x", data, 0o644)
+			os.Chmod(file+".x", 0o644)
+			if err := os.Rename(file+".x", file); err != nil {
+				t.Fatal(err)
+			}
+		}, "file", false},
+		{"directory swapped for a symlink", func(t *testing.T, dir, file string) {
+			if err := os.Rename(dir, dir+".real"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(dir+".real", dir); err != nil {
+				t.Fatal(err)
+			}
+		}, "dir", false},
+		{"file swapped for a private copy", func(t *testing.T, dir, file string) {
+			data, _ := os.ReadFile(file)
+			os.WriteFile(file+".x", data, 0o600)
+			if err := os.Rename(file+".x", file); err != nil {
+				t.Fatal(err)
+			}
+		}, "file", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, enclave, helper := enclaveFixture(t)
+			helper.fingerOK = true
+			key, err := m.Init(enclaveSpec("owner", true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(enclave.Dir, key.Label+".json")
+			// The listing opens the directory and the file once, the
+			// signature's own read opens them again: swap right before
+			// that second open, after any check the listing made.
+			swapped, opens := false, 0
+			previous := enclaveBeforeOpen
+			enclaveBeforeOpen = func(name string) {
+				if (tc.which == "dir") != (name == "") || (tc.which == "file" && name != key.Label+".json") {
+					return
+				}
+				if opens++; opens == 2 {
+					swapped = true
+					tc.swap(t, enclave.Dir, file)
+				}
+			}
+			t.Cleanup(func() { enclaveBeforeOpen = previous })
+			calls := len(helper.requests)
+			_, err = m.Sign(addr, digest[:])
+			if !swapped {
+				t.Fatal("the swap point was never reached")
+			}
+			if tc.signs {
+				if err != nil || len(helper.requests) != calls+1 {
+					t.Fatalf("control: %v", err)
+				}
+				return
+			}
+			if err == nil || len(helper.requests) != calls {
+				t.Fatalf("swapped %s signed or reached the helper: %v", tc.which, err)
+			}
+		})
 	}
 }
