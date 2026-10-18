@@ -245,3 +245,19 @@ func ParseNettop(text string) (items []Item, unrecognized uint64) {
 	}
 	return
 }
+
+// persistedText reports whether a stored string meets the persisted-text
+// invariants: valid UTF-8, at most limit bytes, no control characters. The
+// validator uses this, not Sanitize idempotence, because a cap cut can turn a
+// non-address token into an address-looking fragment.
+func persistedText(s string, limit int) bool {
+	if len(s) > limit || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if r < 32 || r == 127 {
+			return false
+		}
+	}
+	return true
+}

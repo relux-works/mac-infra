@@ -144,7 +144,7 @@ func (s *Store) validateState() error {
 		}
 	}
 	for _, v := range st.Parser.Samples {
-		if len(v) > 256 || Sanitize(v) != v {
+		if !persistedText(v, 256) {
 			return bad()
 		}
 	}
@@ -152,7 +152,7 @@ func (s *Store) validateState() error {
 		return bad()
 	}
 	for _, v := range st.Events {
-		if v.TS.IsZero() || !validLabel(v.Label) || v.Mode != "shadow" || (v.Source != "alf" && v.Source != "nettop") || len(v.App) > 1024 || len(v.Signer) > 1024 || len(v.Verdict) > 128 || len(v.RemoteClass) > 128 || len(v.Bucket) > 128 || v.Counts == 0 || v.Counts > math.MaxInt64 || Sanitize(v.App) != v.App || Sanitize(v.Signer) != v.Signer || (v.Port != nil && (*v.Port < 1 || *v.Port > 65535)) {
+		if v.TS.IsZero() || !validLabel(v.Label) || v.Mode != "shadow" || (v.Source != "alf" && v.Source != "nettop") || !persistedText(v.App, 1024) || !persistedText(v.Signer, 1024) || len(v.Verdict) > 128 || len(v.RemoteClass) > 128 || len(v.Bucket) > 128 || v.Counts == 0 || v.Counts > math.MaxInt64 || (v.Port != nil && (*v.Port < 1 || *v.Port > 65535)) {
 			return bad()
 		}
 		b, e := json.Marshal(v.Reason)

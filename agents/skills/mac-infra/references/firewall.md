@@ -262,7 +262,12 @@ durations. `max_state_bytes` is 1..1 GiB; `max_model_bytes` is 1..1 TiB.
 limit large enough for the retained events, dedup entries and signer cache.
 Oversized/structurally corrupt state is refused with a corruption error without
 rewriting it. Null maps/entries, invalid counts and invalid field bounds are
-refused before pruning. A save exceeding the byte cap also fails.
+refused before pruning. A save exceeding the byte cap also fails. Stored text
+fields (app, signer, unknown-message samples) are checked on load for the
+persisted-text invariants: valid UTF-8, within their byte cap (1024 or 256), no
+control characters. IP redaction happens once, at write time; load does not
+re-run it, because a cut at the cap can leave an address-looking fragment of a
+token that was not an address. Truncation never splits a UTF-8 rune.
 
 The state directory must be owned by the caller, mode `0700`, and not a symlink.
 Choose a short absolute path: Darwin UNIX socket path names must fit in 103 bytes.
