@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>works.relux.vpn-core</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/PrivilegedHelperTools/works.relux.vpn-core/vpn-core</string>
+    <string>_daemon</string>
+    <string>--socket</string>
+    <string>/private/var/run/works.relux.vpn-core.sock</string>
+    <string>--client-uid</string>
+    <string>501</string>
+    <string>--client-gid</string>
+    <string>20</string>
+    <string>--binary-sha256</string>
+    <string>e9d59950256d31a51dfe77f63b07a4fc3c1fe4f5688944f1c98c596d37d78a9a</string>
+    <string>--manifest-sha256</string>
+    <string>bda3368336dcab28f443dbe51607b05dd4f5b7ddde8cf7123b60c124b376282c</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>

@@ -238,6 +238,42 @@ root changing the executable, plist, permissions, or the checks themselves.
 Review the artifact before authorizing installation. Source validation and
 fixture tests do not prove the state of an already running daemon.
 
+## Pinned vpn-core Packages
+
+The root helper accepts one vpn-core mutation at a time from its authorized
+client. A keeper builds the three-file package and reviews the digest from
+`vpn-core install-digest`; neither artifact is executed by this installer.
+
+```bash
+mac-infra-core vpn-core install --package /absolute/package --expect-digest <64-lowercase-hex>
+mac-infra-core vpn-core status
+mac-infra-core vpn-core rollback --expect-digest <previous-package-digest>
+```
+
+The helper copies `vpn-core`, `bin/sing-box`, and `manifest.json` into private
+staging, verifies their hashes and the pinned digest, and installs root-owned
+files under `/Library/PrivilegedHelperTools/works.relux.vpn-core`. The limits
+are 32 MiB for vpn-core, 128 MiB for sing-box, and 16 KiB for the manifest.
+Paths must be absolute and clean, with no symlink components or extra entries.
+The package directory, bin directory and files must belong to the authorized client.
+The fixed plist uses the helper's authorized non-root client UID/GID.
+
+Darwin `RENAME_SWAP` replaces an existing tree atomically; `.previous` retains
+the prior tree for digest-pinned rollback. Plist replacement and service restart
+are separate steps: this is not a crash-atomic launchd transaction. A failed
+activation reports `restart_failed` and a recovery path; the previous tree
+remains available. `status` verifies disk contents and reports current and
+previous digests; it does not attest service health. Each install/rollback
+attempt appends metadata, outcome and stable error code to
+`/private/var/log/works.relux.mac-infra-vpn-core.jsonl` (root:wheel, 0600).
+An audit-write failure is reported as `audit_failed`, including after a change.
+
+Tests use injected roots, ownership checks and a fake launchctl runner:
+`go test -count=1 ./internal/maccore/... ./cmd/mac-infra-core/...`.
+Keep `GOCACHE`, `GOTMPDIR` and `TMPDIR` under `.temp/` for isolated validation;
+logs and producer evidence also belong there. Native production ACL removal
+requires macOS with cgo; unsupported builds fail closed.
+
 ## AnyConnect Socket Filter Cleanup
 
 Use this when Cisco AnyConnect reports disconnected but `com.cisco.anyconnect.macos.acsockext` or `vpnagentd` still eats CPU/RSS.

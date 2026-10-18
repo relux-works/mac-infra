@@ -52,6 +52,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "vpn-core":
+		return runVPNCore(args[1:], stdout, stderr)
 	case "install":
 		return runInstall(args[1:], stdout, stderr)
 	case "install-digest":
@@ -516,6 +518,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  mac-infra-core fseventsd-restart [--force] [--threshold-gb N]")
 	fmt.Fprintln(w, "  mac-infra-core fseventsd-watchdog enable [--threshold-gb N] [--interval DURATION] [--auto-restart]")
 	fmt.Fprintln(w, "  mac-infra-core fseventsd-watchdog disable|status")
+	fmt.Fprintln(w, "  mac-infra-core vpn-core install --package DIR --expect-digest HEX")
+	fmt.Fprintln(w, "  mac-infra-core vpn-core rollback --expect-digest HEX")
+	fmt.Fprintln(w, "  mac-infra-core vpn-core status")
 	fmt.Fprintln(w, "  mac-infra-core version")
 }
 

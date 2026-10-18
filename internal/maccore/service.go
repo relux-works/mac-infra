@@ -225,6 +225,7 @@ func RunDaemon(cfg ServiceConfig, clientUID, clientGID int, trust DaemonTrust) e
 		clientUID: clientUID,
 		clientGID: clientGID,
 		firewall:  newFirewallService(defaultFirewallStore()),
+		vpnCore:   newVPNCoreService(clientUID, clientGID),
 	}
 	stop := make(chan struct{})
 	defer close(stop)
@@ -237,6 +238,7 @@ type serviceDaemon struct {
 	clientUID int
 	clientGID int
 	firewall  *firewallService
+	vpnCore   *vpnCoreService
 	// writeTimeout overrides responseWriteTimeout when set (tests).
 	writeTimeout time.Duration
 }
@@ -348,6 +350,13 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 			response.OK = false
 			response.Error = err.Error()
 		}
+	case ActionVPNCoreInstall, ActionVPNCoreRollback, ActionVPNCoreStatus:
+		if d.vpnCore == nil {
+			response = Response{ErrorCode: "unavailable", Error: "vpn-core management unavailable"}
+			break
+		}
+		response = d.vpnCore.handle(request.Action, request.VPNCore)
+		response.DaemonPID = os.Getpid()
 	case ActionFirewallStatus, ActionFirewallPlan, ActionFirewallApply:
 		if d.firewall == nil {
 			response = Response{Error: "firewall management is not available in this daemon"}
