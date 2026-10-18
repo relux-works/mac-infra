@@ -55,7 +55,8 @@ func describeVPNCoreAuthorization(data []byte) string {
 		!isLowerHex(digest, 64) || !isLowerHex(nonce, 64) {
 		return ""
 	}
-	if _, err := time.Parse("2006-01-02T15:04:05Z", expires); err != nil {
+	// Canonical expiry only: time.Parse also accepts fractional seconds.
+	if t, err := time.Parse("2006-01-02T15:04:05Z", expires); err != nil || t.Format("2006-01-02T15:04:05Z") != expires {
 		return ""
 	}
 	return "authorize vpn-core " + action + " " + digest[:8]

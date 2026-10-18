@@ -74,6 +74,8 @@ func TestDescribeVPNCoreAuthorization(t *testing.T) {
 		"no digest label":  strings.Replace(promptStatement, "digest=07d46cd2", "07d46cd2", 1),
 		"empty nonce":      strings.Replace(promptStatement, "nonce=0000000000000000000000000000000000000000000000000000000000000001", "nonce=", 1),
 		"bad expires":      strings.Replace(promptStatement, "expires=2026-10-19T14:02:03Z", "expires=soon", 1),
+		"fraction expires": strings.Replace(promptStatement, "expires=2026-10-19T14:02:03Z", "expires=2026-10-19T14:02:03,123Z", 1),
+		"dot fraction":     strings.Replace(promptStatement, "expires=2026-10-19T14:02:03Z", "expires=2026-10-19T14:02:03.5Z", 1),
 		"empty":            "",
 	} {
 		if got := describeVPNCoreAuthorization([]byte(data)); got != "" {
