@@ -66,18 +66,7 @@ func TestEnclaveRealHelper(t *testing.T) {
 	if refusal := refusalOf(t, err); refusal.Code != CodeSecurity || refusal.Status != -25308 {
 		t.Fatalf("presence key without a finger: %+v", refusal)
 	}
-	rewrite := func(change func(*enclaveFile)) {
-		t.Helper()
-		file, err := store.read(owner.Label)
-		if err != nil {
-			t.Fatal(err)
-		}
-		change(&file)
-		path, _ := store.path(owner.Label)
-		if err := store.write(path, file, true); err != nil {
-			t.Fatal(err)
-		}
-	}
+	rewrite := func(change func(*enclaveFile)) { rewriteEnclaveFile(t, store, owner.Label, change) }
 	original, _ := store.read(owner.Label)
 	rewrite(func(f *enclaveFile) {
 		f.Blob = append([]byte(nil), f.Blob...)

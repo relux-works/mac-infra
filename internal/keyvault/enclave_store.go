@@ -103,7 +103,7 @@ func (h ExecEnclaveHelper) Call(req EnclaveRequest, interactive bool) (EnclaveRe
 	if !filepath.IsAbs(h.Path) {
 		return EnclaveResponse{}, fmt.Errorf("enclave helper path %q is not absolute", h.Path)
 	}
-	if err := requireOwnedFile(h.Path, false); err != nil {
+	if err := requireOwnedFile(h.Path); err != nil {
 		return EnclaveResponse{}, fmt.Errorf("enclave helper: %w", err)
 	}
 	timeout := h.Timeout
@@ -195,7 +195,7 @@ func DefaultEnclaveStore() *EnclaveStore {
 	}
 	helper := ExecEnclaveHelper{Path: filepath.Join(filepath.Dir(self), "mac-keyvault-enclave"), Timeout: 15 * time.Second, InteractiveTimeout: 60 * time.Second}
 	store := NewEnclaveStore(dir, helper)
-	if err := requireOwnedFile(helper.Path, false); err != nil {
+	if err := requireOwnedFile(helper.Path); err != nil {
 		store.helperErr = fmt.Errorf("enclave helper %s: %w", helper.Path, err)
 	}
 	return store
@@ -229,14 +229,16 @@ func DefaultEnclaveDir() (string, error) {
 	return filepath.Join(home, "Library", "Application Support", "mac-infra", "keyvault", "enclave"), nil
 }
 
-func (s *EnclaveStore) path(label string) (string, error) {
+// fileName is the key file name of label: the label itself (inside the
+// namespace, [A-Za-z0-9._-], no "..") plus ".json", never a path.
+func fileName(label string) (string, error) {
 	if err := RequireOwnLabel(label); err != nil {
 		return "", err
 	}
 	if !labelPattern.MatchString(label) || strings.Contains(label, "..") {
 		return "", fmt.Errorf("enclave store: label %q cannot name a file", label)
 	}
-	return filepath.Join(s.Dir, label+".json"), nil
+	return label + ".json", nil
 }
 
 // Create asks the helper for a new Secure Enclave key and stores it. A key
@@ -249,17 +251,19 @@ func (s *EnclaveStore) Create(opts CreateOptions) (Item, error) {
 	if opts.Store != StoreEnclave {
 		return Item{}, fmt.Errorf("enclave store: cannot create store %q", opts.Store)
 	}
-	path, err := s.path(opts.Label)
+	name, err := fileName(opts.Label)
 	if err != nil {
 		return Item{}, err
 	}
-	if err := s.ensureDir(); err != nil {
+	dir, err := s.ensureDir()
+	if err != nil {
 		return Item{}, err
 	}
-	if _, err := os.Lstat(path); err == nil {
-		return Item{}, &StatusError{Op: "create (Secure Enclave)", Status: -25299}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	defer dir.Close()
+	if exists, err := enclaveFileExistsAt(dir, name); err != nil {
 		return Item{}, fmt.Errorf("enclave store: %w", err)
+	} else if exists {
+		return Item{}, &StatusError{Op: "create (Secure Enclave)", Status: -25299}
 	}
 	presence := enclavePresenceNone
 	if opts.UserPresence {
@@ -280,26 +284,40 @@ func (s *EnclaveStore) Create(opts CreateOptions) (Item, error) {
 		return Item{}, untrusted(opts.Label, "the helper returned an invalid public key: "+err.Error())
 	}
 	file := enclaveFile{Format: EnclaveFileFormat, Label: opts.Label, Tag: string(opts.Tag), Point: resp.Point, Blob: resp.Blob}
-	if err := s.write(path, file, false); err != nil {
+	if err := writeEnclaveFile(dir, name, file, false); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return Item{}, &StatusError{Op: "create (Secure Enclave)", Status: -25299}
+		}
 		return Item{}, err
 	}
 	return Item{Label: opts.Label, Tag: opts.Tag, SPKI: spki}, nil
+}
+
+// openDir opens the store directory; ok is false when it does not exist yet.
+func (s *EnclaveStore) openDir() (dir *os.File, ok bool, err error) {
+	if s.err != nil {
+		return nil, false, s.err
+	}
+	dir, err = openEnclaveDir(s.Dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("enclave store: %w", err)
+	}
+	return dir, true, nil
 }
 
 // List reads every key file. A file that is unsafe or unreadable is still
 // listed under its label, with the reason as Problem and no record, so it
 // can be seen and deleted but never used.
 func (s *EnclaveStore) List() ([]Item, error) {
-	if s.err != nil {
-		return nil, s.err
+	dir, ok, err := s.openDir()
+	if err != nil || !ok {
+		return nil, err
 	}
-	if _, err := os.Lstat(s.Dir); errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err := requireOwnedDir(s.Dir); err != nil {
-		return nil, fmt.Errorf("enclave store: %w", err)
-	}
-	entries, err := os.ReadDir(s.Dir)
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil, fmt.Errorf("enclave store: %w", err)
 	}
@@ -309,7 +327,7 @@ func (s *EnclaveStore) List() ([]Item, error) {
 		if !ok || RequireOwnLabel(label) != nil {
 			continue
 		}
-		file, err := s.read(label)
+		file, err := readEnclaveFile(dir, label)
 		if err != nil {
 			items = append(items, Item{Label: label, Problem: "enclave file refused: " + err.Error()})
 			continue
@@ -326,27 +344,34 @@ func (s *EnclaveStore) List() ([]Item, error) {
 
 // Has reports whether a key file exists under label.
 func (s *EnclaveStore) Has(label string) bool {
-	if s.err != nil {
-		return false
-	}
-	path, err := s.path(label)
+	name, err := fileName(label)
 	if err != nil {
 		return false
 	}
-	_, err = os.Lstat(path)
-	return err == nil
+	dir, ok, err := s.openDir()
+	if err != nil || !ok {
+		return false
+	}
+	defer dir.Close()
+	exists, err := enclaveFileExistsAt(dir, name)
+	return err == nil && exists
 }
 
 // Delete removes the key file; the Secure Enclave key is gone with its blob.
 func (s *EnclaveStore) Delete(label string) error {
-	if s.err != nil {
-		return s.err
-	}
-	path, err := s.path(label)
+	name, err := fileName(label)
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil {
+	dir, ok, err := s.openDir()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	defer dir.Close()
+	if err := removeEnclaveFileAt(dir, name); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrNotFound
 		}
@@ -355,21 +380,27 @@ func (s *EnclaveStore) Delete(label string) error {
 	return nil
 }
 
-// UpdateTag rewrites the record of a key; blob and public half stay.
+// UpdateTag rewrites the record of a key; blob and public half stay. A
+// failed or oversized write leaves the old file in place.
 func (s *EnclaveStore) UpdateTag(label string, tag []byte) error {
-	if s.err != nil {
-		return s.err
-	}
-	path, err := s.path(label)
+	name, err := fileName(label)
 	if err != nil {
 		return err
 	}
-	file, err := s.read(label)
+	dir, ok, err := s.openDir()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	defer dir.Close()
+	file, err := readEnclaveFile(dir, label)
 	if err != nil {
 		return err
 	}
 	file.Tag = string(tag)
-	return s.write(path, file, true)
+	return writeEnclaveFile(dir, name, file, true)
 }
 
 // Sign signs digest with the key under label. The record's user_presence
@@ -438,93 +469,86 @@ func untrusted(label, message string) error {
 	return &Refusal{Code: CodeSecurity, Failure: true, Message: fmt.Sprintf("%s: %s", label, message), Hint: "nothing was emitted; describe the key, delete --confirm it if its file was altered and init a fresh key"}
 }
 
-func (s *EnclaveStore) ensureDir() error {
+// ensureDir creates the store directory if needed and opens it.
+func (s *EnclaveStore) ensureDir() (*os.File, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return fmt.Errorf("enclave store: %w", err)
+		return nil, fmt.Errorf("enclave store: %w", err)
 	}
-	if err := requireOwnedDir(s.Dir); err != nil {
-		return fmt.Errorf("enclave store: %w", err)
+	dir, err := openEnclaveDir(s.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("enclave store: %w", err)
 	}
-	return nil
+	return dir, nil
 }
 
-// read loads and checks one key file: a regular file, not a symlink, owned
-// by this user, no group or other bits, bounded, one JSON document whose
-// format and label match.
+// read loads one key file through a freshly opened directory.
 func (s *EnclaveStore) read(label string) (enclaveFile, error) {
-	path, err := s.path(label)
+	if _, err := fileName(label); err != nil {
+		return enclaveFile{}, err
+	}
+	dir, ok, err := s.openDir()
 	if err != nil {
 		return enclaveFile{}, err
 	}
-	if err := requireOwnedDir(s.Dir); err != nil {
-		return enclaveFile{}, fmt.Errorf("enclave store: %w", err)
-	}
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+	if !ok {
 		return enclaveFile{}, ErrNotFound
 	}
-	if err := requireOwnedFile(path, true); err != nil {
-		return enclaveFile{}, err
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow, 0)
+	defer dir.Close()
+	return readEnclaveFile(dir, label)
+}
+
+// readEnclaveFile loads and checks one key file in dir: checked on its own
+// descriptor (regular, one link, this user's, no group or other bits),
+// bounded, one JSON document whose format and label match.
+func readEnclaveFile(dir *os.File, label string) (enclaveFile, error) {
+	name, err := fileName(label)
 	if err != nil {
 		return enclaveFile{}, err
 	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, enclaveFileMax+1))
+	data, err := readEnclaveFileAt(dir, name, enclaveFileMax)
+	if errors.Is(err, os.ErrNotExist) {
+		return enclaveFile{}, ErrNotFound
+	}
 	if err != nil {
 		return enclaveFile{}, err
-	}
-	if len(data) > enclaveFileMax {
-		return enclaveFile{}, fmt.Errorf("%s exceeds %d bytes", filepath.Base(path), enclaveFileMax)
 	}
 	var file enclaveFile
 	if err := DecodeSingleJSON(data, &file); err != nil {
-		return enclaveFile{}, fmt.Errorf("%s: %w", filepath.Base(path), err)
+		return enclaveFile{}, fmt.Errorf("%s: %w", name, err)
 	}
 	if file.Format != EnclaveFileFormat || file.Label != label || len(file.Blob) == 0 {
-		return enclaveFile{}, fmt.Errorf("%s: format or label does not match its name", filepath.Base(path))
+		return enclaveFile{}, fmt.Errorf("%s: format or label does not match its name", name)
 	}
 	return file, nil
 }
 
-// write stores file atomically: a 0600 temporary file in Dir, synced, then
-// linked to path (create, never replacing) or renamed over it (update).
-func (s *EnclaveStore) write(path string, file enclaveFile, replace bool) error {
+// writeEnclaveFile publishes file under name atomically; a file the reader
+// would refuse as oversized is refused before anything is written.
+func writeEnclaveFile(dir *os.File, name string, file enclaveFile, replace bool) error {
 	data, err := json.Marshal(file)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(s.Dir, ".tmp-*")
-	if err != nil {
-		return fmt.Errorf("enclave store: %w", err)
+	if len(data) > enclaveFileMax {
+		return &Refusal{Code: CodeInvalidMeta, Message: fmt.Sprintf("the key file would be %d bytes, the limit is %d; nothing was written", len(data), enclaveFileMax), Hint: "shorten the description or meta values"}
 	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err == nil {
-		if _, err = tmp.Write(data); err == nil {
-			err = tmp.Sync()
+	if err := writeEnclaveFileAt(dir, name, data, replace); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return err
 		}
-	}
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return fmt.Errorf("enclave store: %w", err)
-	}
-	if replace {
-		err = os.Rename(tmp.Name(), path)
-	} else {
-		err = os.Link(tmp.Name(), path)
-	}
-	if err != nil {
 		return fmt.Errorf("enclave store: %w", err)
 	}
 	return nil
 }
 
 // RoutedBackend serves the keychain and the Secure Enclave store as one
-// Backend: create goes by the requested store, every other call by where the
-// label lives. A label present in both stores is listed with a problem so the
-// Manager never operates on it.
+// Backend: create goes by the requested store and a signature goes to the
+// store the authorized record names (SignIn). A label present in both stores,
+// or a record whose declared store is not the store it was read from, is
+// listed with a problem so the Manager never operates on it.
 type RoutedBackend struct {
 	Keychain Backend
 	Enclave  *EnclaveStore
@@ -549,6 +573,14 @@ func (r RoutedBackend) Create(opts CreateOptions) (Item, error) {
 	return r.Keychain.Create(opts)
 }
 
+// declaredElsewhere reports a readable schema-2 record that names another
+// store than the one its item came from (review F1: a keychain item that
+// claims store enclave must never be signed as if it were one).
+func declaredElsewhere(item Item, from StoreKind) bool {
+	rec, problem := DecodeRecord(item.Tag)
+	return problem == "" && rec.Schema == SchemaVersion && rec.Store != from
+}
+
 func (r RoutedBackend) List() ([]Item, error) {
 	keychain, err := r.Keychain.List()
 	if err != nil {
@@ -558,11 +590,21 @@ func (r RoutedBackend) List() ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
+	mark := func(items []Item, from StoreKind) {
+		for i, item := range items {
+			if item.Problem == "" && declaredElsewhere(item, from) {
+				items[i] = Item{Label: item.Label, Problem: fmt.Sprintf("record declares another store than %s, where it lives", from)}
+			}
+		}
+	}
+	keychain = append([]Item{}, keychain...)
+	mark(keychain, StoreKeychain)
+	mark(enclave, StoreEnclave)
 	inKeychain := map[string]bool{}
 	for _, item := range keychain {
 		inKeychain[item.Label] = true
 	}
-	items := append([]Item{}, keychain...)
+	items := keychain
 	for _, item := range enclave {
 		if inKeychain[item.Label] {
 			item = Item{Label: item.Label, Problem: "label exists in both the keychain and the enclave store"}
@@ -591,9 +633,22 @@ func (r RoutedBackend) UpdateTag(label string, tag []byte) error {
 	return r.Keychain.UpdateTag(label, tag)
 }
 
+// Sign without a store goes by where the label lives; the Manager never uses
+// it on a RoutedBackend, it calls SignIn with the authorized record's store.
 func (r RoutedBackend) Sign(label string, digest []byte) ([]byte, error) {
 	if r.Enclave.Has(label) {
 		return r.Enclave.Sign(label, digest)
 	}
 	return r.Keychain.Sign(label, digest)
+}
+
+// SignIn implements StoreSigner.
+func (r RoutedBackend) SignIn(store StoreKind, label string, digest []byte) ([]byte, error) {
+	switch store {
+	case StoreEnclave:
+		return r.Enclave.Sign(label, digest)
+	case StoreKeychain:
+		return r.Keychain.Sign(label, digest)
+	}
+	return nil, fmt.Errorf("no store %q to sign in", store)
 }

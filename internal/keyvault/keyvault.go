@@ -148,6 +148,13 @@ type StoreServer interface {
 	Serves(store StoreKind) bool
 }
 
+// StoreSigner is implemented by a Backend that serves several stores: the
+// Manager signs in the store the authorized record names, never in whichever
+// store holds the label at signing time.
+type StoreSigner interface {
+	SignIn(store StoreKind, label string, digest []byte) ([]byte, error)
+}
+
 func (m *Manager) serves(store StoreKind) bool {
 	if server, ok := m.backend.(StoreServer); ok {
 		return server.Serves(store)
@@ -691,7 +698,12 @@ func (m *Manager) SignIf(addr Address, digest []byte, allow func() error) (SignR
 			return SignResult{}, err
 		}
 	}
-	der, err := m.backend.Sign(key.Label, digest)
+	var der []byte
+	if signer, ok := m.backend.(StoreSigner); ok {
+		der, err = signer.SignIn(key.Record.Store, key.Label, digest)
+	} else {
+		der, err = m.backend.Sign(key.Label, digest)
+	}
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return SignResult{}, &NotFoundError{Address: addr}

@@ -276,17 +276,7 @@ func TestEnclaveSignRefusesSwappedOrTamperedKeys(t *testing.T) {
 		}
 		return m, enclave, helper, key.Label
 	}
-	rewrite := func(t *testing.T, enclave *EnclaveStore, label string, change func(*enclaveFile)) {
-		file, err := enclave.read(label)
-		if err != nil {
-			t.Fatal(err)
-		}
-		change(&file)
-		path, _ := enclave.path(label)
-		if err := enclave.write(path, file, true); err != nil {
-			t.Fatal(err)
-		}
-	}
+	rewrite := rewriteEnclaveFile
 	t.Run("blob of another presence key", func(t *testing.T) {
 		m, enclave, helper, label := setup(t)
 		other, _ := helper.Call(EnclaveRequest{Op: "create", Presence: enclavePresenceBiometry}, false)
@@ -357,6 +347,11 @@ func TestEnclaveStoreRefusesUnsafeFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		"second hard link": func(t *testing.T, path string) {
+			if err := os.Link(path, path+".alias"); err != nil {
+				t.Fatal(err)
+			}
+		},
 		"not json": func(t *testing.T, path string) {
 			if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
 				t.Fatal(err)
@@ -384,6 +379,24 @@ func TestEnclaveStoreRefusesUnsafeFiles(t *testing.T) {
 			}
 		})
 	}
+	// Review F3: the store directory itself replaced by a symlink to a
+	// valid private directory is refused, not followed.
+	t.Run("symlinked directory", func(t *testing.T) {
+		m, _, enclave, _ := enclaveFixture(t)
+		if _, err := m.Init(enclaveSpec("owner", false)); err != nil {
+			t.Fatal(err)
+		}
+		moved := enclave.Dir + ".real"
+		if err := os.Rename(enclave.Dir, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(moved, enclave.Dir); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.List("", ""); err == nil || !strings.Contains(err.Error(), "not a plain directory") {
+			t.Fatalf("symlinked directory listed: %v", err)
+		}
+	})
 	t.Run("open directory", func(t *testing.T) {
 		m, _, enclave, _ := enclaveFixture(t)
 		if _, err := m.Init(enclaveSpec("owner", false)); err != nil {
@@ -459,5 +472,193 @@ func TestEnclaveStoreWithoutHelper(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(enclave.Dir); len(entries) != 0 {
 		t.Fatalf("file left after delete: %d", len(entries))
+	}
+}
+
+// rewriteEnclaveFile changes one stored key file in place, as an attacker
+// with this user's file access could.
+func rewriteEnclaveFile(t *testing.T, enclave *EnclaveStore, label string, change func(*enclaveFile)) {
+	t.Helper()
+	dir, err := openEnclaveDir(enclave.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	file, err := readEnclaveFile(dir, label)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change(&file)
+	name, _ := fileName(label)
+	if err := writeEnclaveFile(dir, name, file, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Review F1: a keychain item whose record claims store enclave (with or
+// without presence) is listed with a problem and never signed by the
+// keychain, and an enclave file whose record claims the keychain is never
+// signed either. The Manager signs in the store the record names. Positive
+// control: an honest keychain record still signs in the keychain.
+func TestRoutedBackendBindsSignatureToDeclaredStore(t *testing.T) {
+	digest := sha256.Sum256([]byte("declared store"))
+	t.Run("keychain item claiming enclave", func(t *testing.T) {
+		m, keychain, _, helper := enclaveFixture(t)
+		label := tl("forged", 1)
+		keychain.keys[label] = Item{Label: label}
+		keychain.installSigner(t, label)
+		rec := testRecord(label)
+		rec.Store, rec.UserPresence = StoreEnclave, true
+		item := keychain.keys[label]
+		item.Tag, _ = EncodeRecord(rec)
+		keychain.keys[label] = item
+		_, err := m.Sign(Address{Kind: KindKey, Service: TestService, Purpose: "forged"}, digest[:])
+		if refusalOf(t, err).Code != CodeMetadataUnknown || len(keychain.signs) != 0 || len(helper.requests) != 0 {
+			t.Fatalf("forged keychain item: %v keychain signs %v helper %d", err, keychain.signs, len(helper.requests))
+		}
+		described, _ := m.Describe(Address{Kind: KindKey, Service: TestService, Purpose: "forged"})
+		if !strings.Contains(described.RecordProblem, "declares another store") {
+			t.Fatalf("problem = %q", described.RecordProblem)
+		}
+	})
+	t.Run("enclave file claiming keychain", func(t *testing.T) {
+		m, keychain, enclave, helper := enclaveFixture(t)
+		helper.fingerOK = true
+		key, err := m.Init(enclaveSpec("owner", true))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rewriteEnclaveFile(t, enclave, key.Label, func(f *enclaveFile) {
+			rec, _ := DecodeRecord([]byte(f.Tag))
+			rec.Store, rec.UserPresence = StoreKeychain, false
+			tag, _ := EncodeRecord(rec)
+			f.Tag = string(tag)
+		})
+		calls := len(helper.requests)
+		_, err = m.Sign(Address{Kind: KindKey, Service: TestService, Purpose: "owner"}, digest[:])
+		if refusalOf(t, err).Code != CodeMetadataUnknown || len(keychain.signs) != 0 || len(helper.requests) != calls {
+			t.Fatalf("enclave file claiming keychain: %v", err)
+		}
+	})
+	t.Run("honest keychain record", func(t *testing.T) {
+		m, keychain, _, helper := enclaveFixture(t)
+		label := tl("plain", 1)
+		keychain.keys[label] = testItem(label)
+		keychain.installSigner(t, label)
+		if _, err := m.Sign(Address{Kind: KindKey, Service: TestService, Purpose: "plain"}, digest[:]); err != nil || len(keychain.signs) != 1 || len(helper.requests) != 0 {
+			t.Fatalf("keychain control: %v signs %v", err, keychain.signs)
+		}
+	})
+}
+
+// Review F2: a failed write of a metadata update leaves the old key file
+// byte-for-byte in place, returns the failure and leaves no temporary file;
+// the next successful write goes through.
+func TestEnclaveFailedWriteKeepsOriginal(t *testing.T) {
+	m, _, enclave, _ := enclaveFixture(t)
+	key, err := m.Init(enclaveSpec("owner", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(enclave.Dir, key.Label+".json")
+	before, _ := os.ReadFile(path)
+	previous := enclaveWriteAll
+	enclaveWriteAll = func(file *os.File, data []byte) error {
+		_, _ = file.Write(data[:len(data)/2])
+		return errors.New("no space left on device")
+	}
+	t.Cleanup(func() { enclaveWriteAll = previous })
+	if _, err := m.MetaSet(Address{Kind: KindKey, Service: TestService, Purpose: "owner"}, "role", "ca"); err == nil || !strings.Contains(err.Error(), "no space left") {
+		t.Fatalf("meta set over a failed write: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	entries, _ := os.ReadDir(enclave.Dir)
+	if string(after) != string(before) || len(entries) != 1 {
+		t.Fatalf("original changed or temporary left: %d entries", len(entries))
+	}
+	enclaveWriteAll = previous
+	if _, err := m.MetaSet(Address{Kind: KindKey, Service: TestService, Purpose: "owner"}, "role", "ca"); err != nil {
+		t.Fatalf("control write: %v", err)
+	}
+}
+
+// Review F4: a metadata update that would make the key file larger than the
+// reader accepts is refused before anything is written and the key still
+// signs; an update just under the bound is stored and read back.
+func TestEnclaveWriteRefusesOversizedFile(t *testing.T) {
+	m, _, enclave, helper := enclaveFixture(t)
+	helper.fingerOK = true
+	key, err := m.Init(enclaveSpec("owner", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := Address{Kind: KindKey, Service: TestService, Purpose: "owner"}
+	path := filepath.Join(enclave.Dir, key.Label+".json")
+	before, _ := os.ReadFile(path)
+	if _, err := m.MetaSet(addr, "blob", strings.Repeat("x", enclaveFileMax)); refusalOf(t, err).Code != CodeInvalidMeta {
+		t.Fatalf("oversized meta: %v", err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatal("oversized update changed the file")
+	}
+	// The JSON tag is embedded as a string in the file, so its quotes are
+	// escaped once more; leave room for that and for the rest of the file.
+	if _, err := m.MetaSet(addr, "note", strings.Repeat("y", enclaveFileMax-len(before)-256)); err != nil {
+		t.Fatalf("near-bound meta: %v", err)
+	}
+	digest := sha256.Sum256([]byte("still signs"))
+	if _, err := m.Sign(addr, digest[:]); err != nil {
+		t.Fatalf("sign after near-bound meta: %v", err)
+	}
+}
+
+// racingBackend plants a file between the Manager's listing and its
+// signature, as a concurrent writer could.
+type racingBackend struct {
+	RoutedBackend
+	afterList func()
+}
+
+func (r racingBackend) List() ([]Item, error) {
+	items, err := r.RoutedBackend.List()
+	if r.afterList != nil {
+		r.afterList()
+	}
+	return items, err
+}
+
+// Review F1, signing side: when an enclave file appears under an honest
+// keychain label after the listing, the Manager still signs in the keychain
+// the authorized record names (SignIn), never in whichever store holds the
+// label at signing time.
+func TestManagerSignsInTheAuthorizedStore(t *testing.T) {
+	_, keychain, enclave, helper := enclaveFixture(t)
+	helper.fingerOK = true
+	other := NewManager(RoutedBackend{Keychain: newFakeStore(), Enclave: enclave}, NoLock{}, testOrigin)
+	if _, err := other.Init(enclaveSpec("donor", false)); err != nil {
+		t.Fatal(err)
+	}
+	label := tl("plain", 1)
+	keychain.keys[label] = testItem(label)
+	keychain.installSigner(t, label)
+	planted := false
+	m := newTestManager(t, racingBackend{RoutedBackend: RoutedBackend{Keychain: keychain, Enclave: enclave}, afterList: func() {
+		if planted {
+			return
+		}
+		planted = true
+		rewriteEnclaveFile(t, enclave, tl("donor", 1), func(*enclaveFile) {})
+		dir, _ := openEnclaveDir(enclave.Dir)
+		defer dir.Close()
+		donor, _ := readEnclaveFile(dir, tl("donor", 1))
+		donor.Label = label
+		if err := writeEnclaveFile(dir, label+".json", donor, false); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	digest := sha256.Sum256([]byte("authorized store"))
+	calls := len(helper.requests)
+	if _, err := m.Sign(Address{Kind: KindKey, Service: TestService, Purpose: "plain"}, digest[:]); err != nil || len(keychain.signs) != 1 || len(helper.requests) != calls {
+		t.Fatalf("sign: %v keychain signs %v helper calls %d -> %d", err, keychain.signs, calls, len(helper.requests))
 	}
 }
