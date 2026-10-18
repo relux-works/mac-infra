@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -62,7 +63,7 @@ func TestInstallOwnerKeySnapshot(t *testing.T) {
 	}
 }
 
-// Claim: pin staging/publication/activation failures restore the prior pin and helper/plist bytes and inodes, or remove the incomplete first pin; malformed snapshots fail before fake commands.
+// Claim: each injected failure (pin staging, staged-pin publication, activation) is reached and reported as itself, with activation otherwise succeeding; it restores the prior pin and helper/plist bytes and inodes, or remove the incomplete first pin; malformed snapshots fail before fake commands.
 func TestInstallOwnerKeyFailures(t *testing.T) {
 	for _, failure := range []string{"stage", "publish", "activate", "firstPin"} {
 		t.Run(failure, func(t *testing.T) {
@@ -88,18 +89,28 @@ func TestInstallOwnerKeyFailures(t *testing.T) {
 			}
 			ops := f.ops
 			original := ops.command
+			reached := false
 			ops.command = func(input []byte, name string, args ...string) ([]byte, error) {
 				if failure == "stage" && name == "/bin/sh" && strings.HasSuffix(args[len(args)-1], "/owner-presence.spki") {
+					reached = true
 					return nil, fmt.Errorf("injected pin staging failure")
 				}
-				if failure == "publish" && name == "/bin/mv" && strings.HasSuffix(args[1], "/owner-presence.spki") {
+				// The staged pin moving onto the pin path, not the old pin
+				// moving to its backup or back from it.
+				if failure == "publish" && name == "/bin/mv" && len(args) == 3 && args[2] == cfg.OwnerKeyPath && args[1] != cfg.OwnerKeyPath && filepath.Base(args[1]) == "owner-presence.spki" {
+					reached = true
 					return nil, fmt.Errorf("injected pin publication failure")
 				}
 				return original(input, name, args...)
 			}
-			err := installReviewedSnapshotWithOwnerKey([]byte("new"), ownerKeyDERFixture(t), cfg, 501, 20, ops, func() error { return fmt.Errorf("injected activation failure") })
-			if err == nil || !strings.Contains(err.Error(), "injected") {
-				t.Fatalf("error=%v", err)
+			want := map[string]string{"stage": "injected pin staging failure", "publish": "injected pin publication failure", "activate": "injected activation failure", "firstPin": "injected activation failure"}[failure]
+			activate := func() error { return nil }
+			if failure == "activate" || failure == "firstPin" {
+				activate = func() error { reached = true; return fmt.Errorf("injected activation failure") }
+			}
+			err := installReviewedSnapshotWithOwnerKey([]byte("new"), ownerKeyDERFixture(t), cfg, 501, 20, ops, activate)
+			if err == nil || !strings.Contains(err.Error(), want) || !reached {
+				t.Fatalf("error=%v reached=%v, want %q", err, reached, want)
 			}
 			for p, want := range previous {
 				after, err := os.Stat(f.path(p))

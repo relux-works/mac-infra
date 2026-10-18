@@ -165,6 +165,19 @@ func TestVPNOwnerPinRefusals(t *testing.T) {
 			replacePinVPN(t, f, der)
 		}},
 		{"garbage", "owner_key_unsafe", func(t *testing.T, f *vpnFixture) { replacePinVPN(t, f, []byte("garbage")) }},
+		// The same key with an extra ASN.1 NULL inside the SPKI sequence:
+		// ParsePKIXPublicKey accepts it, the canonical-bytes check does not.
+		{"nonCanonical", "owner_key_unsafe", func(t *testing.T, f *vpnFixture) {
+			der := readVPN(t, f.s.ownerKey)
+			if der[0] != 0x30 || der[1] >= 0x7e {
+				t.Fatalf("unexpected SPKI header % x", der[:2])
+			}
+			extended := append(append([]byte{0x30, der[1] + 2}, der[2:]...), 0x05, 0x00)
+			if _, err := x509.ParsePKIXPublicKey(extended); err != nil {
+				t.Fatalf("fixture is not accepted by the x509 parser, so it proves nothing: %v", err)
+			}
+			replacePinVPN(t, f, extended)
+		}},
 		{"hardlink", "owner_key_unsafe", func(t *testing.T, f *vpnFixture) { mustVPN(t, os.Link(f.s.ownerKey, f.s.ownerKey+".link")) }},
 		{"oversize", "owner_key_unsafe", func(t *testing.T, f *vpnFixture) { replacePinVPN(t, f, make([]byte, 1025)) }},
 		{"directory", "owner_key_unsafe", func(t *testing.T, f *vpnFixture) {
@@ -489,6 +502,36 @@ func TestVPNOwnerGateOrder(t *testing.T) {
 			if (gate == "binding" || gate == "expiry") && pendingVPN(f.s, req.Authorization) {
 				t.Fatal("late gate retained nonce")
 			}
+		})
+	}
+}
+
+// Claim: the 120 s lifetime is measured on the elapsed (monotonic) clock, not
+// on wall time: with the wall clock moved only 60 s but 300 s really elapsed
+// the authorization is expired, a negative elapsed time is refused, and the
+// control with 60 s elapsed still installs.
+func TestVPNOwnerAuthorizationMonotonicExpiry(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		elapsed time.Duration
+		code    string
+	}{{"control", 60 * time.Second, ""}, {"wallLagsReal", 300 * time.Second, "authorization_expired"}, {"negative", -time.Second, "authorization_expired"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newVPNFixture(t)
+			wall := time.Date(2026, 10, 19, 14, 0, 0, 0, time.UTC)
+			f.s.authorizations.now = func() time.Time { return wall }
+			pkg, d := f.pkg(t, "binary", "tool")
+			req := authorizeVPN(t, f, 501, "install", d)
+			req.Package = pkg
+			wall = wall.Add(60 * time.Second)
+			f.s.authorizations.elapsed = func(time.Time) time.Duration { return tc.elapsed }
+			if tc.code == "" {
+				if r := f.s.handle(ActionVPNCoreInstall, req, 501); !r.OK {
+					t.Fatal(r.Error)
+				}
+				return
+			}
+			refusalUnchangedVPN(t, f, ActionVPNCoreInstall, req, 501, tc.code)
 		})
 	}
 }

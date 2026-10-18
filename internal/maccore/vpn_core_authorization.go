@@ -57,6 +57,11 @@ func ParseOwnerPublicKey(data []byte) (*ecdsa.PublicKey, error) {
 	if !ok || public.Curve != elliptic.P256() {
 		return nil, fmt.Errorf("owner key must be P-256 SPKI DER")
 	}
+	// The parser tolerates extra fields; only the exact canonical encoding of
+	// the key is a pin, so two byte strings never pin the same key.
+	if canonical, err := x509.MarshalPKIXPublicKey(public); err != nil || !bytes.Equal(canonical, data) {
+		return nil, fmt.Errorf("owner key must be canonical P-256 SPKI DER")
+	}
 	return public, nil
 }
 
@@ -90,7 +95,9 @@ func readOwnerPublicKey(path string, ownerUID uint32) (*ecdsa.PublicKey, []byte,
 type vpnAuthorization struct {
 	uid                           int
 	action, target, digest, nonce string
-	expires                       time.Time
+	expires                       time.Time // printed wall-clock expiry
+	issued                        time.Time // clock reading at issue, monotonic in production
+	lifetime                      time.Duration
 	statement                     []byte
 }
 
@@ -98,6 +105,17 @@ type vpnAuthorizations struct {
 	mu      sync.Mutex
 	pending []vpnAuthorization // issuance order, oldest first, bounded to eight
 	now     func() time.Time
+	// elapsed measures time since issue. The default subtracts two clock
+	// readings, which Go does on the monotonic clock in production, so a
+	// wall-clock change neither extends nor shortens an authorization.
+	elapsed func(issued time.Time) time.Duration
+}
+
+func (a *vpnAuthorizations) since(issued time.Time) time.Duration {
+	if a.elapsed != nil {
+		return a.elapsed(issued)
+	}
+	return a.clock().Sub(issued)
 }
 
 func (a *vpnAuthorizations) clock() time.Time {
@@ -139,7 +157,11 @@ func (s *vpnCoreService) issueAuthorization(uid int, action, digest string) ([]b
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, err
 	}
-	a := vpnAuthorization{uid: uid, action: action, target: "vpn-core", digest: digest, nonce: hex.EncodeToString(nonce[:]), expires: s.authorizations.clock().UTC().Truncate(time.Second).Add(120 * time.Second)}
+	issued := s.authorizations.clock()
+	expires := issued.UTC().Truncate(time.Second).Add(120 * time.Second)
+	// The deadline never falls after the printed expiry: the lifetime is the
+	// wall distance to it at issue (119-120 s), measured monotonically.
+	a := vpnAuthorization{uid: uid, action: action, target: "vpn-core", digest: digest, nonce: hex.EncodeToString(nonce[:]), expires: expires, issued: issued, lifetime: expires.Sub(issued.UTC())}
 	a.statement = authorizationBytes(action, digest, a.nonce, a.expires)
 	if len(s.authorizations.pending) == 8 {
 		s.authorizations.pending = s.authorizations.pending[1:]
@@ -176,12 +198,12 @@ func (s *vpnCoreService) authorizeMutation(uid int, action Action, req *VPNCoreR
 		return vpnRefuse("authorization_unknown", "nonce is not pending")
 	}
 	s.authorizations.pending = append(s.authorizations.pending[:index], s.authorizations.pending[index+1:]...)
-	now := s.authorizations.clock()
+	elapsed := s.authorizations.since(issued.issued)
 	s.authorizations.mu.Unlock()
 	if issued.uid != uid || issued.action != strings.TrimPrefix(string(action), "vpn_core_") || issued.target != req.Target || issued.digest != req.ExpectedDigest || !bytes.Equal(issued.statement, req.Authorization) {
 		return vpnRefuse("authorization_mismatch", "statement does not match issued request binding")
 	}
-	if !now.Before(issued.expires) {
+	if elapsed < 0 || elapsed >= issued.lifetime {
 		return vpnRefuse("authorization_expired", "authorization expired")
 	}
 	var signature struct{ R, S *big.Int }
