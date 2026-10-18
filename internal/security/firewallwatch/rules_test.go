@@ -70,6 +70,7 @@ func TestHardUnsignedCoversALFUnknownKind(t *testing.T) {
 // Prompt-looking names remain data; all supplied injection examples are decided
 // by features, without asking the embedder. Versioned interpreters also escalate.
 func TestInjectionAndInterpreter(t *testing.T) {
+	seen := map[string]bool{}
 	for _, file := range []string{"testdata/fixtures-v1.jsonl", "testdata/fixtures-v2-heldout.jsonl"} {
 		items, e := LoadItems(file)
 		if e != nil {
@@ -77,11 +78,17 @@ func TestInjectionAndInterpreter(t *testing.T) {
 		}
 		for _, it := range items {
 			if it.ID == "fx083" || it.ID == "fx084" || it.ID == "fx085" || it.ID == "ho031" {
+				seen[it.ID] = true
 				d, ok := Rules(it)
 				if !ok || d.Label != "decide" {
 					t.Fatalf("%s %+v", it.ID, d)
 				}
 			}
+		}
+	}
+	for _, id := range []string{"fx083", "fx084", "fx085", "ho031"} {
+		if !seen[id] {
+			t.Fatalf("missing selected fixture %s", id)
 		}
 	}
 	for _, name := range []string{"python3.13", "ruby3.4", "node22"} {

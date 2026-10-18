@@ -2,9 +2,13 @@ package firewallwatch
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,10 +24,14 @@ type Entry struct {
 	WindowStart  time.Time `json:"window_start"`
 	Denies       int       `json:"denies"`
 	SpikeEmitted bool      `json:"spike_emitted"`
+	Escalated    []string  `json:"escalated,omitempty"`
 }
 type SignerEntry struct {
-	Value    string    `json:"value"`
-	LastSeen time.Time `json:"last_seen"`
+	Value     string    `json:"value"`
+	Identity  string    `json:"identity"`
+	Failed    bool      `json:"failed"`
+	Inspected time.Time `json:"inspected"`
+	LastSeen  time.Time `json:"last_seen"`
 }
 
 type State struct {
@@ -38,8 +46,14 @@ type State struct {
 	NettopError        string                 `json:"nettop_error,omitempty"`
 }
 type Store struct {
-	Config Config
-	State  State
+	Config        Config
+	State         State
+	dirty         bool
+	lastSave      time.Time
+	dayHashes     map[string][32]byte
+	atomicWrite   func(string, []byte) error
+	inspectSigner func(context.Context, string) (string, error)
+	clock         func() time.Time
 }
 
 func safeDir(dir string) error {
@@ -79,22 +93,74 @@ func OpenStore(c Config) (*Store, error) {
 	if e := safeExisting(path); e != nil {
 		return nil, e
 	}
-	raw, e := os.ReadFile(path)
+	f, e := os.Open(path)
 	if e == nil {
+		raw, readErr := io.ReadAll(io.LimitReader(f, c.MaxStateBytes+1))
+		closeErr := f.Close()
+		if readErr != nil || closeErr != nil {
+			return nil, errors.Join(readErr, closeErr)
+		}
+		if int64(len(raw)) > c.MaxStateBytes {
+			return nil, errors.New("corrupt state: max_state_bytes exceeded")
+		}
 		if e = json.Unmarshal(raw, &s.State); e != nil {
-			return nil, e
+			return nil, fmt.Errorf("corrupt state: %w", e)
+		}
+		if e = s.validateState(); e != nil {
+			return nil, fmt.Errorf("corrupt state: %w", e)
 		}
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return nil, e
-	}
-	if s.State.Entries == nil {
+	} else {
 		s.State.Entries = map[string]*Entry{}
-	}
-	if s.State.Signers == nil {
 		s.State.Signers = map[string]SignerEntry{}
 	}
 	s.prune(time.Now())
 	return s, nil
+}
+
+// validateState runs before pruning or dereferencing any loaded entry.
+func (s *Store) validateState() error {
+	st := s.State
+	bad := func() error { return errors.New("invalid structure, count or field") }
+	if st.Entries == nil || st.Signers == nil || len(st.Entries) > s.Config.MaxEntries || len(st.Events) > s.Config.MaxEntries || len(st.Signers) > s.Config.MaxEntries || len(st.Parser.Samples) > SampleLimit {
+		return bad()
+	}
+	for k, v := range st.Entries {
+		if len(k) == 0 || len(k) > 8192 || v == nil || v.Count == 0 || v.Count > math.MaxInt64 || v.Denies < 0 || uint64(v.Denies) > v.Count || v.FirstSeen.IsZero() || v.LastSeen.Before(v.FirstSeen) || v.WindowStart.IsZero() || v.WindowStart.After(v.LastSeen) || len(v.Escalated) > 32 {
+			return bad()
+		}
+		seen := map[string]bool{}
+		for _, r := range v.Escalated {
+			if len(r) == 0 || len(r) > 128 || seen[r] {
+				return bad()
+			}
+			seen[r] = true
+		}
+	}
+	for k, v := range st.Signers {
+		if len(k) == 0 || len(k) > 1024 || len(v.Value) > 1024 || len(v.Identity) > 1024 || v.LastSeen.IsZero() {
+			return bad()
+		}
+	}
+	for _, v := range st.Parser.Samples {
+		if len(v) > 256 || Sanitize(v) != v {
+			return bad()
+		}
+	}
+	if len(st.NettopError) > 1024 {
+		return bad()
+	}
+	for _, v := range st.Events {
+		if v.TS.IsZero() || !validLabel(v.Label) || v.Mode != "shadow" || (v.Source != "alf" && v.Source != "nettop") || len(v.App) > 1024 || len(v.Signer) > 1024 || len(v.Verdict) > 128 || len(v.RemoteClass) > 128 || len(v.Bucket) > 128 || v.Counts == 0 || v.Counts > math.MaxInt64 || Sanitize(v.App) != v.App || Sanitize(v.Signer) != v.Signer || (v.Port != nil && (*v.Port < 1 || *v.Port > 65535)) {
+			return bad()
+		}
+		b, e := json.Marshal(v.Reason)
+		if e != nil || len(b) > 65536 || v.Reason == nil {
+			return bad()
+		}
+	}
+	return nil
 }
 func atomicWrite(path string, data []byte) error {
 	if e := safeExisting(path); e != nil {
@@ -153,6 +219,7 @@ func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []
 		entry = &Entry{FirstSeen: now, WindowStart: now}
 		s.State.Entries[k] = entry
 	}
+	s.dirty = true
 	entry.LastSeen = now
 	entry.Count++
 	spike := false
@@ -169,8 +236,18 @@ func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []
 		}
 	}
 	var events []Event
-	add := func(item Item) {
-		d := classify(item)
+	add := func(item Item, d Decision) {
+		if d.Label == "decide" && !item.Spike {
+			found := false
+			for _, r := range entry.Escalated {
+				if r == d.Reason {
+					found = true
+				}
+			}
+			if !found {
+				entry.Escalated = append(entry.Escalated, d.Reason)
+			}
+		}
 		event := Event{TS: now, Source: it.Source, App: it.App, Signer: it.Signer, Verdict: it.Verdict, Port: port(it), RemoteClass: it.Remote, Bucket: it.Bucket, Counts: entry.Count, Label: d.Label, Reason: d.Reason, Mode: "shadow"}
 		if d.Reason == "knn" {
 			event.Reason = struct {
@@ -183,11 +260,21 @@ func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []
 		s.State.LastEvent = now
 	}
 	if !exists {
-		add(it)
+		add(it, classify(it))
+	} else if d, ok := Rules(it); ok && d.Label == "decide" {
+		found := false
+		for _, r := range entry.Escalated {
+			if r == d.Reason {
+				found = true
+			}
+		}
+		if !found {
+			add(it, d)
+		}
 	}
 	if spike {
 		it.Spike = true
-		add(it)
+		add(it, classify(it))
 	}
 	s.prune(now)
 	return events
@@ -244,17 +331,41 @@ func (s *Store) prune(now time.Time) {
 		}
 	}
 }
+func (s *Store) write(path string, data []byte) error {
+	if s.atomicWrite != nil {
+		return s.atomicWrite(path, data)
+	}
+	return atomicWrite(path, data)
+}
+
+// Flush saves emitted events immediately; silent updates wait for an interval,
+// a nettop tick, or shutdown. Failed writes retain dirty state for a retry.
+func (s *Store) Flush(now time.Time, emitted, force bool) error {
+	if !s.dirty && !force {
+		return nil
+	}
+	if !emitted && !force && !s.lastSave.IsZero() && now.Before(s.lastSave.Add(duration(s.Config.SaveInterval))) {
+		return nil
+	}
+	return s.Save(now)
+}
 func (s *Store) Save(now time.Time) error {
 	if e := safeDir(s.Config.StateDir); e != nil {
 		return e
 	}
 	s.prune(now)
 	s.State.Updated = now
+	if e := s.validateState(); e != nil {
+		return fmt.Errorf("refusing invalid state save: %w", e)
+	}
 	data, e := json.Marshal(s.State)
 	if e != nil {
 		return e
 	}
-	if e = atomicWrite(filepath.Join(s.Config.StateDir, "state.json"), data); e != nil {
+	if int64(len(data)) > s.Config.MaxStateBytes {
+		return errors.New("state exceeds max_state_bytes")
+	}
+	if e = s.write(filepath.Join(s.Config.StateDir, "state.json"), data); e != nil {
 		return e
 	}
 	// Daily files are atomic projections of authoritative state: crash/retry cannot
@@ -268,10 +379,35 @@ func (s *Store) Save(now time.Time) error {
 		}
 		days[day] = append(days[day], append(line, '\n')...)
 	}
+	if s.dayHashes == nil {
+		s.dayHashes = map[string][32]byte{}
+	}
 	for day, data := range days {
-		if e = atomicWrite(filepath.Join(s.Config.StateDir, "events-"+day+".jsonl"), data); e != nil {
+		path := filepath.Join(s.Config.StateDir, "events-"+day+".jsonl")
+		if e = safeExisting(path); e != nil {
 			return e
 		}
+		h := sha256.Sum256(data)
+		previous, ok := s.dayHashes[day]
+		if !ok {
+			if f, err := os.Open(path); err == nil {
+				b, err := io.ReadAll(io.LimitReader(f, s.Config.MaxStateBytes+1))
+				f.Close()
+				if err != nil {
+					return err
+				}
+				previous = sha256.Sum256(b)
+				ok = true
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		if !ok || h != previous {
+			if e = s.write(path, data); e != nil {
+				return e
+			}
+		}
+		s.dayHashes[day] = h
 	}
 	files, e := filepath.Glob(filepath.Join(s.Config.StateDir, "events-*.jsonl"))
 	if e != nil {
@@ -283,6 +419,7 @@ func (s *Store) Save(now time.Time) error {
 			if e = safeExisting(path); e != nil {
 				return e
 			}
+			delete(s.dayHashes, day)
 			if e = os.Remove(path); e != nil {
 				return e
 			}
@@ -298,11 +435,14 @@ func (s *Store) Save(now time.Time) error {
 		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 			return readErr
 		}
-		if bytes.Equal(existing, stamp) {
-			return nil
+		if !bytes.Equal(existing, stamp) {
+			if e = s.write(flagPath, stamp); e != nil {
+				return e
+			}
 		}
-		return atomicWrite(flagPath, stamp)
 	}
+	s.dirty = false
+	s.lastSave = now
 	return nil
 }
 

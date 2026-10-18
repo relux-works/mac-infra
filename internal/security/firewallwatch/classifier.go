@@ -4,23 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"sort"
-	"strconv"
-	"strings"
-	"sync"
-	"syscall"
-	"time"
 )
 
 type Classifier struct {
@@ -28,20 +19,26 @@ type Classifier struct {
 	client  *http.Client
 	pool    []Item
 	vectors [][]float64
+	backend *Backend
 	healthy bool
 }
 
 func NewClassifier(c Config) (*Classifier, error) {
-	if e := ValidateBackend(c.Backend()); e != nil {
-		return nil, e
-	}
-	if c.K < 1 || c.NoveltySimilarity == nil {
+	if c.K < 1 || c.NoveltySimilarity == nil || !(*c.NoveltySimilarity > 0 && *c.NoveltySimilarity <= 1) {
 		return nil, errors.New("invalid classifier config")
 	}
-	// No proxy, redirects, or caller-controlled host can forward item data off loopback.
-	tr := &http.Transport{Proxy: nil}
-	return &Classifier{cfg: c, client: &http.Client{Timeout: duration(c.ClassifierTimeout), Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}}, nil
+	cl := &Classifier{cfg: c}
+	cl.BindBackend(nil)
+	return cl, nil
 }
+
+// BindBackend pins the transport to the owned process and its private socket.
+func (c *Classifier) BindBackend(b *Backend) {
+	c.backend = b
+	c.client = backendClient(b, duration(c.cfg.ClassifierTimeout))
+	c.healthy = false
+}
+
 func LoadItems(path string) ([]Item, error) {
 	f, e := os.Open(path)
 	if e != nil {
@@ -73,6 +70,9 @@ func LoadItems(path string) ([]Item, error) {
 	return items, nil
 }
 func (c *Classifier) embed(ctx context.Context, texts []string) ([][]float64, error) {
+	if !c.backend.alive() {
+		return nil, errors.New("classifier_unavailable: backend exited or unbound")
+	}
 	raw, _ := json.Marshal(map[string]any{"input": texts})
 	req, e := http.NewRequestWithContext(ctx, "POST", c.cfg.Backend()+"/v1/embeddings", bytes.NewReader(raw))
 	if e != nil {
@@ -127,6 +127,9 @@ func (c *Classifier) embed(ctx context.Context, texts []string) ([][]float64, er
 		}
 		res[v.Index] = v.Embedding
 	}
+	if !c.backend.alive() {
+		return nil, errors.New("classifier_unavailable: backend exited")
+	}
 	return res, nil
 }
 func (c *Classifier) Init(ctx context.Context) error {
@@ -158,10 +161,14 @@ func (c *Classifier) Init(ctx context.Context) error {
 	c.pool, c.vectors, c.healthy = pool, vectors, true
 	return nil
 }
-func (c *Classifier) Healthy() bool { return c != nil && c.healthy }
+func (c *Classifier) Healthy() bool { return c != nil && c.healthy && c.backend.alive() }
 
 // CheckHealth refreshes the snapshot even when no new items need embedding.
 func (c *Classifier) CheckHealth(ctx context.Context) bool {
+	if !c.backend.alive() {
+		c.healthy = false
+		return false
+	}
 	req, e := http.NewRequestWithContext(ctx, "GET", c.cfg.Backend()+"/health", nil)
 	if e != nil {
 		c.healthy = false
@@ -173,7 +180,7 @@ func (c *Classifier) CheckHealth(ctx context.Context) bool {
 		return false
 	}
 	resp.Body.Close()
-	c.healthy = resp.StatusCode == 200 && len(c.vectors) > 0
+	c.healthy = c.backend.alive() && resp.StatusCode == 200 && len(c.vectors) > 0
 	return c.healthy
 }
 
@@ -212,113 +219,20 @@ func (c *Classifier) Classify(ctx context.Context, it Item) Decision {
 	votes := map[string]float64{}
 	for _, n := range nbs[:c.cfg.K] {
 		result.Neighbours = append(result.Neighbours, n.Neighbour)
-		votes[n.label] += n.Similarity
+		if n.Similarity >= *c.cfg.NoveltySimilarity {
+			votes[n.label] += n.Similarity
+		}
 	}
-	if nbs[0].Similarity < *c.cfg.NoveltySimilarity {
+	if len(votes) == 0 {
 		result.Reason = "novel"
 		return result
 	}
 	best := math.Inf(-1)
 	for _, label := range []string{"decide", "digest", "noise"} {
-		if votes[label] > best {
+		if weight, ok := votes[label]; ok && weight > best {
 			best = votes[label]
 			result.Label = label
 		}
 	}
 	return result
-}
-
-type childLog struct {
-	mu   sync.Mutex
-	data []byte
-}
-
-func (b *childLog) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	n := min(len(p), 64*1024-len(b.data))
-	b.data = append(b.data, p[:n]...)
-	return len(p), nil
-}
-func (b *childLog) String() string { b.mu.Lock(); defer b.mu.Unlock(); return string(b.data) }
-
-// StartBackend hashes before exec. Stop owns and reaps only this child PID.
-func StartBackend(ctx context.Context, c Config) (func(), error) {
-	f, e := os.Open(c.Model)
-	if e != nil {
-		return nil, e
-	}
-	h := sha256.New()
-	_, e = io.Copy(h, f)
-	closeErr := f.Close()
-	if e != nil {
-		return nil, e
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), c.ModelSHA256) {
-		return nil, errors.New("model sha256 mismatch")
-	}
-	addr := "127.0.0.1:" + strconv.Itoa(c.Port)
-	// Fail rather than adopt an already running server on this port.
-	probe, e := net.Listen("tcp4", addr)
-	if e != nil {
-		return nil, errors.New("backend port unavailable")
-	}
-	probe.Close()
-	childCtx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(childCtx, c.LlamaServer, "--offline", "--host", "127.0.0.1", "--port", strconv.Itoa(c.Port), "--embedding", "--pooling", "last", "-m", c.Model)
-	// Only bounded in-memory startup diagnostics; never persist child request logs.
-	startupLog := &childLog{}
-	cmd.Stdout = startupLog
-	cmd.Stderr = startupLog
-	if e = cmd.Start(); e != nil {
-		cancel()
-		return nil, e
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	stopped := false
-	stop := func() {
-		if stopped {
-			return
-		}
-		stopped = true
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			cancel()
-			<-done
-		}
-		cancel()
-	}
-	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}
-	deadline := time.NewTimer(duration(c.ClassifierTimeout))
-	defer deadline.Stop()
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			stop()
-			return nil, ctx.Err()
-		case <-deadline.C:
-			stop()
-			return nil, errors.New("backend startup timeout")
-		case childErr := <-done:
-			cancel()
-			return nil, fmt.Errorf("backend exited during startup: %v: %s", childErr, Sanitize(startupLog.String()))
-		case <-tick.C:
-			req, _ := http.NewRequestWithContext(ctx, "GET", c.Backend()+"/health", nil)
-			r, e := client.Do(req)
-			if e == nil {
-				r.Body.Close()
-				if r.StatusCode == 200 {
-					return stop, nil
-				}
-			}
-		}
-	}
 }

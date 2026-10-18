@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Documentation only. Replace every /ABSOLUTE/... path before manual use.
-     The state directory must already exist with mode 0700 for launchd logs. -->
+     The caller-owned state directory must already exist with mode 0700 for logs
+     and llm.sock. The JSON config requires save_interval, signer_failure_ttl,
+     max_state_bytes and max_model_bytes; port is removed. See references/firewall.md.
+     Create stdout/stderr files mode 0600 and rotate them separately. MkdirAll may
+     create ancestors. Trust the selected llama-server executable and the watcher's
+     environment; children receive only the documented minimal/empty environment. -->
 <plist version="1.0"><dict>
   <key>Label</key><string>works.relux.mac-firewall-watch</string>
   <key>ProgramArguments</key><array>

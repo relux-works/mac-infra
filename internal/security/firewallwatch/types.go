@@ -9,20 +9,21 @@ import (
 )
 
 type Item struct {
-	ID         string  `json:"id,omitempty"`
-	Kind       string  `json:"kind"`
-	App        string  `json:"app"`
-	Signer     string  `json:"signer"`
-	Verdict    string  `json:"verdict"`
-	LocalPort  *int    `json:"local_port,omitempty"`
-	Remote     string  `json:"remote"`
-	RemotePort *int    `json:"remote_port,omitempty"`
-	MBOut      float64 `json:"mb_out"`
-	Count      int     `json:"count"`
-	Label      string  `json:"label,omitempty"`
-	Source     string  `json:"source,omitempty"`
-	Bucket     string  `json:"bucket,omitempty"`
-	Spike      bool    `json:"-"`
+	InspectionPath string  `json:"-"`
+	ID             string  `json:"id,omitempty"`
+	Kind           string  `json:"kind"`
+	App            string  `json:"app"`
+	Signer         string  `json:"signer"`
+	Verdict        string  `json:"verdict"`
+	LocalPort      *int    `json:"local_port,omitempty"`
+	Remote         string  `json:"remote"`
+	RemotePort     *int    `json:"remote_port,omitempty"`
+	MBOut          float64 `json:"mb_out"`
+	Count          int     `json:"count"`
+	Label          string  `json:"label,omitempty"`
+	Source         string  `json:"source,omitempty"`
+	Bucket         string  `json:"bucket,omitempty"`
+	Spike          bool    `json:"-"`
 }
 
 type Neighbour struct {
@@ -53,6 +54,7 @@ const Instruction = "Instruct: Classify a macOS firewall event as routine noise,
 
 // Render preserves the benchmark feature representation, including quoted data.
 func Render(it Item) string {
+	it = cleanItem(it)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s flow; app=%q; signer=%q; verdict=%s; remote=%s", it.Kind, it.App, it.Signer, it.Verdict, it.Remote)
 	if it.LocalPort != nil {

@@ -17,6 +17,9 @@ func Rules(it Item) (decision Decision, fired bool) {
 	if inboundSide && it.Verdict == "allow" && (strings.Contains(signer, "unsigned") || strings.Contains(signer, "ad-hoc") || strings.Contains(signer, "no designated requirement")) {
 		return Decision{Label: "decide", Reason: "hard_unsigned_inbound"}, true
 	}
+	if it.Source == "alf" && it.Verdict == "allow" && (signer == "unknown" || signer == "") {
+		return Decision{Label: "decide", Reason: "hard_unverified_inbound"}, true
+	}
 	app := strings.ToLower(it.App)
 	base := app[strings.LastIndex(app, "/")+1:]
 	has := func(xs ...string) bool {

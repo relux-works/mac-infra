@@ -170,8 +170,22 @@ later `--expect-sha256`) and an empty or malformed digest.
 firewall settings, or calls `mac-infra-core`. Every label is a proposal with
 `mode: "shadow"`; only `new-events.flag` notifies the keeper. No network
 notification or a2a message is sent. Embeddings use a watcher-owned foreground
-llama-server child on numeric IPv4 loopback only, with proxies and HTTP redirects
-refused. The pinned model SHA-256 is verified before starting that child.
+llama-server child through `<state_dir>/llm.sock` only; no TCP listener is
+created. The HTTP transport dials only that UNIX socket, refuses proxies and
+redirects, and checks Darwin `LOCAL_PEERPID` against the child PID before sending
+requests. Child exit permanently invalidates that binding; another listener is
+never adopted. A stale socket is removed only when it is caller-owned and a
+connection is refused; live listeners and non-socket objects refuse startup.
+
+Before exec, the model is opened with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK` and fstat
+must show a regular caller/root-owned file, without group/world writes, within
+`max_model_bytes`. Chunked SHA-256 verification checks cancellation and the
+overall startup deadline, which starts before open. The same open description
+is inherited through `ExtraFiles` as fd 3 and loaded with `-m /dev/fd/3`.
+Path replacement after verification cannot select a different inode. Concurrent
+in-place modification by a trusted owner after verification is outside this
+pinning guarantee; keep model contents unchanged while running. There is no
+pathname fallback.
 
 ```sh
 mac-firewall watch run --config /ABSOLUTE/firewall-watch.json
@@ -186,7 +200,10 @@ llama-server child. Exit codes are 0 success, 1 refused/failed, 2 bad usage.
 `status` reports last persisted backend health with its observation time, not
 a live health probe; a stale timestamp may mean the watcher has stopped.
 `digest` reads retained new-item events grouped by proposed label and app.
-Repeats update state counters/last_seen without producing another item event.
+Ordinary repeats update counters/last_seen silently. Rules run again on each
+repeat's latest bytes and current signer; each newly triggered `decide` rule ID
+emits one escalation per key, recorded in state across restarts. A further repeat
+of the same rule stays silent.
 A deny spike emits one additional event per key per fixed window starting at
 its first deny (threshold is inclusive). Dedup keys contain source, app,
 verdict, port, and remote class; different subnets within one class collapse.
@@ -197,7 +214,8 @@ Every field below is required; there are no implicit behaviour defaults.
 The numbers here are examples, not recommended production policy. All paths
 must be absolute. The config must be a regular file owned by the invoking
 user and must deny group/world writes. Unknown fields and trailing JSON are
-refused. Port is an integer in 1..65535, always bound to `127.0.0.1`.
+refused. The former `port` field is removed and refused as unknown.
+`novelty_similarity` must be finite and in `(0, 1]`.
 
 ```json
 {
@@ -206,6 +224,10 @@ refused. Port is an integer in 1..65535, always bound to `127.0.0.1`.
   "max_entries": 10000,
   "retention_days": 14,
   "nettop_interval": "30s",
+  "save_interval": "10s",
+  "signer_failure_ttl": "30s",
+  "max_state_bytes": 33554432,
+  "max_model_bytes": 2147483648,
   "deny_spike_count": 10,
   "deny_spike_window": "5m",
   "k": 3,
@@ -214,8 +236,7 @@ refused. Port is an integer in 1..65535, always bound to `127.0.0.1`.
   "llama_server": "/opt/homebrew/bin/llama-server",
   "model": "/ABSOLUTE/Qwen3-Embedding-0.6B-Q8_0.gguf",
   "model_sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
-  "labelled_pool": "/ABSOLUTE/fixtures-v1.jsonl",
-  "port": 18191
+  "labelled_pool": "/ABSOLUTE/fixtures-v1.jsonl"
 }
 ```
 
@@ -223,19 +244,50 @@ refused. Port is an integer in 1..65535, always bound to `127.0.0.1`.
 retained events in total across all daily files. Dedup/events also expire by
 `retention_days`. Oldest last_seen dedup entries are evicted first. Evicted
 items can become new again; evicted executable cache entries can be inspected
-again. Signature inspection runs once per cached executable path, with
-`/usr/bin/codesign -dv --verbose=2`. Bundle IDs and process names without paths
-have unknown signers; this is observation metadata, not signature verification.
+again. Signature inspection uses `/usr/bin/codesign -dv --verbose=2` on the
+original bounded path held only in memory. Display/persistence uses its sanitized
+form. At each lookup, lstat of the resolved real path supplies dev, inode, size,
+mtime ns and ctime ns; changed identity triggers inspection. Cache keys hash the
+original path and entries also bind this identity. Bundle-directory successes
+are re-inspected because directory lstat does not attest changes to inner code.
+Inspection failures cache
+`unknown` only for `signer_failure_ttl`, measured from inspection, without
+extending the deadline on hits. Missing paths, bundle IDs and process names
+without paths have unknown signers. This is observation metadata, not signature
+verification; an ALF allow with unknown signer gives `hard_unverified_inbound`.
+
+`save_interval`, `signer_failure_ttl`, and all other durations are positive Go
+durations. `max_state_bytes` is 1..1 GiB; `max_model_bytes` is 1..1 TiB.
+`max_entries` is 1..100000 and retention is 1..3650 days. Choose a state byte
+limit large enough for the retained events, dedup entries and signer cache.
+Oversized/structurally corrupt state is refused with a corruption error without
+rewriting it. Null maps/entries, invalid counts and invalid field bounds are
+refused before pruning. A save exceeding the byte cap also fails.
 
 The state directory must be owned by the caller, mode `0700`, and not a symlink.
+Choose a short absolute path: Darwin UNIX socket path names must fit in 103 bytes.
 `state.json`, `events-YYYY-MM-DD.jsonl`, and `new-events.flag` are `0600`.
 Writes use same-directory temporary files and rename. State is authoritative;
-daily files are rebuilt atomically from its retained events, recovering
-projections after an interrupted write. The flag contains the latest event
-RFC3339 timestamp. A per-directory advisory lock refuses concurrent collectors.
+daily projections are rewritten atomically only when their events changed,
+recovering projections after an interrupted write. New-key, spike and escalation
+events save immediately. Silent updates mark state dirty, then save at
+`save_interval`, the next nettop tick if earlier, and shutdown. The flag contains
+the latest event RFC3339 timestamp. A per-directory advisory lock is acquired
+before loading state and refuses concurrent collectors.
 Directory ancestors and same-user concurrent replacement are not a security
 boundary. The files do not form a multi-file transaction, and sudden power
 loss durability is not guaranteed by rename alone.
+
+Direct watcher artifacts are under `state_dir`, including the private UNIX
+socket and lock. `MkdirAll` may also create missing ancestor directories above
+that leaf. stdout/stderr write to the caller's destinations; the plist chooses
+separate files under the state directory. These streams need operator rotation.
+The selected llama-server binary is a trusted input and is not sandboxed or
+hash-pinned. The watcher's inherited environment is also a trusted input to
+its own runtime. Collector/codesign children receive only `PATH=/usr/bin:/bin`
+and `LANG=C`; llama-server receives an empty environment, so inherited loader
+and `LLAMA_ARG_*` settings cannot steer it. The watcher does not guarantee all
+filesystem/network side effects of an arbitrary trusted backend executable.
 
 Raw peer IPs are never emitted or persisted. IPv4 peers become `/24`, IPv6
 peers `/64`; classes are `lan`, `tailnet` (`100.64/10`,
@@ -247,16 +299,20 @@ increments a separate counter; unknown `fw` shapes are counted and sampled.
 ### Proposals and limits
 
 Hard rules precede policy: inbound allow by unsigned/ad-hoc/no-designated-
-requirement code, every non-allow ALF verdict (including unknown), and deny
-spikes propose `decide`. Nettop's `observed` sentinel is traffic observation,
+requirement code, ALF allow with unverified/unknown signer
+(`hard_unverified_inbound`), every non-allow ALF verdict (including unknown),
+and deny spikes propose `decide`. Nettop's `observed` sentinel is traffic observation,
 not an ALF allow verdict. Policy branches preserve the supplied benchmark's
 ordering, with rule IDs, and also recognize versioned interpreter names.
 The labelled embedding pool is loaded in memory at startup. Weighted kNN uses
 the benchmark instruction prefix and feature rendering, cosine similarity,
-and riskier-label tie breaking. A neighbour below the explicit novelty
-threshold gives `decide`/`novel`. Timeout, invalid response, or embedding failure
+and riskier-label tie breaking (`decide` > `digest` > `noise`). Only neighbours
+among the top-k whose cosine similarity is >= `novelty_similarity` vote, with
+that positive similarity as weight. Sub-threshold neighbours cast no vote.
+Only a label with at least one qualifying vote can win; if none qualifies,
+the proposal is `decide`/`novel`. Timeout, invalid response, or embedding failure
 gives `decide`/`classifier_unavailable`, never `noise`; deterministic rules still
-work. Startup errors (including hash mismatch or occupied port) refuse `run`
+work. Startup errors (including hash mismatch or an unsafe/live socket) refuse `run`
 and `classify` with exit 1. Pool failures leave the deterministic observer
 running with unmatched proposals failing to decide; it retries pool loading
 on nettop ticks. Item text is data; injection-looking names do not alter rules.
@@ -291,7 +347,7 @@ collector completeness is claimed.
 
 ### Optional model verification and LaunchAgent example
 
-Ordinary Go tests use a loopback fake embedding service and skip the real
+Ordinary Go tests use a UNIX-socket fake embedding service and skip the real
 model test. On a host with the exact pinned model and llama-server, run:
 
 ```sh
@@ -307,10 +363,17 @@ installs no service. The test pins the specified Qwen3 model path and SHA-256.
 On a sandbox without Metal access, the equivalent CPU run is:
 
 ```sh
-LLAMA_ARG_DEVICE=none LLAMA_ARG_N_GPU_LAYERS=0 LLAMA_ARG_KV_OFFLOAD=0 MAC_FIREWALL_REAL_MODEL=1 go test ./cmd/mac-firewall -run '^TestWatchRealModel$' -count=1 -v
+MAC_FIREWALL_CPU=1 MAC_FIREWALL_REAL_MODEL=1 go test ./cmd/mac-firewall -run '^TestWatchRealModel$' -count=1 -v
 ```
 
-Measured on 2026-10-19, llama-server build 10621, CPU backend: 29/31
+The CPU test uses a test-only wrapper with explicit `--device none
+--n-gpu-layers 0 --no-kv-offload` argv; production never forwards ambient model
+settings. On 2026-10-19, the review-fix CPU run successfully loaded the actual
+pinned model through `/dev/fd/3` and authenticated its UNIX socket peer:
+29/31 (93.55%), macro F1 0.9346, decide-to-noise 0; p50 146.0ms, p95 289.3ms (delivery validation run, CPU).
+These are synthetic policy-author self-labels, not host-traffic guarantees.
+
+Earlier measurement on 2026-10-19, llama-server build 10621, CPU backend: 29/31
 correct (93.55%), macro F1 0.9346, decide-to-noise 0; latency p50 140.5ms,
 p95 237.6ms. These fixtures are synthetic and self-labelled by the policy
 author. The default Metal run failed to allocate a command queue in the

@@ -5,12 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net/url"
+	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 )
@@ -30,7 +28,10 @@ type Config struct {
 	Model             string   `json:"model"`
 	ModelSHA256       string   `json:"model_sha256"`
 	LabelledPool      string   `json:"labelled_pool"`
-	Port              int      `json:"port"`
+	SaveInterval      string   `json:"save_interval"`
+	SignerFailureTTL  string   `json:"signer_failure_ttl"`
+	MaxStateBytes     int64    `json:"max_state_bytes"`
+	MaxModelBytes     int64    `json:"max_model_bytes"`
 }
 
 func ownedRegular(f *os.File) error {
@@ -72,7 +73,7 @@ func LoadConfig(path string) (Config, error) {
 	return c, c.Validate()
 }
 func (c Config) Validate() error {
-	if c.Schema != "mac-infra.firewall-watch/v1" || c.MaxEntries < 1 || c.RetentionDays < 1 || c.DenySpikeCount < 1 || c.K < 1 || c.NoveltySimilarity == nil || *c.NoveltySimilarity < -1 || *c.NoveltySimilarity > 1 {
+	if c.Schema != "mac-infra.firewall-watch/v1" || c.MaxStateBytes < 1 || c.MaxStateBytes > 1<<30 || c.MaxModelBytes < 1 || c.MaxModelBytes > 1<<40 || c.MaxEntries < 1 || c.MaxEntries > 100000 || c.RetentionDays > 3650 || c.RetentionDays < 1 || c.DenySpikeCount < 1 || c.K < 1 || c.NoveltySimilarity == nil || math.IsNaN(*c.NoveltySimilarity) || *c.NoveltySimilarity <= 0 || *c.NoveltySimilarity > 1 {
 		return errors.New("missing or invalid required config field")
 	}
 	for _, p := range []string{c.StateDir, c.LlamaServer, c.Model, c.LabelledPool} {
@@ -80,7 +81,7 @@ func (c Config) Validate() error {
 			return errors.New("all paths must be absolute")
 		}
 	}
-	for _, v := range []string{c.NettopInterval, c.DenySpikeWindow, c.ClassifierTimeout} {
+	for _, v := range []string{c.NettopInterval, c.DenySpikeWindow, c.ClassifierTimeout, c.SaveInterval, c.SignerFailureTTL} {
 		if d, e := time.ParseDuration(v); e != nil || d <= 0 {
 			return errors.New("required durations must be positive Go durations")
 		}
@@ -89,18 +90,8 @@ func (c Config) Validate() error {
 	if e != nil || len(h) != 32 {
 		return errors.New("model_sha256 must be 64 hex digits")
 	}
-	return ValidateBackend(c.Backend())
-}
-func (c Config) Backend() string { return fmt.Sprintf("http://127.0.0.1:%d", c.Port) }
-func ValidateBackend(s string) error {
-	u, e := url.Parse(s)
-	if e != nil {
-		return errors.New("invalid loopback backend")
-	}
-	p, e := strconv.Atoi(u.Port())
-	if e != nil || p < 1 || p > 65535 || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Host != "127.0.0.1:"+strconv.Itoa(p) || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("backend must be http://127.0.0.1:<port> (1..65535)")
-	}
 	return nil
 }
+func (c Config) SocketPath() string   { return filepath.Join(c.StateDir, "llm.sock") }
+func (c Config) Backend() string      { return "http://llama" }
 func duration(s string) time.Duration { d, _ := time.ParseDuration(s); return d }

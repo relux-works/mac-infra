@@ -3,8 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"net"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/relux-works/mac-infra/internal/security/firewallwatch"
@@ -17,20 +17,26 @@ func TestWatchRealModel(t *testing.T) {
 	if os.Getenv("MAC_FIREWALL_REAL_MODEL") != "1" {
 		t.Skip("set MAC_FIREWALL_REAL_MODEL=1 to run the pinned real model")
 	}
-	l, e := net.Listen("tcp4", "127.0.0.1:0")
-	if e != nil {
-		t.Fatal(e)
+	config, c := watchConfig(t, 0)
+	// CPU flags are explicit test-only argv: production children get an empty environment.
+	if os.Getenv("MAC_FIREWALL_CPU") == "1" {
+		wrapper := filepath.Join(t.TempDir(), "cpu-server")
+		if e := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec /opt/homebrew/bin/llama-server --device none --n-gpu-layers 0 --no-kv-offload \"$@\"\n"), 0700); e != nil {
+			t.Fatal(e)
+		}
+		c.LlamaServer = wrapper
+		raw, _ := json.Marshal(c)
+		if e := os.WriteFile(config, raw, 0600); e != nil {
+			t.Fatal(e)
+		}
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	config, _ := watchConfig(t, port)
 	var out, errOut bytes.Buffer
 	code := run([]string{"watch", "classify", "--config", config, "--fixtures", "../../internal/security/firewallwatch/testdata/fixtures-v2-heldout.jsonl", "--json"}, &out, &errOut)
 	if code != 0 {
 		t.Fatal(code, errOut.String())
 	}
 	var m firewallwatch.Metrics
-	if e = json.Unmarshal(out.Bytes(), &m); e != nil {
+	if e := json.Unmarshal(out.Bytes(), &m); e != nil {
 		t.Fatal(e)
 	}
 	t.Log(out.String())

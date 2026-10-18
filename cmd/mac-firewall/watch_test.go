@@ -2,12 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"github.com/relux-works/mac-infra/internal/maccore"
-	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,13 +16,17 @@ import (
 
 func watchConfig(t *testing.T, port int) (string, firewallwatch.Config) {
 	t.Helper()
-	root := t.TempDir()
+	root, e := os.MkdirTemp("", "fw-")
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
 	threshold := .5
 	pool, e := filepath.Abs("../../internal/security/firewallwatch/testdata/fixtures-v1.jsonl")
 	if e != nil {
 		t.Fatal(e)
 	}
-	c := firewallwatch.Config{Schema: "mac-infra.firewall-watch/v1", StateDir: filepath.Join(root, "state"), MaxEntries: 200, RetentionDays: 7, NettopInterval: "10s", DenySpikeCount: 3, DenySpikeWindow: "1m", K: 3, NoveltySimilarity: &threshold, ClassifierTimeout: "120s", LlamaServer: "/opt/homebrew/bin/llama-server", Model: "/Users/alexis/src/relux-works/swarm/local-models/models/qwen3-embedding-0.6b/gguf/Qwen3-Embedding-0.6B-Q8_0.gguf", ModelSHA256: "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439", LabelledPool: pool, Port: port}
+	c := firewallwatch.Config{Schema: "mac-infra.firewall-watch/v1", StateDir: filepath.Join(root, "state"), MaxEntries: 200, RetentionDays: 7, NettopInterval: "10s", DenySpikeCount: 3, DenySpikeWindow: "1m", K: 3, NoveltySimilarity: &threshold, ClassifierTimeout: "120s", LlamaServer: "/opt/homebrew/bin/llama-server", Model: "/Users/alexis/src/relux-works/swarm/local-models/models/qwen3-embedding-0.6b/gguf/Qwen3-Embedding-0.6B-Q8_0.gguf", ModelSHA256: "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439", LabelledPool: pool, SaveInterval: "10s", SignerFailureTTL: "1s", MaxStateBytes: 32 << 20, MaxModelBytes: 2 << 30}
 	path := filepath.Join(root, "config.json")
 	raw, _ := json.Marshal(c)
 	if e = os.WriteFile(path, raw, 0600); e != nil {
@@ -35,27 +35,15 @@ func watchConfig(t *testing.T, port int) (string, firewallwatch.Config) {
 	return path, c
 }
 
-// The CLI evaluates both copied fixture sets using a loopback fake embedding
-// service; it does not execute a real backend or any host collectors.
+// The CLI evaluates both fixture sets through a child-owned UNIX fake embedder;
+// it starts only that fixture child and never a host collector.
 func TestWatchClassifyFake(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var v struct {
-			Input []string `json:"input"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&v)
-		data := []any{}
-		for i := range v.Input {
-			data = append(data, map[string]any{"index": i, "embedding": []float64{1, 0}})
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
-	}))
-	defer server.Close()
-	_, p, _ := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
-	port, _ := strconv.Atoi(p)
-	config, _ := watchConfig(t, port)
-	old := startWatchBackend
-	defer func() { startWatchBackend = old }()
-	startWatchBackend = func(context.Context, firewallwatch.Config) (func(), error) { return func() {}, nil }
+	config, c := watchConfig(t, 0)
+	c = fixtureBackend(t, c)
+	configRaw, _ := json.Marshal(c)
+	if e := os.WriteFile(config, configRaw, 0600); e != nil {
+		t.Fatal(e)
+	}
 	for _, file := range []string{"fixtures-v1.jsonl", "fixtures-v2-heldout.jsonl"} {
 		var out, errOut bytes.Buffer
 		code := run([]string{"watch", "classify", "--config", config, "--fixtures", "../../internal/security/firewallwatch/testdata/" + file, "--json"}, &out, &errOut)

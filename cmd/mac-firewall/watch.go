@@ -110,7 +110,8 @@ func runWatch(args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, e)
 		return 1
 	}
-	defer stop()
+	defer stop.Stop()
+	cl.BindBackend(stop)
 	if e = cl.Init(ctx); e != nil {
 		fmt.Fprintln(errOut, "classifier unavailable; proposals fail to decide")
 	}

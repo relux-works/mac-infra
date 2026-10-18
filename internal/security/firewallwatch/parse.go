@@ -34,6 +34,15 @@ func Sanitize(s string) string {
 		if _, e := netip.ParseAddr(v); e == nil {
 			return "[ip]"
 		}
+		// A dot may start a filename suffix or terminate punctuation. Try the
+		// full token first (including IPv4-mapped IPv6), then dot boundaries.
+		for i := len(v) - 1; i > 0; i-- {
+			if v[i] == '.' {
+				if a, e := netip.ParseAddr(v[:i]); e == nil && a.Is6() {
+					return "[ip]" + v[i:]
+				}
+			}
+		}
 		return v
 	})
 	s = strings.Map(func(r rune) rune {
@@ -83,6 +92,7 @@ func (p *ALFParser) Parse(line []byte) *Item {
 	}
 	it := Item{Source: "alf", Kind: "unknown", Remote: "unknown", Verdict: "unknown", Count: 1, Signer: "unknown"}
 	if m := handle.FindStringSubmatch(v.Message); m != nil {
+		it.InspectionPath = m[2]
 		it.App = Sanitize(m[2])
 		return &it
 	}
@@ -96,6 +106,7 @@ func (p *ALFParser) Parse(line []byte) *Item {
 			}
 			path = u.Path
 		}
+		it.InspectionPath = path
 		it.App = Sanitize(path)
 		if m[2] == "1" {
 			it.Verdict = "allow"

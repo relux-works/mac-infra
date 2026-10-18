@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -51,25 +55,80 @@ func ParseSigner(output string, failed bool) string {
 	}
 	return "no designated requirement"
 }
-func (s *Store) signer(ctx context.Context, path string) string {
-	if !filepath.IsAbs(path) {
-		return "unknown"
+
+var childEnv = []string{"PATH=/usr/bin:/bin", "LANG=C"}
+
+func collectorCommand(ctx context.Context, name string) *exec.Cmd {
+	var cmd *exec.Cmd
+	switch name {
+	case "log":
+		cmd = exec.CommandContext(ctx, "/usr/bin/log", "stream", "--style", "ndjson", "--info", "--predicate", `subsystem == "com.apple.ALF.ApplicationFirewall"`)
+	case "nettop":
+		cmd = exec.CommandContext(ctx, "/usr/bin/nettop", "-L", "1", "-n", "-x", "-J", "bytes_out")
 	}
-	if v, ok := s.State.Signers[path]; ok {
-		v.LastSeen = time.Now()
-		s.State.Signers[path] = v
-		return v.Value
-	}
-	childCtx, cancel := context.WithTimeout(ctx, duration(s.Config.ClassifierTimeout))
-	defer cancel()
-	cmd := exec.CommandContext(childCtx, "/usr/bin/codesign", "-dv", "--verbose=2", path)
+	cmd.Env = append([]string{}, childEnv...)
+	return cmd
+}
+func codesignCommand(ctx context.Context, path string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "-dv", "--verbose=2", path)
+	cmd.Env = append([]string{}, childEnv...)
+	return cmd
+}
+func inspectSigner(ctx context.Context, path string) (string, error) {
+	cmd := codesignCommand(ctx, path)
 	output := &cappedBuffer{limit: 64 * 1024}
 	cmd.Stdout = output
 	cmd.Stderr = output
 	err := cmd.Run()
 	v := ParseSigner(output.String(), err != nil)
-	s.State.Signers[path] = SignerEntry{Value: v, LastSeen: time.Now()}
-	return v
+	if v != "unknown" {
+		err = nil
+	}
+	return v, err
+}
+func (s *Store) signer(ctx context.Context, path string) string {
+	if !filepath.IsAbs(path) || len(path) > LineLimit {
+		return "unknown"
+	}
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "unknown"
+	}
+	info, err := os.Lstat(real)
+	if err != nil || (!info.Mode().IsRegular() && !info.IsDir()) {
+		return "unknown"
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "unknown"
+	}
+	identity := fmt.Sprintf("%d:%d:%d:%d:%d", st.Dev, st.Ino, st.Size, st.Mtimespec.Nano(), st.Ctimespec.Nano())
+	// Hash the operational path for persistence: even cache keys must not retain IP literals.
+	cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(path)))
+	now := time.Now()
+	if s.clock != nil {
+		now = s.clock()
+	}
+	// A bundle directory identity cannot attest its inner code. Re-inspect successes;
+	// failed inspections still use the bounded failure TTL.
+	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) {
+		v.LastSeen = now
+		s.State.Signers[cacheKey] = v
+		return v.Value
+	}
+	childCtx, cancel := context.WithTimeout(ctx, duration(s.Config.ClassifierTimeout))
+	defer cancel()
+	inspect := s.inspectSigner
+	if inspect == nil {
+		inspect = inspectSigner
+	}
+	v, err := inspect(childCtx, path)
+	if err != nil {
+		v = "unknown"
+	}
+	s.State.Signers[cacheKey] = SignerEntry{Value: Sanitize(v), LastSeen: now, Identity: identity, Failed: err != nil, Inspected: now}
+	s.dirty = true
+	return Sanitize(v)
 }
 
 // scanLines bounds line storage even when the source emits an unterminated
@@ -111,18 +170,22 @@ func scanLines(ctx context.Context, r io.Reader, consume func([]byte) error) err
 	}
 }
 func Run(ctx context.Context, c Config, cl *Classifier) error {
-	s, e := OpenStore(c)
-	if e != nil {
+	if e := safeDir(c.StateDir); e != nil {
 		return e
 	}
-	unlock, e := s.Lock()
+	lockStore := &Store{Config: c}
+	unlock, e := lockStore.Lock()
 	if e != nil {
 		return e
 	}
 	defer unlock()
+	s, e := OpenStore(c)
+	if e != nil {
+		return e
+	}
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(childCtx, "/usr/bin/log", "stream", "--style", "ndjson", "--info", "--predicate", `subsystem == "com.apple.ALF.ApplicationFirewall"`)
+	cmd := collectorCommand(childCtx, "log")
 	pipe, e := cmd.StdoutPipe()
 	if e != nil {
 		return e
@@ -147,27 +210,57 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 	}()
 	defer func() { cancel(); pipe.Close(); _ = cmd.Wait(); <-scanDone }()
 	classify := func(it Item) Decision { return cl.Classify(ctx, it) }
-	collect := func(it Item) { it.Signer = s.signer(ctx, it.App); s.Observe(it, time.Now(), classify) }
-	save := func() error { s.State.BackendHealthy = cl.Healthy(); return s.Save(time.Now()) }
-	if e = save(); e != nil {
+	collect := func(it Item) bool {
+		path := it.InspectionPath
+		if path == "" {
+			path = it.App
+		}
+		it.Signer = s.signer(ctx, path)
+		return len(s.Observe(it, time.Now(), classify)) > 0
+	}
+	// Startup metadata is dirty, but only an emitted event may flush it early.
+	s.dirty = true
+	s.lastSave = time.Now()
+	saveTick := time.NewTicker(duration(c.SaveInterval))
+	defer saveTick.Stop()
+	save := func() error {
+		s.State.BackendHealthy = cl.Healthy()
+		e := s.Save(time.Now())
+		if e == nil {
+			saveTick.Reset(duration(c.SaveInterval))
+		}
 		return e
 	}
-	sample := func() {
+	flush := func(emitted bool) error {
+		previous := s.lastSave
+		s.State.BackendHealthy = cl.Healthy()
+		e := s.Flush(time.Now(), emitted, false)
+		if !s.lastSave.Equal(previous) {
+			saveTick.Reset(duration(c.SaveInterval))
+		}
+		return e
+	}
+	sample := func() error {
 		sampleCtx, stop := context.WithTimeout(ctx, duration(c.NettopInterval))
 		defer stop()
-		nettop := exec.CommandContext(sampleCtx, "/usr/bin/nettop", "-L", "1", "-n", "-x", "-J", "bytes_out")
+		nettop := collectorCommand(sampleCtx, "nettop")
 		output := &cappedBuffer{limit: 4 << 20}
 		nettop.Stdout = output
 		if e := nettop.Run(); e != nil {
 			s.State.NettopError = "nettop sample failed"
-			return
+			return nil
 		}
 		s.State.NettopError = ""
 		items, unknown := ParseNettop(output.String())
 		s.State.NettopUnrecognized += unknown
 		for _, it := range items {
-			collect(it)
+			if collect(it) {
+				if e := save(); e != nil {
+					return e
+				}
+			}
 		}
+		return nil
 	}
 	tick := time.NewTicker(duration(c.NettopInterval))
 	defer tick.Stop()
@@ -175,21 +268,29 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 		select {
 		case <-ctx.Done():
 			return save()
+		case <-saveTick.C:
+			if e = flush(false); e != nil {
+				return e
+			}
 		case line, ok := <-lines:
 			if !ok {
 				if ctx.Err() != nil {
 					return save()
 				}
-				return errors.New("ALF log stream ended")
+				return errors.Join(errors.New("ALF log stream ended"), save())
 			}
+			s.dirty = true
+			emitted := false
 			if it := s.State.Parser.Parse(line); it != nil {
-				collect(*it)
+				emitted = collect(*it)
 			}
-			if e = save(); e != nil {
+			if e = flush(emitted); e != nil {
 				return e
 			}
 		case <-tick.C:
-			sample()
+			if e = sample(); e != nil {
+				return e
+			}
 			if ctx.Err() == nil && !cl.CheckHealth(ctx) {
 				_ = cl.Init(ctx)
 			}

@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,14 +18,17 @@ import (
 
 func fakeClassifier(t *testing.T, handler http.HandlerFunc, k int, threshold float64) (*Classifier, *httptest.Server) {
 	t.Helper()
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	host, p, e := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
-	if e != nil || host != "127.0.0.1" {
-		t.Fatal(server.URL)
-	}
 	c := testConfig(t)
-	c.Port, _ = strconv.Atoi(p)
+	if e := safeDir(c.StateDir); e != nil {
+		t.Fatal(e)
+	}
+	listener, e := net.Listen("unix", c.SocketPath())
+	if e != nil {
+		t.Fatal(e)
+	}
+	server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: handler}}
+	server.Start()
+	t.Cleanup(server.Close)
 	c.K = k
 	c.NoveltySimilarity = &threshold
 	pool := []Item{{ID: "n1", App: "near", Kind: "outbound", Verdict: "allow", Remote: "internet", Signer: "dev", Label: "noise"}, {ID: "d1", App: "far", Kind: "outbound", Verdict: "allow", Remote: "internet", Signer: "dev", Label: "digest"}}
@@ -42,6 +43,7 @@ func fakeClassifier(t *testing.T, handler http.HandlerFunc, k int, threshold flo
 	if e != nil {
 		t.Fatal(e)
 	}
+	cl.BindBackend(&Backend{pid: os.Getpid(), socket: c.SocketPath(), done: make(chan struct{})})
 	if e = cl.Init(context.Background()); e != nil {
 		t.Fatal(e)
 	}
@@ -161,31 +163,6 @@ func TestModelMismatch(t *testing.T) {
 	_, e = StartBackend(context.Background(), c)
 	if e == nil || strings.Contains(e.Error(), "mismatch") {
 		t.Fatal("matching hash did not pass hash gate", e)
-	}
-}
-
-// Child lifecycle uses a task-owned local fixture process, not llama-server;
-// cancellation during startup reaps the child and returns promptly.
-func TestBackendStartupCancellation(t *testing.T) {
-	c := testConfig(t)
-	model := []byte("model")
-	_ = os.WriteFile(c.Model, model, 0600)
-	h := sha256.Sum256(model)
-	c.ModelSHA256 = hex.EncodeToString(h[:])
-	c.LlamaServer = filepath.Join(t.TempDir(), "child")
-	_ = os.WriteFile(c.LlamaServer, []byte("#!/bin/sh\nexec /bin/sleep 20\n"), 0700)
-	listener, e := net.Listen("tcp4", "127.0.0.1:0")
-	if e != nil {
-		t.Fatal(e)
-	}
-	c.Port = listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	_, e = StartBackend(ctx, c)
-	if e == nil || time.Since(start) > 3*time.Second {
-		t.Fatal(e)
 	}
 }
 
