@@ -144,12 +144,16 @@ func ReviewedExecutableDigest(path string) (string, int, error) {
 }
 
 func InstallService(cfg ServiceConfig, binaryPath string, clientUID, clientGID int, opts InstallOptions) error {
+	return installServiceWithPreflight(cfg, binaryPath, clientUID, clientGID, opts, requireTrustedDirectory)
+}
+
+func installServiceWithPreflight(cfg ServiceConfig, binaryPath string, clientUID, clientGID int, opts InstallOptions, preflight func(string) error) error {
 	if cfg != DefaultServiceConfig() || clientUID <= 0 || clientGID < 0 {
 		return fmt.Errorf("install requires fixed service paths and a non-root client; run as the intended normal user")
 	}
 	// Verify native trust-check support and the first protected ancestor before
 	// any sudo prompt or privileged command. Descendants are checked again later.
-	if err := requireTrustedDirectory("/Library"); err != nil {
+	if err := preflight("/Library"); err != nil {
 		return err
 	}
 	snapshot, err := readReviewedExecutable(binaryPath)

@@ -2,7 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -63,5 +68,65 @@ func TestVPNCoreCLIRefusal(t *testing.T) {
 	var out, err bytes.Buffer
 	if run([]string{"vpn-core", "rollback", "--expect-digest", strings.Repeat("a", 64)}, &out, &err) != 1 || !strings.Contains(err.String(), "restart_failed") || !strings.Contains(out.String(), "/fixture/previous") {
 		t.Fatalf("out=%s err=%s", &out, &err)
+	}
+}
+
+// Claim: the hidden CLI streams only the three fixture files in fixed framed order and emits a bounded refusal on invalid arguments, without installing or executing them.
+func TestVPNCoreSourceCLI(t *testing.T) {
+	// Keep source fixtures in the checkout even when TMPDIR was not set.
+	if err := os.MkdirAll(".temp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := os.MkdirTemp(".temp", "vpn-core-source-cli-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkg) })
+	pkg, err = filepath.Abs(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err = filepath.EvalSymlinks(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(pkg, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contents := []string{"never execute binary", "never execute tool", "manifest bytes"}
+	for i, path := range []string{"vpn-core", "bin/sing-box", "manifest.json"} {
+		if err := os.WriteFile(filepath.Join(pkg, path), []byte(contents[i]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out, diagnostics bytes.Buffer
+	if code := run([]string{"_vpn-core-source", pkg}, &out, &diagnostics); code != 0 || diagnostics.Len() != 0 {
+		t.Fatalf("worker exit=%d stderr=%s", code, &diagnostics)
+	}
+	for _, want := range contents {
+		var size uint64
+		if err := binary.Read(&out, binary.BigEndian, &size); err != nil || size != uint64(len(want)) {
+			t.Fatalf("frame length=%d err=%v", size, err)
+		}
+		payload := make([]byte, size)
+		if _, err := io.ReadFull(&out, payload); err != nil || string(payload) != want {
+			t.Fatalf("payload=%s err=%v", payload, err)
+		}
+	}
+	if out.Len() != 0 {
+		t.Fatal("trailing source bytes")
+	}
+	for _, args := range [][]string{{"_vpn-core-source"}, {"_vpn-core-source", pkg, "extra"}, {"_vpn-core-source", "relative"}} {
+		out.Reset()
+		diagnostics.Reset()
+		if code := run(args, &out, &diagnostics); code != 1 || out.Len() != 0 || diagnostics.Len() > 1024 {
+			t.Fatalf("invalid source exit=%d stderr=%s", code, &diagnostics)
+		}
+		var refusal struct {
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(diagnostics.Bytes(), &refusal) != nil || refusal.Code != "invalid_package_path" {
+			t.Fatalf("invalid refusal=%s", &diagnostics)
+		}
 	}
 }

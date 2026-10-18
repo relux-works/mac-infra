@@ -2,6 +2,7 @@ package maccore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -72,12 +73,14 @@ type vpnCoreManifest struct {
 }
 
 type vpnCoreOps struct {
-	sourceUID uint32
-	directory func(string) error
-	secure    func(string, bool, os.FileMode) error
-	trusted   func(string, bool) error
-	swap      func(string, string) error
-	launch    func(time.Duration, ...string) (CommandResult, error)
+	source        vpnCoreSourceReader
+	sourceTimeout time.Duration
+	rename        func(string, string) error
+	directory     func(string) error
+	secure        func(string, bool, os.FileMode) error
+	trusted       func(string, bool) error
+	swap          func(string, string) error
+	launch        func(time.Duration, ...string) (CommandResult, error)
 	// afterCopy is a test seam after every source descriptor has been closed.
 	afterCopy func()
 }
@@ -99,7 +102,7 @@ func newVPNCoreService(uid, gid int) *vpnCoreService {
 		return f.Close()
 	}
 	return &vpnCoreService{install: vpnCoreDirectory, plist: vpnCorePlist, audit: vpnCoreAudit, uid: uid, gid: gid, ops: vpnCoreOps{
-		sourceUID: uint32(uid), directory: requireTrustedDirectory, trusted: trusted,
+		source: newVPNCoreExecSource(), sourceTimeout: 120 * time.Second, rename: os.Rename, directory: requireTrustedDirectory, trusted: trusted,
 		secure: secureVPNCoreFile, swap: swapVPNCoreTrees,
 		launch: func(budget time.Duration, args ...string) (CommandResult, error) {
 			return runCoreCommandWithTimeout(budget, launchctlPath, args...)
@@ -178,14 +181,25 @@ func (s *vpnCoreService) handle(action Action, req *VPNCoreRequest) (response Re
 		err = vpnRefuse("invalid_digest", "expect_digest must be 64 lowercase hexadecimal characters")
 		return
 	}
+	if action != ActionVPNCoreInstall && action != ActionVPNCoreRollback || action == ActionVPNCoreRollback && req.Package != "" {
+		err = vpnRefuse("invalid_request", "invalid mutation action or arguments")
+		return
+	}
+	// A durable intent must precede even temporary changes under install roots.
+	intent, _ := json.Marshal(struct {
+		Time    time.Time `json:"time"`
+		Action  Action    `json:"action"`
+		Digest  string    `json:"digest"`
+		Outcome string    `json:"outcome"`
+	}{time.Now().UTC(), action, req.ExpectedDigest, "started"})
+	if auditErr := s.appendAudit(intent); auditErr != nil {
+		err = &vpnCoreError{"audit_failed", auditErr}
+		return
+	}
 	switch action {
 	case ActionVPNCoreInstall:
 		status, err = s.installPackage(*req)
 	case ActionVPNCoreRollback:
-		if req.Package != "" {
-			err = vpnRefuse("invalid_request", "rollback takes no package")
-			return
-		}
 		status, err = s.rollback(req.ExpectedDigest)
 	default:
 		err = vpnRefuse("invalid_request", "unsupported vpn-core action")
@@ -285,7 +299,7 @@ func checkVPNCoreEntries(dir *os.File, want ...string) error {
 	return nil
 }
 
-// Preflight all types and sizes before creating anything below install roots.
+// The unprivileged worker preflights all types and sizes before emitting bytes.
 // The open descriptors also pin files if the user renames source components.
 func openVPNCorePackage(path string, owner ...uint32) ([]*os.File, error) {
 	checkOwner := func(file *os.File) error {
@@ -473,6 +487,38 @@ func checkVPNCoreJSON(data []byte) error {
 	if _, err := decoder.Token(); err != io.EOF {
 		return errors.New("trailing manifest JSON")
 	}
+	return checkVPNCoreExactKeys(data)
+}
+
+func checkVPNCoreExactKeys(data []byte) error {
+	exact := func(raw json.RawMessage, keys ...string) (map[string]json.RawMessage, error) {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil {
+			return nil, err
+		}
+		if len(object) != len(keys) {
+			return nil, errors.New("missing or unknown manifest key")
+		}
+		for _, key := range keys {
+			if _, ok := object[key]; !ok {
+				return nil, errors.New("noncanonical manifest key")
+			}
+		}
+		return object, nil
+	}
+	top, err := exact(data, "version", "files")
+	if err != nil {
+		return err
+	}
+	var files []json.RawMessage
+	if err := json.Unmarshal(top["files"], &files); err != nil {
+		return err
+	}
+	for _, file := range files {
+		if _, err := exact(file, "path", "sha256"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -503,11 +549,6 @@ func (s *vpnCoreService) parents() error {
 }
 
 func (s *vpnCoreService) installPackage(req VPNCoreRequest) (status VPNCoreStatus, err error) {
-	files, err := openVPNCorePackage(req.Package, s.ops.sourceUID)
-	if err != nil {
-		return status, err
-	}
-	defer func() { closeVPNCoreFiles(files) }()
 	if err = s.parents(); err != nil {
 		return status, err
 	}
@@ -539,26 +580,14 @@ func (s *vpnCoreService) installPackage(req VPNCoreRequest) (status VPNCoreStatu
 	if err = s.ops.secure(filepath.Join(tree, "bin"), true, 0o755); err != nil {
 		return status, err
 	}
-	for i, entry := range vpnCoreFiles {
-		out, createErr := os.OpenFile(filepath.Join(tree, entry.path), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if createErr != nil {
-			return status, createErr
-		}
-		n, copyErr := io.Copy(out, io.LimitReader(files[i], entry.cap+1))
-		syncErr := out.Sync()
-		closeErr := out.Close()
-		if n > entry.cap {
-			return status, vpnRefuse("file_too_large", "source grew past cap during copy")
-		}
-		if err = errors.Join(copyErr, syncErr, closeErr); err != nil {
-			return status, err
-		}
-		if err = s.ops.secure(filepath.Join(tree, entry.path), false, entry.mode); err != nil {
-			return status, err
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), s.ops.sourceTimeout)
+	defer cancel()
+	err = s.ops.source.Read(ctx, req.Package, s.uid, s.gid, func(reader io.Reader) error {
+		return s.receiveSource(reader, tree)
+	})
+	if err != nil {
+		return status, err
 	}
-	closeVPNCoreFiles(files)
-	files = nil
 	if s.ops.afterCopy != nil {
 		s.ops.afterCopy()
 	}
@@ -589,13 +618,29 @@ func (s *vpnCoreService) installPackage(req VPNCoreRequest) (status VPNCoreStatu
 		}
 		preserve = true
 		status.RecoveryPath = stage
-		if _, prevErr := os.Lstat(previous); prevErr == nil {
-			if err = os.Rename(previous, filepath.Join(stage, "older")); err != nil {
-				return status, err
+		older := filepath.Join(stage, "older")
+		movedOlder := false
+		compensate := func(cause error) (VPNCoreStatus, error) {
+			swapErr := s.ops.swap(tree, s.install)
+			var restoreErr error
+			if movedOlder {
+				restoreErr = s.ops.rename(older, previous)
 			}
+			if undoErr := errors.Join(swapErr, restoreErr); undoErr != nil {
+				return status, &vpnCoreError{"compensation_failed", errors.Join(cause, undoErr)}
+			}
+			preserve = false
+			restored, inspectErr := s.inspect()
+			return restored, errors.Join(cause, inspectErr)
 		}
-		if err = os.Rename(tree, previous); err != nil {
-			return status, err
+		if _, prevErr := os.Lstat(previous); prevErr == nil {
+			if err = s.ops.rename(previous, older); err != nil {
+				return compensate(err)
+			}
+			movedOlder = true
+		}
+		if err = s.ops.rename(tree, previous); err != nil {
+			return compensate(err)
 		}
 		status.RecoveryPath = previous
 	} else if os.IsNotExist(statErr) {
@@ -763,7 +808,17 @@ func (s *vpnCoreService) appendAudit(data []byte) error {
 		return err
 	}
 	_, err = file.Write(append(data, '\n'))
-	return errors.Join(err, file.Sync())
+	if err = errors.Join(err, file.Sync()); err != nil {
+		return err
+	}
+	if created {
+		parent, err := os.Open(filepath.Dir(s.audit))
+		if err != nil {
+			return err
+		}
+		return errors.Join(parent.Sync(), parent.Close())
+	}
+	return nil
 }
 
 // A freshly created audit file inherits root ownership in production. Test

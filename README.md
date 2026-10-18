@@ -250,29 +250,71 @@ mac-infra-core vpn-core status
 mac-infra-core vpn-core rollback --expect-digest <previous-package-digest>
 ```
 
-The helper copies `vpn-core`, `bin/sing-box`, and `manifest.json` into private
-staging, verifies their hashes and the pinned digest, and installs root-owned
-files under `/Library/PrivilegedHelperTools/works.relux.vpn-core`. The limits
-are 32 MiB for vpn-core, 128 MiB for sing-box, and 16 KiB for the manifest.
-Paths must be absolute and clean, with no symlink components or extra entries.
-The package directory, bin directory and files must belong to the authorized client.
+The daemon re-executes its resolved, trust-checked binary with the hidden
+`_vpn-core-source PACKAGE_DIR` command as the authorized client UID/GID, with
+no supplementary groups, an empty environment, `/dev/null` stdin and `/` as
+its working directory. The client must own the package, bin directory and
+files and be able to read them through every ancestor. Supplementary groups
+are intentionally dropped: this contract admits client-owned packages using
+owner/primary-group access, without inheriting root's group authority.
+The worker walks without following symlinks, checks exact entries and types,
+and streams `vpn-core`, `bin/sing-box`, and `manifest.json` in that order with
+uint64 big-endian lengths. Both ends enforce caps: 32 MiB, 128 MiB and 16 KiB.
+Paths must be absolute and clean. A 120-second overall source deadline allows
+slow local packages while bounding a stalled filesystem's occupancy of the
+mutation lock. Expiry kills and reaps the worker, removes staging and returns
+`source_timeout`; malformed frames return `source_stream`, unknown worker
+failures `source_failed`, and bounded worker refusals retain their stable code.
+
+The daemon copies only the framed bytes into private root-owned 0700 staging,
+then hashes that copy, checks the pinned digest and installs root-owned files
+under `/Library/PrivilegedHelperTools/works.relux.vpn-core`. The manifest must
+have exactly the decoded keys `version` and `files`; each entry must have
+exactly `path` and `sha256`. Keys are case-sensitive, with duplicates and
+escaped aliases refused. Escaped spellings of canonical keys are accepted.
 The fixed plist uses the helper's authorized non-root client UID/GID.
 
 Darwin `RENAME_SWAP` replaces an existing tree atomically; `.previous` retains
-the prior tree for digest-pinned rollback. Plist replacement and service restart
-are separate steps: this is not a crash-atomic launchd transaction. A failed
+the prior tree for digest-pinned rollback. Failure of either post-swap rename
+swaps the original installation back and restores the old `.previous`, without
+activation. A failed compensation returns `compensation_failed` and retains
+protected staging for recovery. Plist replacement and service restart are
+separate steps: this is not a crash-atomic launchd transaction. A failed
 activation reports `restart_failed` and a recovery path; the previous tree
 remains available. `status` verifies disk contents and reports current and
-previous digests; it does not attest service health. Each install/rollback
-attempt appends metadata, outcome and stable error code to
-`/private/var/log/works.relux.mac-infra-vpn-core.jsonl` (root:wheel, 0600).
-An audit-write failure is reported as `audit_failed`, including after a change.
+previous digests; it does not attest service health.
 
-Tests use injected roots, ownership checks and a fake launchctl runner:
-`go test -count=1 ./internal/maccore/... ./cmd/mac-infra-core/...`.
-Keep `GOCACHE`, `GOTMPDIR` and `TMPDIR` under `.temp/` for isolated validation;
-logs and producer evidence also belong there. Native production ACL removal
-requires macOS with cgo; unsupported builds fail closed.
+Before install or rollback changes install roots or launchd, the helper durably
+appends action, pinned digest and outcome `started` to
+`/private/var/log/works.relux.mac-infra-vpn-core.jsonl` (root:wheel, 0600).
+Failure refuses with `audit_failed` before mutation. Completion is a separate
+metadata-only audit line with hashes, outcome and stable error code. If that
+append fails after mutation, `audit_failed` retains the operation status; the
+prior durable intent and disk status support reconciliation. Request validation
+failures before intent receive only a completion/refusal line.
+
+Tests use injected roots, ownership checks and a fake launchctl runner; no
+package executable is run. Go tools build/check the code, and Python runs the
+task-local validation/mutation harnesses. Keep `GOCACHE` and `GOTMPDIR` under
+`.temp/`; socket tests need a short disposable `TMPDIR` on Darwin:
+
+```bash
+mkdir -p .temp/go-cache .temp/go-tmp
+export GOCACHE="$PWD/.temp/go-cache" GOTMPDIR="$PWD/.temp/go-tmp"
+export TMPDIR="$(mktemp -d /tmp/vpnc-XXXXXX)"
+trap 'rm -rf "$TMPDIR"' EXIT
+
+gofmt -l internal/maccore cmd/mac-infra-core
+go vet ./...
+go build ./...
+go test -count=1 ./internal/maccore/... ./cmd/mac-infra-core/...
+go test -race -count=1 ./internal/maccore/... ./cmd/mac-infra-core/...
+```
+
+Logs and producer evidence belong in `.temp/`. Tests inspect the exact client
+credentials before exec, then use the current user's credentials for actual
+subprocess tests; they do not claim a live privileged deployment. Native
+production ACL removal requires macOS with cgo; unsupported builds fail closed.
 
 ## AnyConnect Socket Filter Cleanup
 

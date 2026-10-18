@@ -56,7 +56,8 @@ func newVPNFixture(t *testing.T) *vpnFixture {
 	}
 	f.s = &vpnCoreService{install: filepath.Join(root, "helpers", vpnCoreLabel), plist: filepath.Join(root, "daemons", vpnCoreLabel+".plist"), audit: filepath.Join(root, "logs", "audit.jsonl"), uid: 501, gid: 20}
 	f.s.ops = vpnCoreOps{
-		sourceUID: uint32(os.Getuid()),
+		source:        &vpnCoreInProcessSource{uid: uint32(os.Getuid())},
+		sourceTimeout: 5 * time.Second, rename: os.Rename,
 		directory: func(path string) error { return trust(path, true) }, trusted: trust,
 		secure: func(path string, dir bool, mode os.FileMode) error {
 			f.secure = append(f.secure, fmt.Sprintf("%s:%t:%04o", path, dir, mode))
@@ -167,7 +168,7 @@ func auditVPN(t *testing.T, f *vpnFixture) []map[string]any {
 	return result
 }
 
-// A valid package installs original bytes/modes and golden plist formatting, audits once, and waits before enable/bootstrap using only fake roots.
+// A valid package installs original bytes/modes and golden plist formatting, audits intent and completion, and waits before enable/bootstrap using only fake roots.
 func TestVPNCoreInstall(t *testing.T) {
 	f := newVPNFixture(t)
 	pkg, digest := f.pkg(t, "vpn binary", "sing box")
@@ -208,7 +209,7 @@ func TestVPNCoreInstall(t *testing.T) {
 		t.Fatalf("calls=%q", f.calls)
 	}
 	audit := auditVPN(t, f)
-	if len(audit) != 1 || audit[0]["digest"] != digest || audit[0]["outcome"] != "accepted" || audit[0]["binary_sha256"] != r.VPNCore.BinarySHA256 || audit[0]["manifest_sha256"] != r.VPNCore.ManifestSHA256 {
+	if len(audit) != 2 || audit[0]["outcome"] != "started" || audit[0]["digest"] != digest || audit[1]["digest"] != digest || audit[1]["outcome"] != "accepted" || audit[1]["binary_sha256"] != r.VPNCore.BinarySHA256 || audit[1]["manifest_sha256"] != r.VPNCore.ManifestSHA256 {
 		t.Fatalf("audit=%v", audit)
 	}
 	if len(f.secure) != 9 {
@@ -324,7 +325,9 @@ func TestVPNCoreRefusals(t *testing.T) {
 			path := filepath.Join(r.Package, "manifest.json")
 			writeVPN(t, path, bytes.Replace(readVPN(t, path), []byte(`"version":1`), []byte(`"version":2,"ver\u0073ion":1`), 1))
 		}},
-		{"foreign source owner", "source_owner", func(t *testing.T, f *vpnFixture, r *VPNCoreRequest) { f.s.ops.sourceUID = uint32(os.Getuid() + 1) }},
+		{"foreign source owner", "source_owner", func(t *testing.T, f *vpnFixture, r *VPNCoreRequest) {
+			f.s.ops.source.(*vpnCoreInProcessSource).uid = uint32(os.Getuid() + 1)
+		}},
 		{"root uid", "invalid_client", func(t *testing.T, f *vpnFixture, r *VPNCoreRequest) { f.s.uid = 0 }},
 		{"root gid", "invalid_client", func(t *testing.T, f *vpnFixture, r *VPNCoreRequest) { f.s.gid = 0 }},
 	}
@@ -349,7 +352,7 @@ func TestVPNCoreRefusals(t *testing.T) {
 				t.Fatal("launchctl on refusal", f.calls)
 			}
 			entries := auditVPN(t, f)
-			if len(entries) != 2 || entries[1]["error_code"] != tc.code || entries[1]["outcome"] != "refused" {
+			if len(entries) < 3 || entries[len(entries)-1]["error_code"] != tc.code || entries[len(entries)-1]["outcome"] != "refused" {
 				t.Fatalf("audit=%v", entries)
 			}
 		})
@@ -497,7 +500,7 @@ func TestVPNCoreBusy(t *testing.T) {
 		t.Fatal(r.Error)
 	}
 	entries := auditVPN(t, f)
-	if len(entries) != 2 || entries[0]["error_code"] != "busy" || entries[1]["outcome"] != "accepted" {
+	if len(entries) != 3 || entries[0]["outcome"] != "started" || entries[1]["error_code"] != "busy" || entries[2]["outcome"] != "accepted" {
 		t.Fatalf("audit=%v", entries)
 	}
 }
@@ -535,7 +538,7 @@ func TestVPNCoreAuditFailure(t *testing.T) {
 // Construction pins install/plist/audit paths and the authorized staging/client identity without touching those paths.
 func TestVPNCoreFixedConfiguration(t *testing.T) {
 	s := newVPNCoreService(501, 20)
-	if s.install != vpnCoreDirectory || s.plist != vpnCorePlist || s.audit != "/private/var/log/works.relux.mac-infra-vpn-core.jsonl" || s.uid != 501 || s.gid != 20 || s.ops.sourceUID != 501 {
+	if s.install != vpnCoreDirectory || s.plist != vpnCorePlist || s.audit != "/private/var/log/works.relux.mac-infra-vpn-core.jsonl" || s.uid != 501 || s.gid != 20 || s.ops.sourceTimeout != 120*time.Second || s.ops.source == nil || s.ops.rename == nil {
 		t.Fatalf("unexpected fixed configuration: %+v", s)
 	}
 }

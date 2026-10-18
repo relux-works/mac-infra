@@ -52,6 +52,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "_vpn-core-source":
+		return maccore.RunVPNCoreSource(args[1:], stdout, stderr)
 	case "vpn-core":
 		return runVPNCore(args[1:], stdout, stderr)
 	case "install":

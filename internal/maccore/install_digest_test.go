@@ -34,10 +34,11 @@ func TestInstallDigestGateRunsBeforeSudo(t *testing.T) {
 	t.Cleanup(func() { execCommandCore = original })
 
 	var announced string
-	err := InstallService(DefaultServiceConfig(), binary, 501, 20, InstallOptions{
+	preflight := func(string) error { return nil } // No host installation paths are accessed by this digest-gate test.
+	err := installServiceWithPreflight(DefaultServiceConfig(), binary, 501, 20, InstallOptions{
 		ExpectedSHA256: strings.Repeat("0", 64),
 		Announce:       func(_ string, sha string, _ int) { announced = sha },
-	})
+	}, preflight)
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("mismatched digest error = %v", err)
 	}
@@ -48,7 +49,7 @@ func TestInstallDigestGateRunsBeforeSudo(t *testing.T) {
 		t.Fatalf("ReviewedExecutableDigest = %q %d %v", got, size, err)
 	}
 
-	err = InstallService(DefaultServiceConfig(), binary, 501, 20, InstallOptions{ExpectedSHA256: strings.ToUpper(digest)})
+	err = installServiceWithPreflight(DefaultServiceConfig(), binary, 501, 20, InstallOptions{ExpectedSHA256: strings.ToUpper(digest)}, preflight)
 	if err == nil || !strings.Contains(err.Error(), "sudo") || len(sudoCalls) == 0 {
 		t.Fatalf("control: matching digest error = %v, sudo calls %v", err, sudoCalls)
 	}
