@@ -358,7 +358,7 @@ func TestVPNCoreManifestExactKeys(t *testing.T) {
 				}
 			}
 			writeVPN(t, filepath.Join(pkg, "manifest.json"), []byte(raw))
-			digest := vpnSHA(append([]byte("binary"), []byte(raw)...))
+			digest := vpnPackageDigest([]byte("binary"), []byte(raw))
 			before := f.snapshot(t)
 			r := f.install(t, pkg, digest)
 			if variant == "canonical-escape" {

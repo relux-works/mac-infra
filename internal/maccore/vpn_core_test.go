@@ -118,7 +118,7 @@ func (f *vpnFixture) pkg(t *testing.T, binary, tool string) (string, string) {
 	writeVPN(t, filepath.Join(dir, "bin/sing-box"), []byte(tool))
 	manifest := fmt.Sprintf("{\"version\":1,\"files\":[{\"path\":\"vpn-core\",\"sha256\":\"%s\"},{\"path\":\"bin/sing-box\",\"sha256\":\"%s\"}]}\n", vpnSHA([]byte(binary)), vpnSHA([]byte(tool)))
 	writeVPN(t, filepath.Join(dir, "manifest.json"), []byte(manifest))
-	return dir, vpnSHA(append([]byte(binary), []byte(manifest)...))
+	return dir, vpnPackageDigest([]byte(binary), []byte(manifest))
 }
 func (f *vpnFixture) install(t *testing.T, pkg, digest string) Response {
 	t.Helper()
@@ -240,6 +240,9 @@ func TestVPNCoreRefusals(t *testing.T) {
 		change     func(*testing.T, *vpnFixture, *VPNCoreRequest)
 	}{
 		{"wrong digest", "digest_mismatch", func(t *testing.T, f *vpnFixture, r *VPNCoreRequest) { r.ExpectedDigest = strings.Repeat("0", 64) }},
+		{"unframed digest", "digest_mismatch", func(t *testing.T, f *vpnFixture, r *VPNCoreRequest) {
+			r.ExpectedDigest = vpnSHA(append(readVPN(t, filepath.Join(r.Package, "vpn-core")), readVPN(t, filepath.Join(r.Package, "manifest.json"))...))
+		}},
 		{"bad digest", "invalid_digest", func(t *testing.T, f *vpnFixture, r *VPNCoreRequest) { r.ExpectedDigest = "" }},
 		{"binary sha", "file_sha_mismatch", func(t *testing.T, f *vpnFixture, r *VPNCoreRequest) {
 			writeVPN(t, filepath.Join(r.Package, "vpn-core"), []byte("other"))
@@ -540,5 +543,26 @@ func TestVPNCoreFixedConfiguration(t *testing.T) {
 	s := newVPNCoreService(501, 20)
 	if s.install != vpnCoreDirectory || s.plist != vpnCorePlist || s.audit != "/private/var/log/works.relux.mac-infra-vpn-core.jsonl" || s.uid != 501 || s.gid != 20 || s.ops.sourceTimeout != 120*time.Second || s.ops.source == nil || s.ops.rename == nil {
 		t.Fatalf("unexpected fixed configuration: %+v", s)
+	}
+}
+
+// The pinned package digest is sha256("works.relux.vpn-core.pkg/v1\x00" ||
+// u64be(len) || vpn-core || u64be(len) || manifest.json). The expected values
+// were computed outside Go (Python hashlib), so this checks the framing, not
+// agreement with itself; multi-tun's install-digest must match the same rows.
+// The ab|c and a|bc rows share an unframed digest and must not share a framed one.
+func TestVPNPackageDigestVectors(t *testing.T) {
+	for _, v := range []struct{ program, manifest, framed, unframed string }{
+		{"", "", "48f4cf7557a6821acf170fc388daba69ad0d9d8a04fae38053e86126539f6b1d", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+		{"ab", "c", "7ab31c62ae8201c0b1f863be472881cce7ee7ec82cbe8a727077536f37a29232", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+		{"a", "bc", "9e0b399700882203bab875094e4867ab6edb2bb5738bdda78a87bb36e7ec96d2", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+		{"vpn-core\x00\xff", "{\"version\":1}\n", "b4a2a21540e568c0aa15ced42cff78fd96c67a561d831b7fe1fc647fa85e99db", "230585662613f457e6addb9f6fa4b3bfc9e0d81edbeb0d8707be8b9b19f7fd96"},
+	} {
+		if got := vpnPackageDigest([]byte(v.program), []byte(v.manifest)); got != v.framed {
+			t.Fatalf("%q|%q framed = %s, want %s", v.program, v.manifest, got, v.framed)
+		}
+		if got := vpnSHA([]byte(v.program + v.manifest)); got != v.unframed || got == v.framed {
+			t.Fatalf("%q|%q unframed control = %s", v.program, v.manifest, got)
+		}
 	}
 }

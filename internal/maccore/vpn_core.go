@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -380,6 +381,26 @@ func readVPNCoreBounded(file *os.File, cap int64) ([]byte, error) {
 
 func vpnSHA(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
 
+// vpnPackageDigestDomain separates the package digest from every other
+// sha256 use; the lengths frame the two parts, so no split of the same
+// concatenated bytes between vpn-core and manifest.json shares a digest.
+const vpnPackageDigestDomain = "works.relux.vpn-core.pkg/v1\x00"
+
+// vpnPackageDigest is the digest an install pins: sha256 of the domain, then
+// u64be(len) || bytes for vpn-core and for manifest.json. bin/sing-box is
+// covered through its manifest entry.
+func vpnPackageDigest(program, manifest []byte) string {
+	hash := sha256.New()
+	hash.Write([]byte(vpnPackageDigestDomain))
+	var size [8]byte
+	for _, part := range [][]byte{program, manifest} {
+		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
+		hash.Write(size[:])
+		hash.Write(part)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
 // Only the private staged copies enter this verifier, never the source paths.
 func verifyVPNCorePackage(path string) (VPNCoreStatus, error) {
 	var status VPNCoreStatus
@@ -397,10 +418,7 @@ func verifyVPNCorePackage(path string) (VPNCoreStatus, error) {
 	}
 	status.BinarySHA256 = vpnSHA(data[0])
 	status.ManifestSHA256 = vpnSHA(data[2])
-	hash := sha256.New()
-	hash.Write(data[0])
-	hash.Write(data[2])
-	status.Digest = hex.EncodeToString(hash.Sum(nil))
+	status.Digest = vpnPackageDigest(data[0], data[2])
 	if err := checkVPNCoreJSON(data[2]); err != nil {
 		return status, vpnRefuse("invalid_manifest", "ambiguous manifest JSON")
 	}

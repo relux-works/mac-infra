@@ -243,6 +243,11 @@ fixture tests do not prove the state of an already running daemon.
 The root helper accepts one vpn-core mutation at a time from its authorized
 client. A keeper builds the three-file package and reviews the digest from
 `vpn-core install-digest`; neither artifact is executed by this installer.
+The pinned digest is framed and domain-separated:
+`sha256("works.relux.vpn-core.pkg/v1" || 0x00 || u64be(len(vpn-core)) || vpn-core || u64be(len(manifest.json)) || manifest.json)`.
+`bin/sing-box` is covered through its manifest sha256. Fixed vectors live in
+`TestVPNPackageDigestVectors`; a value computed as plain
+`sha256(vpn-core || manifest.json)` is refused.
 
 ```bash
 mac-infra-core vpn-core install --package /absolute/package --expect-digest <64-lowercase-hex>
