@@ -771,3 +771,65 @@ func TestEnclaveSwapBeforeOpenIsJudgedOnTheDescriptor(t *testing.T) {
 		})
 	}
 }
+
+// Review r3: a key file swapped, between authorization and the signature's
+// own read, for a private copy with the same blob and public half but
+// another record (user_presence flipped either way) is refused with no
+// helper call; an identical copy (control) still signs.
+func TestEnclaveSignBindsTheAuthorizedRecord(t *testing.T) {
+	addr := Address{Kind: KindKey, Service: TestService, Purpose: "owner"}
+	digest := sha256.Sum256([]byte("authorized record"))
+	for _, tc := range []struct {
+		name    string
+		created bool
+		listed  bool
+		swapped bool
+		refused bool
+	}{
+		{"silent key claiming presence, swapped to silent", false, true, false, true},
+		{"presence key swapped to a silent record", true, true, false, true},
+		{"identical record (control)", true, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, enclave, helper := enclaveFixture(t)
+			helper.fingerOK = true
+			key, err := m.Init(enclaveSpec("owner", tc.created))
+			if err != nil {
+				t.Fatal(err)
+			}
+			setPresence := func(f *enclaveFile, presence bool) {
+				rec, _ := DecodeRecord([]byte(f.Tag))
+				rec.UserPresence = presence
+				tag, _ := EncodeRecord(rec)
+				f.Tag = string(tag)
+			}
+			rewriteEnclaveFile(t, enclave, key.Label, func(f *enclaveFile) { setPresence(f, tc.listed) })
+			opens := 0
+			previous := enclaveBeforeOpen
+			enclaveBeforeOpen = func(name string) {
+				if name != key.Label+".json" {
+					return
+				}
+				if opens++; opens == 2 {
+					enclaveBeforeOpen = previous
+					rewriteEnclaveFile(t, enclave, key.Label, func(f *enclaveFile) { setPresence(f, tc.swapped) })
+				}
+			}
+			t.Cleanup(func() { enclaveBeforeOpen = previous })
+			calls := len(helper.requests)
+			_, err = m.Sign(addr, digest[:])
+			if opens < 2 {
+				t.Fatal("the swap point was never reached")
+			}
+			if !tc.refused {
+				if err != nil || len(helper.requests) != calls+1 || helper.requests[calls].Presence != enclavePresenceRequired {
+					t.Fatalf("control: %v %+v", err, helper.requests[calls:])
+				}
+				return
+			}
+			if refusal := refusalOf(t, err); refusal.Code != CodeSecurity || !strings.Contains(refusal.Message, "changed after it was authorized") || len(helper.requests) != calls {
+				t.Fatalf("refusal = %+v helper calls %d -> %d", refusal, calls, len(helper.requests))
+			}
+		})
+	}
+}

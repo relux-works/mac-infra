@@ -403,10 +403,24 @@ func (s *EnclaveStore) UpdateTag(label string, tag []byte) error {
 	return writeEnclaveFile(dir, name, file, true)
 }
 
-// Sign signs digest with the key under label. The record's user_presence
-// decides whether the helper must find presence enforced and ask for it;
-// the public half of the blob must equal the stored one.
+// Sign signs digest with the key under label under the record its file
+// carries now. The Manager never uses it on a RoutedBackend: it calls
+// SignAuthorized through SignIn.
 func (s *EnclaveStore) Sign(label string, digest []byte) ([]byte, error) {
+	return s.sign(label, digest, nil)
+}
+
+// SignAuthorized signs only if the key file still carries exactly the
+// authorized record (review r3: a file swapped after authorization for the
+// same blob under user_presence false must not skip the presence probe).
+func (s *EnclaveStore) SignAuthorized(label string, digest []byte, authorized Record) ([]byte, error) {
+	return s.sign(label, digest, &authorized)
+}
+
+// sign: the record's user_presence decides whether the helper must find
+// presence enforced and ask for it; the public half of the blob must equal
+// the stored one.
+func (s *EnclaveStore) sign(label string, digest []byte, authorized *Record) ([]byte, error) {
 	if err := s.usable(); err != nil {
 		return nil, err
 	}
@@ -420,6 +434,13 @@ func (s *EnclaveStore) Sign(label string, digest []byte) ([]byte, error) {
 	rec, problem := DecodeRecord([]byte(file.Tag))
 	if problem != "" || rec.Store != StoreEnclave {
 		return nil, untrusted(label, "the stored record is unreadable or not an enclave record; nothing was signed")
+	}
+	if authorized != nil {
+		want, wantErr := EncodeRecord(*authorized)
+		have, haveErr := EncodeRecord(rec)
+		if wantErr != nil || haveErr != nil || !bytes.Equal(want, have) {
+			return nil, untrusted(label, "the key file's record changed after it was authorized; nothing was signed")
+		}
 	}
 	presence := enclavePresenceNone
 	if rec.UserPresence {
@@ -642,13 +663,14 @@ func (r RoutedBackend) Sign(label string, digest []byte) ([]byte, error) {
 	return r.Keychain.Sign(label, digest)
 }
 
-// SignIn implements StoreSigner.
-func (r RoutedBackend) SignIn(store StoreKind, label string, digest []byte) ([]byte, error) {
-	switch store {
+// SignIn implements StoreSigner: the store and, for the enclave, the whole
+// policy come from the authorized record.
+func (r RoutedBackend) SignIn(authorized Record, label string, digest []byte) ([]byte, error) {
+	switch authorized.Store {
 	case StoreEnclave:
-		return r.Enclave.Sign(label, digest)
+		return r.Enclave.SignAuthorized(label, digest, authorized)
 	case StoreKeychain:
 		return r.Keychain.Sign(label, digest)
 	}
-	return nil, fmt.Errorf("no store %q to sign in", store)
+	return nil, fmt.Errorf("no store %q to sign in", authorized.Store)
 }
