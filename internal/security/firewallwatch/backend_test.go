@@ -92,7 +92,9 @@ func fixtureBackend(t *testing.T) Config {
 }
 func waitPID(t *testing.T, dir string) int {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// An upper bound only: a freshly built fixture binary can take seconds to exec
+	// while macOS scans it under a fully parallel `go test ./...`.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		b, e := os.ReadFile(filepath.Join(dir, "child.pid"))
 		if e == nil {
@@ -117,7 +119,7 @@ func assertReaped(t *testing.T, pid int) {
 // Acknowledged, live fixture cancellation returns context.Canceled and reaps its exact PID.
 func TestBackendStartupCancellation(t *testing.T) {
 	c := fixtureBackend(t)
-	c.ClassifierTimeout = "10s"
+	c.ClassifierTimeout = "60s" // must outlast waitPID so cancellation, not the deadline, ends startup
 	if e := os.WriteFile(filepath.Join(c.StateDir, "hold"), nil, 0600); e != nil {
 		t.Fatal(e)
 	}
@@ -150,7 +152,7 @@ func TestBackendStartupCancellation(t *testing.T) {
 // Genuine child-owned UNIX service loads fd 3, reaches healthy, and is reaped after readiness; exit cannot be adopted away.
 func TestBackendChildIdentityAndExit(t *testing.T) {
 	c := fixtureBackend(t)
-	c.ClassifierTimeout = "5s"
+	c.ClassifierTimeout = "60s"
 	b, e := StartBackend(context.Background(), c)
 	if e != nil {
 		t.Fatal(e)

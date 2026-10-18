@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const SampleLimit = 16
@@ -24,6 +25,8 @@ var ipCandidate = regexp.MustCompile(`[0-9A-Fa-f:.]+(?:%[a-zA-Z0-9]+)?`)
 
 // Sanitize also handles IP literals embedded in untrusted app/signer fields.
 func Sanitize(s string) string {
+	// Invalid bytes become U+FFFD first, so JSON round trips cannot change the value.
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	s = ipv4Literal.ReplaceAllStringFunc(s, func(v string) string {
 		if _, e := netip.ParseAddr(v); e == nil {
 			return "[ip]"
@@ -51,10 +54,18 @@ func Sanitize(s string) string {
 		}
 		return r
 	}, s)
-	if len(s) > 1024 {
-		s = s[:1024]
+	return truncateUTF8(s, 1024)
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a rune.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
-	return s
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 type ALFParser struct {
@@ -66,9 +77,7 @@ type ALFParser struct {
 func (p *ALFParser) unknown(s string) {
 	p.Unrecognized++
 	s = digits.ReplaceAllString(Sanitize(s), "#")
-	if len(s) > 256 {
-		s = s[:256]
-	}
+	s = truncateUTF8(s, 256)
 	for _, v := range p.Samples {
 		if v == s {
 			return
