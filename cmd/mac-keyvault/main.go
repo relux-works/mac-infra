@@ -23,6 +23,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/relux-works/mac-infra/internal/keyvault"
@@ -614,7 +615,7 @@ func runPub(args []string, out output) int {
 	result := keyView(key)
 	result["format"] = encoding
 	if *outPath != "" {
-		if err := os.WriteFile(*outPath, payload, 0o600); err != nil {
+		if err := writeOutFile(*outPath, payload); err != nil {
 			return out.fail(err)
 		}
 		result["out"] = *outPath
@@ -705,6 +706,29 @@ var stdinReader io.Reader = os.Stdin
 func (d digestFlags) resolve() ([]byte, string, error) {
 	digest, _, source, err := d.resolveData()
 	return digest, source, err
+}
+
+// writeOutFile creates path for --out as a new 0600 file: it never follows
+// or replaces an existing entry (a symlink planted while a presence prompt
+// waits would otherwise redirect the write), and a failed write leaves
+// nothing behind.
+func writeOutFile(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return usagef("--out %s already exists; choose a new path", path)
+		}
+		return fmt.Errorf("--out: %w", err)
+	}
+	_, err = file.Write(data)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(path)
+		return fmt.Errorf("--out: %w", err)
+	}
+	return nil
 }
 
 // resolveData also returns the hashed data (nil for --digest), which sign
@@ -832,7 +856,7 @@ func runSign(args []string, out output) int {
 	result["low_s"] = true
 	result["normalized"] = signed.Normalized
 	if *outPath != "" {
-		if err := os.WriteFile(*outPath, payload, 0o600); err != nil {
+		if err := writeOutFile(*outPath, payload); err != nil {
 			return out.fail(err)
 		}
 		result["out"] = *outPath

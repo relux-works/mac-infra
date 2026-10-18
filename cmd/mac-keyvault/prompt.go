@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"strings"
+	"time"
 
 	"github.com/relux-works/mac-infra/internal/keyvault"
 )
@@ -43,13 +44,18 @@ func describeData(data []byte) func(digest []byte) string {
 // The root helper, not this parser, decides whether a statement is valid.
 func describeVPNCoreAuthorization(data []byte) string {
 	lines := strings.Split(string(data), "\n")
-	if len(lines) != 7 || lines[0] != "works.relux.vpn-core.authorize/v1" || lines[6] != "" {
+	if len(lines) != 7 || lines[0] != "works.relux.vpn-core.authorize/v1" || lines[2] != "target=vpn-core" || lines[6] != "" {
 		return ""
 	}
-	action := strings.TrimPrefix(lines[1], "action=")
-	digest := strings.TrimPrefix(lines[3], "digest=")
-	if (action != "install" && action != "rollback") || lines[2] != "target=vpn-core" || !isLowerHex(digest, 64) ||
-		!strings.HasPrefix(lines[4], "nonce=") || !strings.HasPrefix(lines[5], "expires=") {
+	action, okAction := strings.CutPrefix(lines[1], "action=")
+	digest, okDigest := strings.CutPrefix(lines[3], "digest=")
+	nonce, okNonce := strings.CutPrefix(lines[4], "nonce=")
+	expires, okExpires := strings.CutPrefix(lines[5], "expires=")
+	if !okAction || !okDigest || !okNonce || !okExpires || (action != "install" && action != "rollback") ||
+		!isLowerHex(digest, 64) || !isLowerHex(nonce, 64) {
+		return ""
+	}
+	if _, err := time.Parse("2006-01-02T15:04:05Z", expires); err != nil {
 		return ""
 	}
 	return "authorize vpn-core " + action + " " + digest[:8]

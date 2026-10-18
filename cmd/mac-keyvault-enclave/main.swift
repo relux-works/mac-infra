@@ -20,7 +20,7 @@
 // hardware without asking anyone for a finger.
 //
 // Every LAContext is fresh and never given a reuse duration, so a presence key
-// asks for Touch ID on every signature. Errors carry the Security.framework
+// asks for Touch ID or the login password on every signature. Errors carry the Security.framework
 // OSStatus the Go side already names (errSecInteractionNotAllowed and so on).
 // There is no software fallback anywhere: without the Secure Enclave every
 // operation fails.

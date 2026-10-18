@@ -70,6 +70,10 @@ func TestDescribeVPNCoreAuthorization(t *testing.T) {
 		"trailing blank":   promptStatement + "\n",
 		"no final newline": strings.TrimSuffix(promptStatement, "\n"),
 		"no nonce line":    strings.Replace(promptStatement, "nonce=", "noise=", 1),
+		"no action label":  strings.Replace(promptStatement, "action=install", "install", 1),
+		"no digest label":  strings.Replace(promptStatement, "digest=07d46cd2", "07d46cd2", 1),
+		"empty nonce":      strings.Replace(promptStatement, "nonce=0000000000000000000000000000000000000000000000000000000000000001", "nonce=", 1),
+		"bad expires":      strings.Replace(promptStatement, "expires=2026-10-19T14:02:03Z", "expires=soon", 1),
 		"empty":            "",
 	} {
 		if got := describeVPNCoreAuthorization([]byte(data)); got != "" {
@@ -78,10 +82,11 @@ func TestDescribeVPNCoreAuthorization(t *testing.T) {
 	}
 }
 
-// sign --data-file on a Touch ID/password enclave key shows the owner what
-// is signed: an authorization statement's action and package digest prefix,
-// any other file's sha256 prefix, and --digest (no data) the sha256 prefix.
-// The description is cleared after each sign.
+// sign --data-file or --stdin on a Touch ID/password enclave key shows the
+// owner what is signed: an authorization statement's action and package
+// digest prefix, any other data's sha256 prefix, and --digest (no data) the
+// sha256 prefix. After a sign that set a description, success or failure,
+// none is left for a later sign.
 func TestSignPromptNamesTheSignedData(t *testing.T) {
 	helper := &promptHelper{keys: map[string]*ecdsa.PrivateKey{}}
 	enclave := describedEnclave(keyvault.NewEnclaveStore(filepath.Join(t.TempDir(), "enclave"), helper))
@@ -101,10 +106,15 @@ func TestSignPromptNamesTheSignedData(t *testing.T) {
 		want string
 	}{
 		{[]string{"--data-file", statement}, "mac-keyvault: authorize vpn-core install 07d46cd2 with " + key},
+		{[]string{"--stdin"}, "mac-keyvault: authorize vpn-core install 07d46cd2 with " + key},
 		{[]string{"--data-file", other}, "mac-keyvault: sign sha256 " + hex.EncodeToString(otherSum[:4]) + " with " + key},
 		{[]string{"--digest", hex.EncodeToString(statementSum[:])}, "mac-keyvault: sign sha256 " + hex.EncodeToString(statementSum[:4]) + " with " + key},
 	} {
-		if code, resp, _ := runJSON(t, append([]string{"sign", "test/owner"}, tc.args...)...); code != 0 {
+		previous := stdinReader
+		stdinReader = strings.NewReader(promptStatement)
+		code, resp, _ := runJSON(t, append([]string{"sign", "test/owner"}, tc.args...)...)
+		stdinReader = previous
+		if code != 0 {
 			t.Fatalf("sign %v: %d %+v", tc.args, code, resp)
 		}
 		if got := helper.reasons[len(helper.reasons)-1]; got != tc.want {
@@ -113,6 +123,41 @@ func TestSignPromptNamesTheSignedData(t *testing.T) {
 		if signDescription != nil {
 			t.Fatalf("sign %v left signDescription set", tc.args)
 		}
+	}
+	// A sign that fails after the description was set (no such key) also
+	// leaves none behind.
+	if code, _, _ := runJSON(t, "sign", "test/missing", "--data-file", statement); code == 0 {
+		t.Fatal("sign of a missing key succeeded")
+	}
+	if signDescription != nil {
+		t.Fatal("a failed sign left signDescription set")
+	}
+}
+
+// --out creates a new file only: it refuses an existing file and a planted
+// symlink (whose target stays untouched) and writes a fresh path as 0600.
+func TestOutRefusesExistingAndSymlinkedPaths(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	mustWrite(t, victim, "owner data\n")
+	link := filepath.Join(dir, "sig-link")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{victim, link} {
+		if err := writeOutFile(path, []byte("signature")); err == nil {
+			t.Fatalf("writeOutFile(%s) succeeded", path)
+		}
+	}
+	if data, _ := os.ReadFile(victim); string(data) != "owner data\n" {
+		t.Fatalf("victim changed: %q", data)
+	}
+	fresh := filepath.Join(dir, "fresh.sig")
+	if err := writeOutFile(fresh, []byte("signature")); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(fresh); err != nil || info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
+		t.Fatalf("fresh out file: %v %v", info, err)
 	}
 }
 
