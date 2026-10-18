@@ -1,10 +1,12 @@
 package keyvault
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -51,7 +53,7 @@ func (f *fakeEnclave) Call(req EnclaveRequest, interactive bool) (EnclaveRespons
 		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		blob := fmt.Sprintf("blob-%d", len(f.keys))
 		f.keys[blob] = key
-		f.presence[blob] = req.Presence == enclavePresenceBiometry
+		f.presence[blob] = req.Presence == enclavePresenceUser
 		enforced := f.presence[blob]
 		if f.enforced != nil {
 			enforced = *f.enforced
@@ -108,7 +110,7 @@ func refusalOf(t *testing.T, err error) *Refusal {
 }
 
 // init --enclave --user-presence goes to the enclave store only, asks the
-// helper for a biometry key, stores one private file and lists it with its
+// helper for a user-presence key, stores one private file and lists it with its
 // public half; the keychain is never touched (no fallback).
 func TestEnclaveInitStoresPresenceKeyWithoutKeychain(t *testing.T) {
 	m, keychain, enclave, helper := enclaveFixture(t)
@@ -122,7 +124,7 @@ func TestEnclaveInitStoresPresenceKeyWithoutKeychain(t *testing.T) {
 	if len(keychain.creates) != 0 {
 		t.Fatalf("keychain create was called: %+v", keychain.creates)
 	}
-	if len(helper.requests) != 1 || helper.requests[0].Op != "create" || helper.requests[0].Presence != enclavePresenceBiometry {
+	if len(helper.requests) != 1 || helper.requests[0].Op != "create" || helper.requests[0].Presence != enclavePresenceUser {
 		t.Fatalf("helper requests = %+v", helper.requests)
 	}
 	info, err := os.Lstat(filepath.Join(enclave.Dir, key.Label+".json"))
@@ -210,7 +212,7 @@ func TestEnclaveSignRoutesPresencePolicy(t *testing.T) {
 		if last.Op != "sign" || last.Presence != tc.wantMode || helper.interactive[len(helper.interactive)-1] != tc.interactive || last.Interaction != "" {
 			t.Fatalf("%s: request %+v interactive=%v", tc.purpose, last, helper.interactive)
 		}
-		if want := "mac-keyvault: sign with test/" + tc.purpose + " v1"; last.Reason != want {
+		if want := "mac-keyvault: sign sha256 " + hex.EncodeToString(digest[:4]) + " with test/" + tc.purpose + " v1"; last.Reason != want {
 			t.Fatalf("reason %q, want %q", last.Reason, want)
 		}
 	}
@@ -280,7 +282,7 @@ func TestEnclaveSignRefusesSwappedOrTamperedKeys(t *testing.T) {
 	rewrite := rewriteEnclaveFile
 	t.Run("blob of another presence key", func(t *testing.T) {
 		m, enclave, helper, label := setup(t)
-		other, _ := helper.Call(EnclaveRequest{Op: "create", Presence: enclavePresenceBiometry}, false)
+		other, _ := helper.Call(EnclaveRequest{Op: "create", Presence: enclavePresenceUser}, false)
 		rewrite(t, enclave, label, func(f *enclaveFile) { f.Blob = other.Blob })
 		_, err := m.Sign(addr, digest[:])
 		if refusal := refusalOf(t, err); refusal.Code != CodeSecurity || !strings.Contains(refusal.Message, "does not belong to the stored public key") {
@@ -829,6 +831,46 @@ func TestEnclaveSignBindsTheAuthorizedRecord(t *testing.T) {
 			}
 			if refusal := refusalOf(t, err); refusal.Code != CodeSecurity || !strings.Contains(refusal.Message, "changed after it was authorized") || len(helper.requests) != calls {
 				t.Fatalf("refusal = %+v helper calls %d -> %d", refusal, calls, len(helper.requests))
+			}
+		})
+	}
+}
+
+// The presence prompt names what is signed: by default the sha256 prefix of
+// the digest and the key address; a Describe hook that recognises the digest
+// replaces the "what" part, and a hook returning "" keeps the default. The
+// prompt reaches the helper unchanged on the interactive sign request.
+func TestEnclavePromptNamesWhatIsSigned(t *testing.T) {
+	m, _, enclave, helper := enclaveFixture(t)
+	helper.fingerOK = true
+	if _, err := m.Init(enclaveSpec("owner", true)); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("statement"))
+	key := fmt.Sprintf("%s/owner v1", TestService)
+	cases := []struct {
+		name     string
+		describe func([]byte) string
+		want     string
+	}{
+		{"default", nil, "mac-keyvault: sign sha256 " + hex.EncodeToString(digest[:4]) + " with " + key},
+		{"described", func(d []byte) string {
+			if bytes.Equal(d, digest[:]) {
+				return "authorize vpn-core install 07d46cd2"
+			}
+			return ""
+		}, "mac-keyvault: authorize vpn-core install 07d46cd2 with " + key},
+		{"not recognised", func([]byte) string { return "" }, "mac-keyvault: sign sha256 " + hex.EncodeToString(digest[:4]) + " with " + key},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enclave.Describe = tc.describe
+			if _, err := m.Sign(Address{Kind: KindKey, Service: TestService, Purpose: "owner"}, digest[:]); err != nil {
+				t.Fatal(err)
+			}
+			last := helper.requests[len(helper.requests)-1]
+			if last.Op != "sign" || last.Reason != tc.want || !helper.interactive[len(helper.interactive)-1] {
+				t.Fatalf("sign request reason %q interactive %v, want %q", last.Reason, helper.interactive[len(helper.interactive)-1], tc.want)
 			}
 		})
 	}

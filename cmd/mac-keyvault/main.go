@@ -44,7 +44,7 @@ const (
 // Production wiring; tests swap these for recording stores and a temp lock.
 var (
 	newBackend = func() keyvault.Backend {
-		return keyvault.RoutedBackend{Keychain: keyvault.NewSecurityStore(), Enclave: keyvault.DefaultEnclaveStore()}
+		return keyvault.RoutedBackend{Keychain: keyvault.NewSecurityStore(), Enclave: describedEnclave(keyvault.DefaultEnclaveStore())}
 	}
 	lockPath = keyvault.DefaultLockPath
 	now      = time.Now
@@ -422,7 +422,7 @@ func runInit(args []string, out output) int {
 	metaJSON := fs.String("meta-json", "", "JSON object file with string, number and bool values")
 	enclave := fs.Bool("enclave", false, "create the pair in the Secure Enclave (CryptoKit blob, needs mac-keyvault-enclave; never falls back to the keychain)")
 	keychain := fs.Bool("keychain", false, "store the pair in the login keychain (default)")
-	userPresence := fs.Bool("user-presence", false, "with --enclave: Touch ID for every signature (current fingers only, no password fallback); on the keychain store it refuses with -34018 on an unprovisioned binary")
+	userPresence := fs.Bool("user-presence", false, "with --enclave: Touch ID or the login password for every signature; on the keychain store it refuses with -34018 on an unprovisioned binary")
 	positional, err := parseFlags(fs, args)
 	if err != nil {
 		return out.fail(err)
@@ -703,6 +703,13 @@ var stdinReader io.Reader = os.Stdin
 // stdin). Length is judged by keyvault.ValidateDigest so a mis-sized
 // caller digest is refused with invalid_digest before any store exists.
 func (d digestFlags) resolve() ([]byte, string, error) {
+	digest, _, source, err := d.resolveData()
+	return digest, source, err
+}
+
+// resolveData also returns the hashed data (nil for --digest), which sign
+// uses to word the presence prompt.
+func (d digestFlags) resolveData() ([]byte, []byte, string, error) {
 	given := 0
 	for _, set := range []bool{*d.digest != "", *d.dataFile != "", *d.stdin} {
 		if set {
@@ -710,32 +717,32 @@ func (d digestFlags) resolve() ([]byte, string, error) {
 		}
 	}
 	if given != 1 {
-		return nil, "", usagef("exactly one of --digest, --data-file or --stdin is required")
+		return nil, nil, "", usagef("exactly one of --digest, --data-file or --stdin is required")
 	}
 	switch {
 	case *d.digest != "":
 		digest, err := bytesArg("--digest", *d.digest)
 		if err != nil {
-			return nil, "", err
+			return nil, nil, "", err
 		}
 		if err := keyvault.ValidateDigest(digest); err != nil {
-			return nil, "", err
+			return nil, nil, "", err
 		}
-		return digest, "digest", nil
+		return digest, nil, "digest", nil
 	case *d.dataFile != "":
 		data, err := os.ReadFile(*d.dataFile)
 		if err != nil {
-			return nil, "", usagef("--data-file: %v", err)
+			return nil, nil, "", usagef("--data-file: %v", err)
 		}
 		sum := sha256.Sum256(data)
-		return sum[:], "file", nil
+		return sum[:], data, "file", nil
 	default:
 		data, err := io.ReadAll(stdinReader)
 		if err != nil {
-			return nil, "", fmt.Errorf("stdin: %w", err)
+			return nil, nil, "", fmt.Errorf("stdin: %w", err)
 		}
 		sum := sha256.Sum256(data)
-		return sum[:], "stdin", nil
+		return sum[:], data, "stdin", nil
 	}
 }
 
@@ -790,7 +797,7 @@ func runSign(args []string, out output) int {
 	if _, err := signatureFormat(*raw, *format, ""); err != nil {
 		return out.fail(err)
 	}
-	digest, source, err := digestIn.resolve()
+	digest, data, source, err := digestIn.resolveData()
 	if err != nil {
 		return out.fail(err)
 	}
@@ -801,6 +808,10 @@ func runSign(args []string, out output) int {
 	manager, err := newManager()
 	if err != nil {
 		return out.fail(err)
+	}
+	if data != nil {
+		signDescription = describeData(data)
+		defer func() { signDescription = nil }()
 	}
 	signed, err := manager.Sign(addr, digest)
 	if err != nil {
@@ -1067,8 +1078,10 @@ and a key (vault address or --spki FILE): exit 0 verified, 1 not, 3 high-S refus
 Raw labels are refused as foreign_label. --enclave creates the pair in the Secure
 Enclave through the mac-keyvault-enclave helper and keeps its device-bound blob under
 ~/Library/Application Support/mac-infra/keyvault/enclave; with --user-presence every
-signature asks for Touch ID (the currently enrolled fingers; no password fallback;
-re-enrolling fingers makes the key unusable). --user-presence on the keychain store
+signature asks for Touch ID or the login password (macOS .userPresence; the key
+survives fingerprint changes). The prompt names what is signed: sign shows
+the sha256 prefix, or the action and package digest prefix of a vpn-core
+authorization statement. --user-presence on the keychain store
 fails with missing_entitlement (OSStatus -34018) on a binary without a provisioning
 profile. There is never a fallback between stores. --extraction agent must be typed literally.
 signer serve binds one address and speaks JSON lines (contract 1) on stdin/stdout for a

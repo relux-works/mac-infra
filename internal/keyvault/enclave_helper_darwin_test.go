@@ -145,3 +145,19 @@ func TestEnclaveRealHelperSSHSIG(t *testing.T) {
 		})
 	}
 }
+
+// The real helper creates presence keys only as "user-presence" (Touch ID or
+// the login password); the superseded "biometry-current-set" policy name is
+// refused as a bad request and creates nothing. TestEnclaveRealHelper proves
+// the user-presence key itself refuses to sign without the owner.
+func TestEnclaveRealHelperPresencePolicyNames(t *testing.T) {
+	_, store := realEnclave(t)
+	if _, err := store.Helper.Call(EnclaveRequest{Op: "create", Presence: enclavePresenceUser}, false); err != nil {
+		t.Fatalf("user-presence create: %v", err)
+	}
+	_, err := store.Helper.Call(EnclaveRequest{Op: "create", Presence: "biometry-current-set"}, false)
+	var helperErr *EnclaveHelperError
+	if !errors.As(err, &helperErr) || helperErr.Code != "bad_request" {
+		t.Fatalf("biometry-current-set create: %v", err)
+	}
+}

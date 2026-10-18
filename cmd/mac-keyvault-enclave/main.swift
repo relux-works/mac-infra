@@ -7,7 +7,7 @@
 // Protocol: one JSON request on stdin, one JSON response on stdout, exit 0 on
 // success and 1 with {"error":{...}} otherwise. Nothing travels in argv.
 //
-//   {"op":"create","presence":"none"|"biometry-current-set"}
+//   {"op":"create","presence":"none"|"user-presence"}
 //       -> {"blob":B64,"point":B64,"presence_enforced":BOOL}
 //   {"op":"public","blob":B64}
 //       -> {"point":B64}
@@ -97,9 +97,9 @@ func translate(_ error: Error, _ op: String) -> HelperError {
 func accessControl(presence: Bool) throws -> SecAccessControl {
     var flags: SecAccessControlCreateFlags = [.privateKeyUsage]
     if presence {
-        // Touch ID only, bound to the currently enrolled fingers: no
-        // password fallback, and a changed enrollment invalidates the key.
-        flags.insert(.biometryCurrentSet)
+        // Touch ID or the login password for every signature (owner
+        // decision 2026-10-19): the key survives fingerprint changes.
+        flags.insert(.userPresence)
     }
     var error: Unmanaged<CFError>?
     guard let control = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &error) else {
@@ -166,8 +166,8 @@ func create(_ request: [String: Any]) throws -> [String: Any] {
     let presence: Bool
     switch request["presence"] as? String {
     case "none": presence = false
-    case "biometry-current-set": presence = true
-    default: throw HelperError(code: "bad_request", status: errSecParam, message: "presence must be none or biometry-current-set")
+    case "user-presence": presence = true
+    default: throw HelperError(code: "bad_request", status: errSecParam, message: "presence must be none or user-presence")
     }
     let key: SecureEnclave.P256.Signing.PrivateKey
     do {

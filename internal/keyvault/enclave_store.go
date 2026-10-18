@@ -3,6 +3,7 @@ package keyvault
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,7 +34,7 @@ const enclaveFileMax = 64 * 1024
 // Presence modes the helper understands.
 const (
 	enclavePresenceNone     = "none"
-	enclavePresenceBiometry = "biometry-current-set"
+	enclavePresenceUser     = "user-presence"
 	enclavePresenceRequired = "required"
 )
 
@@ -165,6 +166,11 @@ type EnclaveStore struct {
 	// NonInteractive never shows the Touch ID prompt: a presence key then
 	// refuses with errSecInteractionNotAllowed. Production leaves it false.
 	NonInteractive bool
+	// Describe, when set, names what a digest signs for the presence prompt
+	// (the CLI recognises the data it hashed); "" keeps the generic text.
+	// It only words the prompt: a caller able to run the helper can word
+	// its own, so the prompt is a check against mistakes, not a boundary.
+	Describe func(digest []byte) string
 	// err is a construction failure of the directory (no home directory),
 	// reported by every call. helperErr is a missing or unresolvable helper:
 	// keys are still listed, described and deleted, but nothing is created
@@ -199,6 +205,23 @@ func DefaultEnclaveStore() *EnclaveStore {
 		store.helperErr = fmt.Errorf("enclave helper %s: %w", helper.Path, err)
 	}
 	return store
+}
+
+// enclaveReason words the presence prompt: what is signed, then the key.
+// The default names the sha256 prefix so the owner can match it against
+// what the caller announced.
+func enclaveReason(label string, digest []byte, describe func([]byte) string) string {
+	key := label
+	if addr, ok := ParseLabel(label); ok {
+		key = fmt.Sprintf("%s/%s v%d", addr.Service, addr.Purpose, addr.Version)
+	}
+	what := "sign sha256 " + hex.EncodeToString(digest[:min(len(digest), 4)])
+	if describe != nil {
+		if d := describe(digest); d != "" {
+			what = d
+		}
+	}
+	return fmt.Sprintf("mac-keyvault: %s with %s", what, key)
 }
 
 // Serves reports whether the store can create and sign: its directory and
@@ -267,7 +290,7 @@ func (s *EnclaveStore) Create(opts CreateOptions) (Item, error) {
 	}
 	presence := enclavePresenceNone
 	if opts.UserPresence {
-		presence = enclavePresenceBiometry
+		presence = enclavePresenceUser
 	}
 	resp, err := s.Helper.Call(EnclaveRequest{Op: "create", Presence: presence}, false)
 	if err != nil {
@@ -446,10 +469,7 @@ func (s *EnclaveStore) sign(label string, digest []byte, authorized *Record) ([]
 	if rec.UserPresence {
 		presence = enclavePresenceRequired
 	}
-	reason := "mac-keyvault: sign with " + label
-	if addr, ok := ParseLabel(label); ok {
-		reason = fmt.Sprintf("mac-keyvault: sign with %s/%s v%d", addr.Service, addr.Purpose, addr.Version)
-	}
+	reason := enclaveReason(label, digest, s.Describe)
 	req := EnclaveRequest{Op: "sign", Blob: file.Blob, Digest: digest, Presence: presence, Reason: reason}
 	if s.NonInteractive {
 		req.Interaction = "none"
