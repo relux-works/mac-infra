@@ -98,6 +98,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 func runInstall(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	ownerKeyPath := fs.String("owner-key", "", "owner P-256 SPKI DER file to pin")
+	ownerKeySHA := fs.String("expect-owner-key-sha256", "", "required owner key SHA-256")
 	expected := fs.String("expect-sha256", "", "refuse to install unless the executable has this sha256 (from install-digest)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -107,6 +109,31 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	if fs.NArg() != 0 {
 		fmt.Fprintf(stderr, "install takes no arguments, got %q\n", fs.Args())
 		return 2
+	}
+	ownerPathSet, ownerSHASet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		ownerPathSet = ownerPathSet || f.Name == "owner-key"
+		ownerSHASet = ownerSHASet || f.Name == "expect-owner-key-sha256"
+	})
+	if ownerPathSet != ownerSHASet || (ownerPathSet && (*ownerKeyPath == "" || !isSHA256Hex(*ownerKeySHA))) {
+		fmt.Fprintln(stderr, "--owner-key and --expect-owner-key-sha256 must be supplied together with a valid SHA-256")
+		return 2
+	}
+	var ownerKey []byte
+	if ownerPathSet {
+		var err error
+		ownerKey, err = maccore.ReadVPNCoreInput(*ownerKeyPath, 1024)
+		if err == nil {
+			_, err = maccore.ParseOwnerPublicKey(ownerKey)
+		}
+		if err == nil && !strings.EqualFold(ownerSHA256(ownerKey), *ownerKeySHA) {
+			err = fmt.Errorf("owner key sha256 mismatch")
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "install failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "owner key: %s\nowner key sha256: %s\n", *ownerKeyPath, ownerSHA256(ownerKey))
 	}
 	pinned := false
 	fs.Visit(func(f *flag.Flag) { pinned = pinned || f.Name == "expect-sha256" })
@@ -122,6 +149,7 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg := maccore.DefaultServiceConfig()
 	options := maccore.InstallOptions{
+		OwnerKey:       ownerKey,
 		ExpectedSHA256: *expected,
 		Announce: func(path, sha string, size int) {
 			fmt.Fprintf(stdout, "installing: %s\nsha256: %s\nsize: %d bytes\n", path, sha, size)
@@ -214,6 +242,10 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "label: %s\n", status.Label)
 	fmt.Fprintf(stdout, "plist: %s\n", status.PlistPath)
 	fmt.Fprintf(stdout, "socket: %s\n", status.SocketPath)
+	fmt.Fprintf(stdout, "owner key pinned: %t\n", status.OwnerKeyPinned)
+	if status.OwnerKeyPinned {
+		fmt.Fprintf(stdout, "owner key sha256: %s\n", status.OwnerKeySHA256)
+	}
 	if status.Reachable {
 		fmt.Fprintln(stdout, "state: reachable")
 		fmt.Fprintf(stdout, "daemon_pid: %d\n", status.DaemonPID)
@@ -509,7 +541,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  mac-infra-core install-digest")
-	fmt.Fprintln(w, "  mac-infra-core install [--expect-sha256 HEX]")
+	fmt.Fprintln(w, "  mac-infra-core install [--expect-sha256 HEX] [--owner-key FILE --expect-owner-key-sha256 HEX]")
 	fmt.Fprintln(w, "  mac-infra-core uninstall")
 	fmt.Fprintln(w, "  mac-infra-core status")
 	fmt.Fprintln(w, "  mac-infra-core request-permissions sudo")
@@ -520,8 +552,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  mac-infra-core fseventsd-restart [--force] [--threshold-gb N]")
 	fmt.Fprintln(w, "  mac-infra-core fseventsd-watchdog enable [--threshold-gb N] [--interval DURATION] [--auto-restart]")
 	fmt.Fprintln(w, "  mac-infra-core fseventsd-watchdog disable|status")
-	fmt.Fprintln(w, "  mac-infra-core vpn-core install --package DIR --expect-digest HEX")
-	fmt.Fprintln(w, "  mac-infra-core vpn-core rollback --expect-digest HEX")
+	fmt.Fprintln(w, "  mac-infra-core vpn-core authorize --action install|rollback --expect-digest HEX --out FILE")
+	fmt.Fprintln(w, "  mac-infra-core vpn-core install --package DIR --expect-digest HEX --authorization FILE --signature FILE")
+	fmt.Fprintln(w, "  mac-infra-core vpn-core rollback --expect-digest HEX --authorization FILE --signature FILE")
 	fmt.Fprintln(w, "  mac-infra-core vpn-core status")
 	fmt.Fprintln(w, "  mac-infra-core version")
 }

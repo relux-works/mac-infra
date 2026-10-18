@@ -9,27 +9,38 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func requireSocketPeer(conn net.Conn, uid int) error {
+func socketPeerUID(conn net.Conn) (int, error) {
 	socket, ok := conn.(*net.UnixConn)
 	if !ok {
-		return fmt.Errorf("peer is not a Unix socket")
+		return 0, fmt.Errorf("peer is not a Unix socket")
 	}
 	raw, err := socket.SyscallConn()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var cred *unix.Xucred
 	var inspectErr error
 	if err := raw.Control(func(fd uintptr) {
 		cred, inspectErr = unix.GetsockoptXucred(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERCRED)
 	}); err != nil {
-		return err
+		return 0, err
 	}
 	if inspectErr != nil {
-		return inspectErr
+		return 0, inspectErr
 	}
 	// XUCRED_VERSION is 0 in the macOS SDK (sys/ucred.h).
-	if cred.Version != 0 || (cred.Uid != uint32(uid) && cred.Uid != 0) {
+	if cred.Version != 0 {
+		return 0, fmt.Errorf("unsupported peer credential version")
+	}
+	return int(cred.Uid), nil
+}
+
+func requireSocketPeer(conn net.Conn, uid int) error {
+	peerUID, err := socketPeerUID(conn)
+	if err != nil {
+		return err
+	}
+	if peerUID != uid && peerUID != 0 {
 		return fmt.Errorf("Unix socket peer UID is not authorized")
 	}
 	return nil

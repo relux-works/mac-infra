@@ -289,6 +289,7 @@ func TestVPNCoreIntentAudit(t *testing.T) {
 			if action == ActionVPNCoreInstall {
 				req.Package = a
 			}
+			f.signRequest(t, action, req)
 			requireVPNCode(t, f.s.handle(action, req), "audit_failed")
 			if f.snapshot(t) != before || len(f.calls) != 0 || string(readVPN(t, sentinel)) != "unchanged" {
 				t.Fatal("failed intent audit allowed mutation")
@@ -310,6 +311,7 @@ func TestVPNCoreIntentAudit(t *testing.T) {
 			} else {
 				f.s.ops.swap = func(a, b string) error { assertIntent(); return swapVPNCoreTrees(a, b) }
 			}
+			f.signRequest(t, action, req)
 			if r := f.s.handle(action, req); !r.OK {
 				t.Fatal(r.Error)
 			}

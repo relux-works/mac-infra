@@ -45,6 +45,13 @@ func InspectService(cfg ServiceConfig) (ServiceStatus, error) {
 		PlistPath:  cfg.PlistPath,
 		SocketPath: cfg.SocketPath,
 	}
+	_, keyBytes, keyErr := readOwnerPublicKey(cfg.OwnerKeyPath, 0)
+	if keyErr == nil {
+		status.OwnerKeyPinned = true
+		status.OwnerKeySHA256 = vpnSHA(keyBytes)
+	} else if vpnCode(keyErr) != "owner_key_missing" {
+		return status, keyErr
+	}
 	resp, err := Call(cfg, Request{Action: ActionPing})
 	if err != nil {
 		if isUnavailable(err) {
@@ -125,6 +132,7 @@ func RequestSudoCredentials() error {
 
 // InstallOptions binds an install to the exact bytes the operator reviewed.
 type InstallOptions struct {
+	OwnerKey []byte // Reviewed SPKI snapshot; nil preserves an existing pin.
 	// ExpectedSHA256, when set, must equal the snapshot digest or nothing
 	// privileged runs.
 	ExpectedSHA256 string
@@ -151,6 +159,14 @@ func installServiceWithPreflight(cfg ServiceConfig, binaryPath string, clientUID
 	if cfg != DefaultServiceConfig() || clientUID <= 0 || clientGID < 0 {
 		return fmt.Errorf("install requires fixed service paths and a non-root client; run as the intended normal user")
 	}
+	if opts.OwnerKey != nil {
+		if len(opts.OwnerKey) > 1024 {
+			return fmt.Errorf("owner key exceeds 1 KiB")
+		}
+		if _, err := ParseOwnerPublicKey(opts.OwnerKey); err != nil {
+			return err
+		}
+	}
 	// Verify native trust-check support and the first protected ancestor before
 	// any sudo prompt or privileged command. Descendants are checked again later.
 	if err := preflight("/Library"); err != nil {
@@ -172,7 +188,7 @@ func installServiceWithPreflight(cfg ServiceConfig, binaryPath string, clientUID
 		return fmt.Errorf("sudo authentication: %w", err)
 	}
 
-	return installReviewedSnapshot(snapshot, cfg, clientUID, clientGID, rootInstallationOps(), func() error {
+	return installReviewedSnapshotWithOwnerKey(snapshot, opts.OwnerKey, cfg, clientUID, clientGID, rootInstallationOps(), func() error {
 		if err := replaceLaunchService(cfg, 5*time.Second); err != nil {
 			return err
 		}
@@ -231,6 +247,7 @@ func RunDaemon(cfg ServiceConfig, clientUID, clientGID int, trust DaemonTrust) e
 		firewall:  newFirewallService(defaultFirewallStore()),
 		vpnCore:   newVPNCoreService(clientUID, clientGID),
 	}
+	daemon.vpnCore.ownerKey = cfg.OwnerKeyPath
 	stop := make(chan struct{})
 	defer close(stop)
 	go daemon.firewall.runEnforcement(stop)
@@ -354,12 +371,17 @@ func (d serviceDaemon) handleConn(conn net.Conn) {
 			response.OK = false
 			response.Error = err.Error()
 		}
-	case ActionVPNCoreInstall, ActionVPNCoreRollback, ActionVPNCoreStatus:
+	case ActionVPNCoreAuthorize, ActionVPNCoreInstall, ActionVPNCoreRollback, ActionVPNCoreStatus:
 		if d.vpnCore == nil {
 			response = Response{ErrorCode: "unavailable", Error: "vpn-core management unavailable"}
 			break
 		}
-		response = d.vpnCore.handle(request.Action, request.VPNCore)
+		peerUID, err := socketPeerUID(conn)
+		if err != nil {
+			response = Response{ErrorCode: "invalid_client", Error: err.Error()}
+			break
+		}
+		response = d.vpnCore.handle(request.Action, request.VPNCore, peerUID)
 		response.DaemonPID = os.Getpid()
 	case ActionFirewallStatus, ActionFirewallPlan, ActionFirewallApply:
 		if d.firewall == nil {

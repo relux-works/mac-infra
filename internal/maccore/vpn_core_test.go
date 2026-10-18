@@ -2,6 +2,10 @@ package maccore
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +22,8 @@ import (
 )
 
 type vpnFixture struct {
+	t       *testing.T
+	key     *ecdsa.PrivateKey
 	s       *vpnCoreService
 	root    string
 	calls   []string
@@ -42,7 +48,9 @@ func newVPNFixture(t *testing.T) *vpnFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	f := &vpnFixture{root: root}
+	f := &vpnFixture{root: root, t: t}
+	f.key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	mustVPN(t, err)
 	for _, name := range []string{"helpers", "daemons", "logs"} {
 		mustVPN(t, os.Mkdir(filepath.Join(root, name), 0o755))
 	}
@@ -82,6 +90,12 @@ func newVPNFixture(t *testing.T) *vpnFixture {
 			return CommandResult{}, nil
 		},
 	}
+	f.s.ownerKey = filepath.Join(root, "owner-presence.spki")
+	f.s.ownerKeyUID = uint32(os.Getuid())
+	der, err := x509.MarshalPKIXPublicKey(&f.key.PublicKey)
+	mustVPN(t, err)
+	writeVPN(t, f.s.ownerKey, der)
+	mustVPN(t, os.Chmod(f.s.ownerKey, 0o444))
 	return f
 }
 
@@ -122,10 +136,14 @@ func (f *vpnFixture) pkg(t *testing.T, binary, tool string) (string, string) {
 }
 func (f *vpnFixture) install(t *testing.T, pkg, digest string) Response {
 	t.Helper()
-	return f.s.handle(ActionVPNCoreInstall, &VPNCoreRequest{Target: "vpn-core", Package: pkg, ExpectedDigest: digest})
+	r := &VPNCoreRequest{Target: "vpn-core", Package: pkg, ExpectedDigest: digest}
+	f.signRequest(t, ActionVPNCoreInstall, r)
+	return f.s.handle(ActionVPNCoreInstall, r)
 }
 func (f *vpnFixture) rollback(digest string) Response {
-	return f.s.handle(ActionVPNCoreRollback, &VPNCoreRequest{Target: "vpn-core", ExpectedDigest: digest})
+	r := &VPNCoreRequest{Target: "vpn-core", ExpectedDigest: digest}
+	f.signRequest(f.t, ActionVPNCoreRollback, r)
+	return f.s.handle(ActionVPNCoreRollback, r)
 }
 func requireVPNCode(t *testing.T, r Response, code string) {
 	t.Helper()
@@ -346,6 +364,7 @@ func TestVPNCoreRefusals(t *testing.T) {
 			pkg, digest := f.pkg(t, "new binary", "new tool")
 			r := &VPNCoreRequest{Target: "vpn-core", Package: pkg, ExpectedDigest: digest}
 			tc.change(t, f, r)
+			f.signRequest(t, ActionVPNCoreInstall, r)
 			response := f.s.handle(ActionVPNCoreInstall, r)
 			requireVPNCode(t, response, tc.code)
 			if got := f.snapshot(t); got != before {

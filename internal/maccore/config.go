@@ -9,23 +9,27 @@ const (
 )
 
 type ServiceConfig struct {
-	Label      string
-	PlistPath  string
-	SocketPath string
+	OwnerKeyPath string
+	Label        string
+	PlistPath    string
+	SocketPath   string
 }
 
 type ServiceStatus struct {
-	Label      string
-	PlistPath  string
-	SocketPath string
-	Reachable  bool
-	DaemonPID  int
+	OwnerKeyPinned bool
+	OwnerKeySHA256 string
+	Label          string
+	PlistPath      string
+	SocketPath     string
+	Reachable      bool
+	DaemonPID      int
 }
 
 func DefaultServiceConfig() ServiceConfig {
 	return ServiceConfig{
-		Label:      defaultServiceLabel,
-		PlistPath:  defaultServicePlistPath,
-		SocketPath: defaultServiceSocketPath,
+		OwnerKeyPath: defaultServiceDirectory + "/owner-presence.spki",
+		Label:        defaultServiceLabel,
+		PlistPath:    defaultServicePlistPath,
+		SocketPath:   defaultServiceSocketPath,
 	}
 }

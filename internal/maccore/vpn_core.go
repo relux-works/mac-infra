@@ -32,9 +32,12 @@ const (
 )
 
 type VPNCoreRequest struct {
-	Target         string `json:"target"`
-	Package        string `json:"package,omitempty"`
-	ExpectedDigest string `json:"expect_digest,omitempty"`
+	Authorization   []byte `json:"authorization,omitempty"`
+	Signature       []byte `json:"signature,omitempty"`
+	AuthorizeAction string `json:"authorize_action,omitempty"`
+	Target          string `json:"target"`
+	Package         string `json:"package,omitempty"`
+	ExpectedDigest  string `json:"expect_digest,omitempty"`
 }
 
 type VPNCoreStatus struct {
@@ -87,6 +90,9 @@ type vpnCoreOps struct {
 }
 
 type vpnCoreService struct {
+	ownerKey              string
+	ownerKeyUID           uint32 // Default 0; tests can require their fixture owner.
+	authorizations        vpnAuthorizations
 	mu                    sync.Mutex
 	auditMu               sync.Mutex
 	install, plist, audit string
@@ -102,7 +108,7 @@ func newVPNCoreService(uid, gid int) *vpnCoreService {
 		}
 		return f.Close()
 	}
-	return &vpnCoreService{install: vpnCoreDirectory, plist: vpnCorePlist, audit: vpnCoreAudit, uid: uid, gid: gid, ops: vpnCoreOps{
+	return &vpnCoreService{ownerKey: DefaultServiceConfig().OwnerKeyPath, install: vpnCoreDirectory, plist: vpnCorePlist, audit: vpnCoreAudit, uid: uid, gid: gid, ops: vpnCoreOps{
 		source: newVPNCoreExecSource(), sourceTimeout: 120 * time.Second, rename: os.Rename, directory: requireTrustedDirectory, trusted: trusted,
 		secure: secureVPNCoreFile, swap: swapVPNCoreTrees,
 		launch: func(budget time.Duration, args ...string) (CommandResult, error) {
@@ -116,7 +122,7 @@ func validVPNDigest(s string) bool {
 	return err == nil && len(b) == sha256.Size && hex.EncodeToString(b) == s
 }
 
-func (s *vpnCoreService) handle(action Action, req *VPNCoreRequest) (response Response) {
+func (s *vpnCoreService) handle(action Action, req *VPNCoreRequest, peerUID ...int) (response Response) {
 	response = Response{OK: true}
 	var status VPNCoreStatus
 	var err error
@@ -157,6 +163,10 @@ func (s *vpnCoreService) handle(action Action, req *VPNCoreRequest) (response Re
 			response.Error = strings.TrimSpace(response.Error + "; audit_failed: " + auditErr.Error())
 		}
 	}()
+	uid := s.uid
+	if len(peerUID) == 1 {
+		uid = peerUID[0]
+	}
 	if !s.mu.TryLock() {
 		err = vpnRefuse("busy", "another vpn-core operation is running")
 		return
@@ -171,7 +181,7 @@ func (s *vpnCoreService) handle(action Action, req *VPNCoreRequest) (response Re
 		return
 	}
 	if action == ActionVPNCoreStatus {
-		if req.Package != "" || req.ExpectedDigest != "" {
+		if req.Package != "" || req.ExpectedDigest != "" || req.AuthorizeAction != "" || len(req.Authorization) != 0 || len(req.Signature) != 0 {
 			err = vpnRefuse("invalid_request", "status takes only target")
 			return
 		}
@@ -182,8 +192,22 @@ func (s *vpnCoreService) handle(action Action, req *VPNCoreRequest) (response Re
 		err = vpnRefuse("invalid_digest", "expect_digest must be 64 lowercase hexadecimal characters")
 		return
 	}
-	if action != ActionVPNCoreInstall && action != ActionVPNCoreRollback || action == ActionVPNCoreRollback && req.Package != "" {
+	if action == ActionVPNCoreAuthorize {
+		if _, _, err = readOwnerPublicKey(s.ownerKey, s.ownerKeyUID); err != nil {
+			return
+		}
+		if (req.AuthorizeAction != "install" && req.AuthorizeAction != "rollback") || req.Package != "" || len(req.Authorization) != 0 || len(req.Signature) != 0 {
+			err = vpnRefuse("invalid_request", "authorize action must be install or rollback")
+			return
+		}
+		response.Authorization, err = s.issueAuthorization(uid, req.AuthorizeAction, req.ExpectedDigest)
+		return
+	}
+	if action != ActionVPNCoreInstall && action != ActionVPNCoreRollback || action == ActionVPNCoreRollback && req.Package != "" || req.AuthorizeAction != "" {
 		err = vpnRefuse("invalid_request", "invalid mutation action or arguments")
+		return
+	}
+	if err = s.authorizeMutation(uid, action, req); err != nil {
 		return
 	}
 	// A durable intent must precede even temporary changes under install roots.

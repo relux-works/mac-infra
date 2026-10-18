@@ -1,0 +1,122 @@
+//go:build darwin && cgo
+
+package maccore
+
+import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+)
+
+func ownerKeyDERFixture(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	mustVPN(t, err)
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	mustVPN(t, err)
+	return der
+}
+
+// Claim: the fake privileged installer publishes the supplied SPKI snapshot as 0444 with root ownership commands, rotates it, and preserves its bytes/mode/inode when no pin was requested.
+func TestInstallOwnerKeySnapshot(t *testing.T) {
+	f := newInstallFixture(t)
+	cfg := DefaultServiceConfig()
+	pin := ownerKeyDERFixture(t)
+	mustVPN(t, installReviewedSnapshotWithOwnerKey([]byte("helper"), pin, cfg, 501, 20, f.ops))
+	for i := 0; i < 2; i++ {
+		got := readVPN(t, f.path(cfg.OwnerKeyPath))
+		info, err := os.Stat(f.path(cfg.OwnerKeyPath))
+		mustVPN(t, err)
+		if !bytes.Equal(got, pin) || info.Mode().Perm() != 0o444 {
+			t.Fatal("pin snapshot or mode changed")
+		}
+		owned := false
+		for _, call := range f.calls {
+			if strings.Contains(call, "/usr/sbin/chown 0:0 ") && strings.HasSuffix(call, "/owner-presence.spki") {
+				owned = true
+			}
+		}
+		if !owned {
+			t.Fatal("pin had no root ownership command")
+		}
+		f.calls = nil
+		mustVPN(t, installReviewedSnapshot([]byte("helper update"), cfg, 501, 20, f.ops))
+		after, err := os.Stat(f.path(cfg.OwnerKeyPath))
+		mustVPN(t, err)
+		if !os.SameFile(info, after) || !bytes.Equal(readVPN(t, f.path(cfg.OwnerKeyPath)), pin) || after.Mode() != info.Mode() {
+			t.Fatal("unrequested pin changed")
+		}
+		for _, call := range f.calls {
+			if strings.Contains(call, cfg.OwnerKeyPath) {
+				t.Fatal("no-pin install touched pin:", call)
+			}
+		}
+		pin = ownerKeyDERFixture(t)
+		mustVPN(t, installReviewedSnapshotWithOwnerKey([]byte("helper"), pin, cfg, 501, 20, f.ops))
+	}
+}
+
+// Claim: pin staging/publication/activation failures restore the prior pin and helper/plist bytes and inodes, or remove the incomplete first pin; malformed snapshots fail before fake commands.
+func TestInstallOwnerKeyFailures(t *testing.T) {
+	for _, failure := range []string{"stage", "publish", "activate", "firstPin"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newInstallFixture(t)
+			cfg := DefaultServiceConfig()
+			oldKey := ownerKeyDERFixture(t)
+			if failure != "firstPin" {
+				mustVPN(t, installReviewedSnapshotWithOwnerKey([]byte("old"), oldKey, cfg, 501, 20, f.ops))
+			} else {
+				mustVPN(t, installReviewedSnapshot([]byte("old"), cfg, 501, 20, f.ops))
+			}
+			previous := map[string][]byte{}
+			identities := map[string]os.FileInfo{}
+			for _, p := range []string{defaultServiceBinaryPath, cfg.PlistPath, cfg.OwnerKeyPath} {
+				data, err := os.ReadFile(f.path(p))
+				if os.IsNotExist(err) {
+					continue
+				}
+				mustVPN(t, err)
+				previous[p] = data
+				identities[p], err = os.Stat(f.path(p))
+				mustVPN(t, err)
+			}
+			ops := f.ops
+			original := ops.command
+			ops.command = func(input []byte, name string, args ...string) ([]byte, error) {
+				if failure == "stage" && name == "/bin/sh" && strings.HasSuffix(args[len(args)-1], "/owner-presence.spki") {
+					return nil, fmt.Errorf("injected pin staging failure")
+				}
+				if failure == "publish" && name == "/bin/mv" && strings.HasSuffix(args[1], "/owner-presence.spki") {
+					return nil, fmt.Errorf("injected pin publication failure")
+				}
+				return original(input, name, args...)
+			}
+			err := installReviewedSnapshotWithOwnerKey([]byte("new"), ownerKeyDERFixture(t), cfg, 501, 20, ops, func() error { return fmt.Errorf("injected activation failure") })
+			if err == nil || !strings.Contains(err.Error(), "injected") {
+				t.Fatalf("error=%v", err)
+			}
+			for p, want := range previous {
+				after, err := os.Stat(f.path(p))
+				mustVPN(t, err)
+				if !bytes.Equal(readVPN(t, f.path(p)), want) || !os.SameFile(identities[p], after) {
+					t.Fatalf("prior file changed: %s", p)
+				}
+			}
+			if failure == "firstPin" {
+				if _, err := os.Lstat(f.path(cfg.OwnerKeyPath)); !os.IsNotExist(err) {
+					t.Fatal("incomplete first pin retained")
+				}
+			}
+		})
+	}
+	f := newInstallFixture(t)
+	if err := installReviewedSnapshotWithOwnerKey([]byte("helper"), []byte("bad"), DefaultServiceConfig(), 501, 20, f.ops); err == nil || len(f.calls) != 0 {
+		t.Fatal("invalid SPKI reached privileged seam")
+	}
+}

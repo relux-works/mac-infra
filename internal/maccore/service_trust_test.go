@@ -267,8 +267,7 @@ func TestStaleSocketBoundary(t *testing.T) {
 	}
 }
 
-// Kernel-reported peer UID admits this user and denies a different configured
-// user even if filesystem socket permissions would permit the connection.
+// Claim: kernel peer credentials report the actual user, admit that user and deny a different configured UID regardless of socket file permissions.
 func TestSocketPeerUIDBoundary(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root is intentionally authorized for administration")
@@ -287,6 +286,10 @@ func TestSocketPeerUIDBoundary(t *testing.T) {
 			return
 		}
 		defer conn.Close()
+		if uid, err := socketPeerUID(conn); err != nil || uid != os.Getuid() {
+			errors <- fmt.Errorf("peer UID = %d, error = %v", uid, err)
+			return
+		}
 		if err := requireSocketPeer(conn, os.Getuid()); err != nil {
 			errors <- err
 			return

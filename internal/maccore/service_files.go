@@ -140,6 +140,21 @@ func (ops installationOps) filesystem(path string) (string, error) {
 }
 
 func installReviewedSnapshot(snapshot []byte, cfg ServiceConfig, uid, gid int, ops installationOps, activate ...func() error) error {
+	return installReviewedSnapshotWithOwnerKey(snapshot, nil, cfg, uid, gid, ops, activate...)
+}
+
+func installReviewedSnapshotWithOwnerKey(snapshot, ownerKey []byte, cfg ServiceConfig, uid, gid int, ops installationOps, activate ...func() error) error {
+	if ownerKey != nil {
+		if len(ownerKey) > 1024 {
+			return fmt.Errorf("owner key exceeds 1 KiB")
+		}
+		if _, err := ParseOwnerPublicKey(ownerKey); err != nil {
+			return err
+		}
+		if cfg.OwnerKeyPath != defaultServiceDirectory+"/owner-presence.spki" {
+			return fmt.Errorf("owner key requires fixed pin path")
+		}
+	}
 	if len(snapshot) == 0 || len(snapshot) > maxReviewedExecutableSize {
 		return fmt.Errorf("invalid reviewed executable snapshot")
 	}
@@ -152,7 +167,11 @@ func installReviewedSnapshot(snapshot []byte, cfg ServiceConfig, uid, gid int, o
 	if err := ops.directory(filepath.Dir(cfg.PlistPath)); err != nil {
 		return err
 	}
-	for _, path := range []string{defaultServiceBinaryPath, cfg.PlistPath} {
+	paths := []string{defaultServiceBinaryPath, cfg.PlistPath}
+	if ownerKey != nil {
+		paths = append(paths, cfg.OwnerKeyPath)
+	}
+	for _, path := range paths {
 		if err := ops.existingFile(path); err != nil {
 			return err
 		}
@@ -166,13 +185,14 @@ func installReviewedSnapshot(snapshot []byte, cfg ServiceConfig, uid, gid int, o
 		return fmt.Errorf("unexpected privileged staging path")
 	}
 	binaryStage, plistStage := filepath.Join(stage, "mac-infra-core"), filepath.Join(stage, "core.plist")
+	keyStage, keyBackup := filepath.Join(stage, "owner-presence.spki"), filepath.Join(stage, "previous-owner.spki")
 	binaryBackup, plistBackup := filepath.Join(stage, "previous-core"), filepath.Join(stage, "previous.plist")
 	preserveStage := false
 	defer func() {
 		if preserveStage {
 			return
 		}
-		_, _ = ops.command(nil, "/bin/rm", "-f", binaryStage, plistStage, binaryBackup, plistBackup)
+		_, _ = ops.command(nil, "/bin/rm", "-f", binaryStage, plistStage, binaryBackup, plistBackup, keyStage, keyBackup)
 		_, _ = ops.command(nil, "/bin/rmdir", stage)
 	}()
 	if err := ops.stageBytes(binaryStage, snapshot, "0755"); err != nil {
@@ -210,6 +230,12 @@ func installReviewedSnapshot(snapshot []byte, cfg ServiceConfig, uid, gid int, o
 	files := []installationPublication{
 		{stage: binaryStage, destination: defaultServiceBinaryPath, backup: binaryBackup},
 		{stage: plistStage, destination: cfg.PlistPath, backup: plistBackup},
+	}
+	if ownerKey != nil {
+		if err := ops.stageBytes(keyStage, ownerKey, "0444"); err != nil {
+			return err
+		}
+		files = append(files, installationPublication{stage: keyStage, destination: cfg.OwnerKeyPath, backup: keyBackup})
 	}
 	if err := publishInstallation(files, ops, func() error {
 		binary, err := ops.open(defaultServiceBinaryPath, false)

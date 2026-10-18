@@ -6,6 +6,7 @@ type Action string
 
 const (
 	ActionPing                   Action = "ping"
+	ActionVPNCoreAuthorize       Action = "vpn_core_authorize"
 	ActionVPNCoreInstall         Action = "vpn_core_install"
 	ActionVPNCoreRollback        Action = "vpn_core_rollback"
 	ActionVPNCoreStatus          Action = "vpn_core_status"
@@ -33,13 +34,14 @@ type Request struct {
 }
 
 type Response struct {
-	ErrorCode string           `json:"error_code,omitempty"`
-	VPNCore   *VPNCoreStatus   `json:"vpn_core,omitempty"`
-	OK        bool             `json:"ok"`
-	Error     string           `json:"error,omitempty"`
-	DaemonPID int              `json:"daemon_pid,omitempty"`
-	Commands  []CommandResult  `json:"commands,omitempty"`
-	Firewall  *firewall.Report `json:"firewall,omitempty"`
+	Authorization []byte           `json:"authorization,omitempty"`
+	ErrorCode     string           `json:"error_code,omitempty"`
+	VPNCore       *VPNCoreStatus   `json:"vpn_core,omitempty"`
+	OK            bool             `json:"ok"`
+	Error         string           `json:"error,omitempty"`
+	DaemonPID     int              `json:"daemon_pid,omitempty"`
+	Commands      []CommandResult  `json:"commands,omitempty"`
+	Firewall      *firewall.Report `json:"firewall,omitempty"`
 }
 
 type CommandResult struct {

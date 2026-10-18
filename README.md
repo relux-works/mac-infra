@@ -16,7 +16,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-chrome-session` | Guarded exact Chrome tab access, explicit exact-tab handoff, trusted form input and native file upload, sealed authenticated same-origin downloads and Slack reads, bounded extraction, and finite named Chrome/Safari heartbeats without focus churn | `mac-chrome-session list`, guarded `run-js`/`fetch-file`/`slack-read`/`extract`, explicit `focus`, `trusted-input`, or `upload` with exact IDs/origin plus `--human-authorized`; upload/trusted input and protected fetch requests arrive through `--request-stdin`; `heartbeat start\|restart\|status\|stop\|list`, exact `close` | atomic private `run-js --out` and `fetch-file --out` artifacts; protected resource URLs, trusted values, and upload source paths stay out of argv and normal output; upload uses a short-lived private staging directory and reports only guarded origin, accepted basenames, and count; other private outputs and heartbeat state use the paths described below |
 | `mac-browser-site` | Token-efficient agent-facing `q`/`grep`/`m` facade over declared Chrome/Safari site adapters | `mac-browser-site q --adapter FILE --format compact 'list(take=20) { id title }'`, `mac-browser-site grep --adapter FILE --format compact PATTERN`, `mac-browser-site m --adapter FILE --format compact --dry-run\|--confirm 'invoke(name=ACTION)'` | projected, PII-depersonalized, secret-checked `0600` JSONL under `~/Library/Application Support/mac-infra/browser-site-cache/<site>/`; no raw recognized personal data, cookies, browser storage, authorization material, or cursor/session state |
 | `mac-document-sanitize` | Extract document text and redact common personal data or secrets before agent inspection | `mac-document-sanitize --json PATH`, optional `--redact-from PRIVATE_DICTIONARY` | hash-named `*.sanitized.txt` and `*.redaction.json` files under `.temp/mac-document-sanitize/` by default |
-| `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core install-digest`, `mac-infra-core install [--expect-sha256 HEX]`, `mac-infra-core request-permissions sudo`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | root-owned executable and socket under `/Library/PrivilegedHelperTools/works.relux.mac-infra/`, plist under `/Library/LaunchDaemons/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
+| `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core install-digest`, `mac-infra-core install [--expect-sha256 HEX] [--owner-key FILE --expect-owner-key-sha256 HEX]`, `mac-infra-core request-permissions sudo`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | root-owned executable and socket under `/Library/PrivilegedHelperTools/works.relux.mac-infra/`, plist under `/Library/LaunchDaemons/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
 | `mac-firewall` | Declarative macOS application firewall management through the `mac-infra-core` root helper: keep it on, manage app exceptions, disable allowlisted listening services; no sudo per change | `mac-firewall status`, `mac-firewall init-config`, `mac-firewall plan`, `mac-firewall apply --apply` | config `~/.config/mac-infra/firewall.json` (`0600`); root-owned audit `/Library/PrivilegedHelperTools/works.relux.mac-infra/firewall/audit.jsonl`; see [the firewall reference](agents/skills/mac-infra/references/firewall.md) |
 | `mac-firewall watch` | Foreground shadow observer: ALF decisions, sampled outbound flows, deterministic rules and child-authenticated UNIX-socket embedding kNN; proposals only | `mac-firewall watch run --config PATH`, `watch digest --config PATH --since 24h [--json]`, `watch status --config PATH [--json]`, `watch classify --config PATH --fixtures FILE [--json]` | explicit private state dir: `state.json`, daily sanitized `events-YYYY-MM-DD.jsonl`, `new-events.flag`, `llm.sock`; synthetic self-labelled fixture tests and opt-in model test in [the watch reference](agents/skills/mac-infra/references/firewall.md#watch-shadow-mode) |
 | `mac-security` | Bounded read-only macOS security evidence, persistence fingerprints and coverage-aware drift | `mac-security scan --json`, `mac-security baseline --file NEW_PATH --json`, `mac-security diff --file BASELINE --json` | JSON stdout + summary stderr; explicit baseline creates a new `0600` file; use `.temp/security/` |
@@ -249,11 +249,90 @@ The pinned digest is framed and domain-separated:
 `TestVPNPackageDigestVectors`; a value computed as plain
 `sha256(vpn-core || manifest.json)` is refused.
 
+First pin the owner's P-256 DER SubjectPublicKeyInfo with the helper's sudo
+installation step. Review its SHA-256 independently before using it:
+
 ```bash
-mac-infra-core vpn-core install --package /absolute/package --expect-digest <64-lowercase-hex>
-mac-infra-core vpn-core status
-mac-infra-core vpn-core rollback --expect-digest <previous-package-digest>
+mac-infra-core install --owner-key owner-presence.spki --expect-owner-key-sha256 <reviewed-key-sha256>
+mac-infra-core status
 ```
+
+Both owner-key flags are required together. The CLI opens the regular source
+file with `O_NOFOLLOW`, bounds it to 1 KiB, checks its SHA-256 and P-256 SPKI
+before elevation, and prints `owner key:` and `owner key sha256:`. The privileged
+installer publishes that already-reviewed byte snapshot through its protected
+staging/publication flow as `root:wheel`, mode `0444`, at
+`/Library/PrivilegedHelperTools/works.relux.mac-infra/owner-presence.spki`.
+Installing the helper without these flags preserves an existing pin. Status
+reports whether a safe owner key is pinned and its SHA-256; an unsafe pin is an
+error. The pin can only be set/replaced through a privileged installation.
+
+Each package mutation then needs three steps. The owner-presence key must be
+configured to require Touch ID or the login password; the helper verifies its
+pinned public key and signature, not the hardware or access policy of the
+signer. Creation/provisioning of that key is separate from this installer.
+
+```bash
+# 1. Obtain a statement, written exclusively to a new 0600 file.
+mac-infra-core vpn-core authorize --action install --expect-digest <64-lowercase-hex> --out AUTHZ
+# 2. Review the statement, its printed SHA-256 and short package digest; sign as owner.
+mac-keyvault sign alexis/owner-presence --data-file AUTHZ --format ecdsa-der-low-s --out SIG
+# 3. Submit the same digest and the signed statement.
+mac-infra-core vpn-core install --package /absolute/package --expect-digest <64-lowercase-hex> --authorization AUTHZ --signature SIG
+mac-infra-core vpn-core status
+
+# Rollback needs its own fresh authorization for the previous package's digest.
+mac-infra-core vpn-core authorize --action rollback --expect-digest <previous-package-digest> --out ROLLBACK_AUTHZ
+mac-keyvault sign alexis/owner-presence --data-file ROLLBACK_AUTHZ --format ecdsa-der-low-s --out ROLLBACK_SIG
+mac-infra-core vpn-core rollback --expect-digest <previous-package-digest> --authorization ROLLBACK_AUTHZ --signature ROLLBACK_SIG
+```
+
+The statement has exactly these lines, in this order, including the final LF.
+Digest and nonce are each exactly 64 lowercase hexadecimal characters; expiry
+is RFC3339 UTC at seconds precision:
+
+```text
+works.relux.vpn-core.authorize/v1
+action=<install|rollback>
+target=vpn-core
+digest=<64 lowercase hex>
+nonce=<64 lowercase hex>
+expires=2026-10-19T14:02:03Z
+```
+
+The daemon generates 32 random nonce bytes, keeps at most eight pending
+statements in memory, and evicts the oldest when issuing a ninth. Statements
+expire after 120 seconds (represented at seconds precision), bind the kernel
+peer UID, action, target and package digest, and do not survive daemon restart.
+Multiple pending statements may coexist, including for the same digest.
+A recognized nonce is consumed before binding, expiry or signature checks and
+also remains consumed if the subsequent package operation fails. A replay is
+refused even after a newer statement has been issued. Authorization/signature
+inputs must be regular files opened with `O_NOFOLLOW`, each at most 4 KiB.
+
+Before staging, package/plist changes or activation, both install and rollback
+check in order: a safe pinned key, authorization/signature presence, strict
+statement syntax, pending nonce plus exact issued-byte/request binding and
+expiry, then ECDSA P-256 over SHA-256 of the complete statement. Signatures must
+be ASN.1 DER with low S (`s <= n/2`). Authorize also rereads the safe pin. Pin
+reads use `O_NOFOLLOW` and `fstat`: regular file, UID 0, mode exactly `0444`, one
+hard link, at most 1 KiB, valid P-256 SPKI DER.
+
+| Refusal code | Meaning |
+| --- | --- |
+| `owner_key_missing` | No owner key is pinned. |
+| `owner_key_unsafe` | Pin open, metadata, size, or P-256 SPKI validation failed. |
+| `authorization_missing` | Authorization or signature bytes are absent. |
+| `authorization_invalid` | Statement layout/encoding is not exactly v1. |
+| `authorization_unknown` | Nonce is unknown, consumed, evicted, or lost on restart. |
+| `authorization_mismatch` | Issued bytes, peer UID, action, target or request digest differ. |
+| `authorization_expired` | Pending statement has reached its expiry. |
+| `owner_signature_invalid` | Wrong key/message, malformed DER, high S, or failed verification. |
+| `invalid_digest` / `invalid_request` | Bad digest or unsupported action/arguments. |
+
+Every refusal is audited through the existing audit flow without changing
+package/plist bytes or invoking launchctl. Audit I/O failures remain reported
+as `audit_failed` under the existing policy.
 
 The daemon re-executes its resolved, trust-checked binary with the hidden
 `_vpn-core-source PACKAGE_DIR` command as the authorized client UID/GID, with

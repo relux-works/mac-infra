@@ -14,18 +14,19 @@ import (
 	"github.com/relux-works/mac-infra/internal/maccore"
 )
 
-// Valid CLI verbs send only the fixed target, package and digest; malformed flags/positionals never reach the helper.
+// Claim: valid mutation verbs send the fixed target, package, digest and authorization/signature bytes; malformed flags/positionals never reach the helper.
 func TestVPNCoreCLI(t *testing.T) {
 	old := callVPNCore
 	t.Cleanup(func() { callVPNCore = old })
+	authz, sig := vpnCLIInputs(t)
 	digest := strings.Repeat("a", 64)
 	for _, tc := range []struct {
 		args   []string
 		code   int
 		action maccore.Action
 	}{
-		{[]string{"install", "--package", "/fixture/pkg", "--expect-digest", digest}, 0, maccore.ActionVPNCoreInstall},
-		{[]string{"rollback", "--expect-digest", digest}, 0, maccore.ActionVPNCoreRollback},
+		{[]string{"install", "--package", "/fixture/pkg", "--expect-digest", digest, "--authorization", authz, "--signature", sig}, 0, maccore.ActionVPNCoreInstall},
+		{[]string{"rollback", "--expect-digest", digest, "--authorization", authz, "--signature", sig}, 0, maccore.ActionVPNCoreRollback},
 		{[]string{"status"}, 0, maccore.ActionVPNCoreStatus},
 		{nil, 2, ""}, {[]string{"other"}, 2, ""}, {[]string{"install", "--package", "/fixture/pkg"}, 2, ""},
 		{[]string{"install", "--package", "relative", "--expect-digest", digest}, 2, ""},
@@ -42,7 +43,7 @@ func TestVPNCoreCLI(t *testing.T) {
 				if cfg != maccore.DefaultServiceConfig() || r.Action != tc.action || r.VPNCore.Target != "vpn-core" {
 					t.Fatalf("request=%+v", r)
 				}
-				if tc.action != maccore.ActionVPNCoreStatus && r.VPNCore.ExpectedDigest != digest {
+				if tc.action != maccore.ActionVPNCoreStatus && (r.VPNCore.ExpectedDigest != digest || string(r.VPNCore.Authorization) != "statement" || string(r.VPNCore.Signature) != "signature") {
 					t.Fatal("unpinned request")
 				}
 				return maccore.Response{OK: true, VPNCore: &maccore.VPNCoreStatus{State: "installed"}}, nil
@@ -65,8 +66,9 @@ func TestVPNCoreCLIRefusal(t *testing.T) {
 	callVPNCore = func(maccore.ServiceConfig, maccore.Request) (maccore.Response, error) {
 		return maccore.Response{ErrorCode: "restart_failed", VPNCore: &maccore.VPNCoreStatus{State: "restart_failed", RecoveryPath: "/fixture/previous"}}, errors.New("restart failed")
 	}
+	authz, sig := vpnCLIInputs(t)
 	var out, err bytes.Buffer
-	if run([]string{"vpn-core", "rollback", "--expect-digest", strings.Repeat("a", 64)}, &out, &err) != 1 || !strings.Contains(err.String(), "restart_failed") || !strings.Contains(out.String(), "/fixture/previous") {
+	if run([]string{"vpn-core", "rollback", "--expect-digest", strings.Repeat("a", 64), "--authorization", authz, "--signature", sig}, &out, &err) != 1 || !strings.Contains(err.String(), "restart_failed") || !strings.Contains(out.String(), "/fixture/previous") {
 		t.Fatalf("out=%s err=%s", &out, &err)
 	}
 }
@@ -129,4 +131,17 @@ func TestVPNCoreSourceCLI(t *testing.T) {
 			t.Fatalf("invalid refusal=%s", &diagnostics)
 		}
 	}
+}
+
+func vpnCLIInputs(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	authz, sig := filepath.Join(dir, "authorization"), filepath.Join(dir, "signature")
+	if err := os.WriteFile(authz, []byte("statement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sig, []byte("signature"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return authz, sig
 }
