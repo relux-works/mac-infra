@@ -43,9 +43,11 @@ const (
 
 // Production wiring; tests swap these for recording stores and a temp lock.
 var (
-	newBackend = func() keyvault.Backend { return keyvault.NewSecurityStore() }
-	lockPath   = keyvault.DefaultLockPath
-	now        = time.Now
+	newBackend = func() keyvault.Backend {
+		return keyvault.RoutedBackend{Keychain: keyvault.NewSecurityStore(), Enclave: keyvault.DefaultEnclaveStore()}
+	}
+	lockPath = keyvault.DefaultLockPath
+	now      = time.Now
 )
 
 func main() {
@@ -418,9 +420,9 @@ func runInit(args []string, out output) int {
 	var meta metaFlags
 	fs.Var(&meta, "meta", "k=v string entry; repeatable")
 	metaJSON := fs.String("meta-json", "", "JSON object file with string, number and bool values")
-	enclave := fs.Bool("enclave", false, "store the pair in the Secure Enclave; refuses with -34018 on an unprovisioned binary")
+	enclave := fs.Bool("enclave", false, "create the pair in the Secure Enclave (CryptoKit blob, needs mac-keyvault-enclave; never falls back to the keychain)")
 	keychain := fs.Bool("keychain", false, "store the pair in the login keychain (default)")
-	userPresence := fs.Bool("user-presence", false, "require biometry or passcode for private-key use; refuses with -34018 on an unprovisioned binary")
+	userPresence := fs.Bool("user-presence", false, "with --enclave: Touch ID for every signature (current fingers only, no password fallback); on the keychain store it refuses with -34018 on an unprovisioned binary")
 	positional, err := parseFlags(fs, args)
 	if err != nil {
 		return out.fail(err)
@@ -1062,9 +1064,13 @@ Usage:
 sign takes a SHA-256 digest (--digest) or hashes --data-file/--stdin itself and says so;
 it emits strict DER with low-S (or --raw r||s). verify judges the digest, the signature
 and a key (vault address or --spki FILE): exit 0 verified, 1 not, 3 high-S refused.
-Raw labels are refused as foreign_label. --enclave and --user-presence fail with
-missing_entitlement (OSStatus -34018) when the binary has no provisioning profile;
-there is no silent fallback. --extraction agent must be typed literally.
+Raw labels are refused as foreign_label. --enclave creates the pair in the Secure
+Enclave through the mac-keyvault-enclave helper and keeps its device-bound blob under
+~/Library/Application Support/mac-infra/keyvault/enclave; with --user-presence every
+signature asks for Touch ID (the currently enrolled fingers; no password fallback;
+re-enrolling fingers makes the key unusable). --user-presence on the keychain store
+fails with missing_entitlement (OSStatus -34018) on a binary without a provisioning
+profile. There is never a fallback between stores. --extraction agent must be typed literally.
 signer serve binds one address and speaks JSON lines (contract 1) on stdin/stdout for a
 consumer such as kvctl: hello line, then {id, op: describe|pub|sign|verify, ...} ->
 {id, ok, result|error}; errors never end the stream, EOF exits 0.

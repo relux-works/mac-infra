@@ -168,6 +168,8 @@ func streamCodeDrivers(t *testing.T) map[string]func(t *testing.T) (args []strin
 			return serve, sign("")
 		},
 		signerclient.CodeUnsupportedPrimitive: func(t *testing.T) ([]string, string) {
+			// The memory store serves the keychain only, so an enclave
+			// record is a primitive this backend does not serve.
 			withRecord(t, func(rec *keyvault.Record, _ *keyvault.Item) { rec.Store = keyvault.StoreEnclave })
 			return serve, sign("")
 		},

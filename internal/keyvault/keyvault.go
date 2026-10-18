@@ -62,10 +62,13 @@ const (
 
 // Item is what the Backend stores: a label, the raw application tag, and the
 // DER SubjectPublicKeyInfo of the public half (empty when unreadable).
+// Problem is set when the store could not trust the item at all (an unsafe
+// or unreadable Secure Enclave key file); such an item is listed, never used.
 type Item struct {
-	Label string
-	Tag   []byte
-	SPKI  []byte
+	Label   string
+	Tag     []byte
+	SPKI    []byte
+	Problem string
 }
 
 // Key is one managed item with its decoded record.
@@ -136,6 +139,20 @@ type Backend interface {
 	// It is the only operation that uses private material and the
 	// material never leaves Security.framework.
 	Sign(label string, digest []byte) ([]byte, error)
+}
+
+// StoreServer is implemented by a Backend that says which stores it can
+// operate on. A Backend without it serves the login keychain only, as every
+// backend before the Secure Enclave store did.
+type StoreServer interface {
+	Serves(store StoreKind) bool
+}
+
+func (m *Manager) serves(store StoreKind) bool {
+	if server, ok := m.backend.(StoreServer); ok {
+		return server.Serves(store)
+	}
+	return store == StoreKeychain
 }
 
 // ErrNotFound reports an address with no key pair behind it.
@@ -236,6 +253,9 @@ func (m *Manager) SetClock(now func() time.Time) {
 
 func keyOf(item Item) Key {
 	rec, problem := DecodeRecord(item.Tag)
+	if item.Problem != "" {
+		problem = item.Problem
+	}
 	return Key{Label: item.Label, Record: rec, SPKI: item.SPKI, RecordProblem: problem}
 }
 
@@ -600,7 +620,10 @@ func (m *Manager) authorize(key Key, operation string) error {
 	}
 	primitive, ok := LookupPrimitive(rec)
 	if !ok {
-		return &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("%s is (%s, %s, %s), a primitive this revision has no registry row for", key.Label, rec.Kind, rec.Algorithm, rec.Store), Hint: "only (key, ec-p256, keychain) performs operations in this revision"}
+		return &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("%s is (%s, %s, %s), a primitive this revision has no registry row for", key.Label, rec.Kind, rec.Algorithm, rec.Store), Hint: "only (key, ec-p256, keychain) and (key, ec-p256, enclave) perform operations in this revision"}
+	}
+	if !m.serves(rec.Store) {
+		return &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("%s is (%s, %s, %s), a store this vault's backend does not serve", key.Label, rec.Kind, rec.Algorithm, rec.Store), Hint: "the Secure Enclave store needs mac-keyvault-enclave next to the mac-keyvault binary; setup.sh builds both"}
 	}
 	var row *Operation
 	for i := range primitive.Operations {

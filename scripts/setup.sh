@@ -157,6 +157,15 @@ fi
 if [[ "$KEYVAULT_DECISION" == build ]]; then
   echo "Building mac-keyvault..."
   go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-keyvault" ./cmd/mac-keyvault
+  # The Secure Enclave helper sits next to mac-keyvault, which runs it by that
+  # path only. Its blobs are bound to this Mac, not to the helper binary, so
+  # rebuilding it never strands a key.
+  if command -v swiftc >/dev/null 2>&1; then
+    echo "Building mac-keyvault-enclave..."
+    swiftc -O -o "$BUILD_DIR/mac-keyvault-enclave" "$PROJECT_ROOT/cmd/mac-keyvault-enclave/main.swift"
+  else
+    echo "swiftc not found: mac-keyvault-enclave not built; --enclave keys are refused as unsupported_primitive" >&2
+  fi
 else
   echo "Keeping the existing bin/mac-keyvault (keyvault keys trust exactly this binary; see --rebuild-keyvault)"
 fi

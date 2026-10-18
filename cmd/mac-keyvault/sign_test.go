@@ -502,12 +502,13 @@ func TestRunSignPolicyGates(t *testing.T) {
 		code    int
 		errCode string
 	}{
-		"verify only":     {func(r *keyvault.Record) { r.Usages = []string{"verify"} }, exitRefused, keyvault.CodeUsageRefused},
-		"wrap only":       {func(r *keyvault.Record) { r.Usages = []string{"wrap"} }, exitRefused, keyvault.CodeUsageRefused},
-		"expired":         {func(r *keyvault.Record) { r.Validity.NotAfter = &past }, exitRefused, keyvault.CodeExpired},
-		"expires now":     {func(r *keyvault.Record) { r.Validity.NotAfter = &exact }, exitRefused, keyvault.CodeExpired},
-		"no registry row": {func(r *keyvault.Record) { r.Store = keyvault.StoreEnclave }, exitFailure, keyvault.CodeUnsupportedPrimitive},
-		"forged title":    {func(r *keyvault.Record) { r.Title = strings.Repeat("x", 81) }, exitRefused, keyvault.CodeMetadataUnknown},
+		"verify only": {func(r *keyvault.Record) { r.Usages = []string{"verify"} }, exitRefused, keyvault.CodeUsageRefused},
+		"wrap only":   {func(r *keyvault.Record) { r.Usages = []string{"wrap"} }, exitRefused, keyvault.CodeUsageRefused},
+		"expired":     {func(r *keyvault.Record) { r.Validity.NotAfter = &past }, exitRefused, keyvault.CodeExpired},
+		"expires now": {func(r *keyvault.Record) { r.Validity.NotAfter = &exact }, exitRefused, keyvault.CodeExpired},
+		// The memory store serves the keychain only.
+		"store not served": {func(r *keyvault.Record) { r.Store = keyvault.StoreEnclave }, exitFailure, keyvault.CodeUnsupportedPrimitive},
+		"forged title":     {func(r *keyvault.Record) { r.Title = strings.Repeat("x", 81) }, exitRefused, keyvault.CodeMetadataUnknown},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -564,7 +565,7 @@ func TestRunSignPolicyGates(t *testing.T) {
 			}
 		})
 	}
-	t.Run("verify by label no registry row", func(t *testing.T) {
+	t.Run("verify by label store not served", func(t *testing.T) {
 		store := stored("gate", func(r *keyvault.Record) { r.Store = keyvault.StoreEnclave })
 		useStore(t, store)
 		if code, resp, raw := runJSON(t, "verify", "test/gate", "--digest", digest, "--sig", strings.Repeat("11", 64), "--raw"); code != exitFailure || resp.Error.Code != keyvault.CodeUnsupportedPrimitive {

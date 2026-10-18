@@ -38,8 +38,17 @@ const ViaReserved = "reserved"
 
 // registry is the single table describe, list and the gates are driven from.
 // Adding a primitive is one row plus its backend implementation; no command
-// grows a special case. This revision holds exactly one row.
+// grows a special case. The Secure Enclave row signs, verifies and exports
+// its public half; nothing else is reserved for it.
 var registry = map[PrimitiveKey]Primitive{
+	{Kind: KindKey, Algorithm: AlgorithmECP256, Store: StoreEnclave}: {
+		Exposure: ExposureNever,
+		Operations: []Operation{
+			{Name: OperationSign, Input: "sha256-digest", Output: "ecdsa-der-low-s|ecdsa-raw", Via: "sign", requires: "sign", expires: true},
+			{Name: OperationVerify, Input: "sha256-digest+signature", Output: "verdict", Via: "verify"},
+			{Name: "export-public", Input: "", Output: "spki-der|spki-pem|jwk", Via: "pub"},
+		},
+	},
 	{Kind: KindKey, Algorithm: AlgorithmECP256, Store: StoreKeychain}: {
 		Exposure: ExposureNever,
 		Operations: []Operation{

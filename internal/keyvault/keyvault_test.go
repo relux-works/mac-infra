@@ -1146,7 +1146,6 @@ func TestOperationsRegistry(t *testing.T) {
 	for name, mutate := range map[string]func(*Record){
 		"unknown algorithm": func(r *Record) { r.Algorithm = AlgorithmECP384 },
 		"unknown store":     func(r *Record) { r.Store = StoreUnknown },
-		"enclave store":     func(r *Record) { r.Store = StoreEnclave },
 		"public-key kind":   func(r *Record) { r.Kind = KindPublicKey },
 		"schema 1":          func(r *Record) { *r, _ = DecodeRecord([]byte("mac-keyvault/1 store=keychain")) },
 	} {
@@ -1157,8 +1156,15 @@ func TestOperationsRegistry(t *testing.T) {
 			t.Fatalf("%s: ops=%v findings=%v exposure=%s", name, ops, findings, Exposure(other))
 		}
 	}
-	if _, ok := LookupPrimitive(testRecord(tl("x", 1))); !ok || len(registry) != 1 {
-		t.Fatalf("registry must hold exactly the ec-p256 keychain key row, has %d", len(registry))
+	// The Secure Enclave row signs, verifies and exports its public half,
+	// and nothing reserved: no ECDH, ECIES or private export is advertised.
+	enclave := testRecord(tl("ops", 1))
+	enclave.Store = StoreEnclave
+	if ops, findings := Operations(enclave, now); names(ops) != "ecdsa-sha256-sign,ecdsa-sha256-verify,export-public" || len(findings) != 0 || Exposure(enclave) != ExposureNever {
+		t.Fatalf("enclave: ops=%s findings=%v exposure=%s", names(ops), findings, Exposure(enclave))
+	}
+	if _, ok := LookupPrimitive(testRecord(tl("x", 1))); !ok || len(registry) != 2 {
+		t.Fatalf("registry must hold exactly the ec-p256 keychain and enclave key rows, has %d", len(registry))
 	}
 }
 

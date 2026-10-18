@@ -141,6 +141,9 @@ func goldenClock() time.Time { return time.Date(2026, 9, 15, 10, 0, 0, 0, time.U
 // os_status, missing_entitlement, failure in the hello).
 func goldenSessions(t *testing.T, material goldenMaterial) map[string]*SignerServer {
 	t.Helper()
+	// Every valid key record has a registry row since the enclave row, so
+	// the no-row session takes that row away for the test.
+	withoutRegistryRow(t, PrimitiveKey{Kind: KindKey, Algorithm: AlgorithmECP256, Store: StoreEnclave})
 	sessions := map[string]*SignerServer{}
 	build := func(name string, adjust func(*Record, *Item, *cannedStore)) {
 		label := tl(name, 1)
@@ -841,4 +844,18 @@ func TestSignerServePinsGenerationAcrossRotate(t *testing.T) {
 	if err != nil || json.Unmarshal(pinnedHello.Result, &h) != nil || h.Version != 1 || h.Label != v1 {
 		t.Fatalf("version-1 session after rotate: %v %+v", err, h)
 	}
+}
+
+// withoutRegistryRow removes one registry row until the test ends. The
+// package's tests do not run in parallel, so the shared table is safe to
+// change for one test.
+func withoutRegistryRow(t *testing.T, key PrimitiveKey) {
+	t.Helper()
+	row, ok := registry[key]
+	delete(registry, key)
+	t.Cleanup(func() {
+		if ok {
+			registry[key] = row
+		}
+	})
 }

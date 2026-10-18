@@ -101,7 +101,9 @@ it below `--confirm-timeout`). Only an explicit `Sign` or `Unlock` press exits
 
 The dialog is consent UX, not a hardware boundary. A process running as the
 same user with Accessibility permission could press the button by script.
-`--user-presence` (Touch ID) needs a provisioned, signed build.
+A hardware boundary is `--enclave --user-presence`: a Secure Enclave key that
+asks for Touch ID on every signature, so no process can sign without the
+owner's finger. It suits owner keys, not autonomous agent keys.
 
 ### Autonomous signing keys: SSHSIG namespace only and audit
 
@@ -159,8 +161,9 @@ Residuals:
 ## 1. Create new vault keys and public files
 
 Run as the owner with the installed reviewed `mac-keyvault`; use the same
-binary for creation and private operations. Do not use `--enclave` or
-`--user-presence` on the current ad-hoc signed build. These example addresses
+binary for creation and private operations. Use `--enclave --user-presence`
+only for an owner key that must need Touch ID for every signature; an agent key
+stays in the login keychain. These example addresses
 must be unused. Keep authentication and signing as separate new keys; omit
 the signing key and its agent selection when the new service needs only auth.
 

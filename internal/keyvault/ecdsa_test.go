@@ -223,7 +223,9 @@ func TestManagerSignGates(t *testing.T) {
 		"usages without sign": {func(r *Record) { r.Usages = []string{"verify"} }, CodeUsageRefused, false},
 		"expired one hour":    {func(r *Record) { na := NewTime(now.Add(-time.Hour)); r.Validity.NotAfter = &na }, CodeExpired, false},
 		"expired exactly now": {func(r *Record) { na := NewTime(now); r.Validity.NotAfter = &na }, CodeExpired, false},
-		"no registry row":     {func(r *Record) { r.Store = StoreEnclave }, CodeUnsupportedPrimitive, true},
+		// The fake backend serves the keychain only: an enclave record is
+		// refused by the store-served gate before any private operation.
+		"store not served": {func(r *Record) { r.Store = StoreEnclave }, CodeUnsupportedPrimitive, true},
 	}
 	for name, tc := range refused {
 		t.Run(name, func(t *testing.T) {
@@ -319,7 +321,18 @@ func TestManagerPublicKeyFor(t *testing.T) {
 			}
 		})
 	}
+	// No registry row (the enclave row taken away) and a store the backend
+	// does not serve both refuse verify as unsupported_primitive.
 	t.Run("no registry row", func(t *testing.T) {
+		withoutRegistryRow(t, PrimitiveKey{Kind: KindKey, Algorithm: AlgorithmECP256, Store: StoreEnclave})
+		_, m := build(t, func(r *Record) { r.Store = StoreEnclave }, true)
+		_, err := m.PublicKeyFor(a)
+		var refusal *Refusal
+		if !errors.As(err, &refusal) || refusal.Code != CodeUnsupportedPrimitive || !refusal.Failure || !strings.Contains(refusal.Message, "no registry row") {
+			t.Fatalf("%v", err)
+		}
+	})
+	t.Run("store not served", func(t *testing.T) {
 		_, m := build(t, func(r *Record) { r.Store = StoreEnclave }, true)
 		_, err := m.PublicKeyFor(a)
 		var refusal *Refusal
