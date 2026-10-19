@@ -194,6 +194,11 @@ Apple-anchored signature, and the firewall can never be turned off through it.
 schema, rollback semantics and limits. A `rollback_failed` outcome is an
 incident: report it with the printed drift.
 
+For passive observation, use `mac-firewall watch run|digest|status|classify`
+with an explicit watch config. See [Watch (shadow mode)](references/firewall.md#watch-shadow-mode):
+proposed labels only, loopback embeddings, sanitized private events, fail-to-decide.
+It never changes firewall state or uses the privileged helper.
+
 ## Privileged Daemon Installation Trust
 
 Run `mac-infra-core install-digest`, review the printed sha256, then

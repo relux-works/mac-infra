@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Documentation only. Replace every /ABSOLUTE/... path before manual use.
+     The state directory must already exist with mode 0700 for launchd logs. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>works.relux.mac-firewall-watch</string>
+  <key>ProgramArguments</key><array>
+    <string>/ABSOLUTE/bin/mac-firewall</string>
+    <string>watch</string><string>run</string>
+    <string>--config</string><string>/ABSOLUTE/firewall-watch.json</string>
+  </array>
+  <key>ProcessType</key><string>Background</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/ABSOLUTE/state/watch.stdout.log</string>
+  <key>StandardErrorPath</key><string>/ABSOLUTE/state/watch.stderr.log</string>
+</dict></plist>

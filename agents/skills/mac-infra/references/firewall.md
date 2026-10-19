@@ -1,7 +1,7 @@
 # Firewall management (`mac-firewall`)
 
 `mac-firewall` manages the macOS application firewall from a declarative
-config. Every query and change runs inside the installed `mac-infra-core`
+config. Management queries and changes run inside the installed `mac-infra-core`
 root helper, so the operator needs sudo once (helper install) and never per
 change. The helper re-validates every request; the CLI's own checks are a
 convenience.
@@ -163,3 +163,168 @@ later `--expect-sha256`) and an empty or malformed digest.
 - Entries that socketfilterfw reports by bundle id cannot be removed in
   exact mode.
 - No packet-filter (`pf`) management.
+
+## Watch (shadow mode)
+
+`watch` is a separate, unprivileged observer. It never blocks traffic, changes
+firewall settings, or calls `mac-infra-core`. Every label is a proposal with
+`mode: "shadow"`; only `new-events.flag` notifies the keeper. No network
+notification or a2a message is sent. Embeddings use a watcher-owned foreground
+llama-server child on numeric IPv4 loopback only, with proxies and HTTP redirects
+refused. The pinned model SHA-256 is verified before starting that child.
+
+```sh
+mac-firewall watch run --config /ABSOLUTE/firewall-watch.json
+mac-firewall watch digest --config /ABSOLUTE/firewall-watch.json --since 24h
+mac-firewall watch digest --config /ABSOLUTE/firewall-watch.json --since 24h --json
+mac-firewall watch status --config /ABSOLUTE/firewall-watch.json --json
+mac-firewall watch classify --config /ABSOLUTE/firewall-watch.json --fixtures /ABSOLUTE/fixtures-v2-heldout.jsonl --json
+```
+
+`run` stays in the foreground. SIGINT/SIGTERM stop collection and reap its
+llama-server child. Exit codes are 0 success, 1 refused/failed, 2 bad usage.
+`status` reports last persisted backend health with its observation time, not
+a live health probe; a stale timestamp may mean the watcher has stopped.
+`digest` reads retained new-item events grouped by proposed label and app.
+Repeats update state counters/last_seen without producing another item event.
+A deny spike emits one additional event per key per fixed window starting at
+its first deny (threshold is inclusive). Dedup keys contain source, app,
+verdict, port, and remote class; different subnets within one class collapse.
+
+### Explicit configuration
+
+Every field below is required; there are no implicit behaviour defaults.
+The numbers here are examples, not recommended production policy. All paths
+must be absolute. The config must be a regular file owned by the invoking
+user and must deny group/world writes. Unknown fields and trailing JSON are
+refused. Port is an integer in 1..65535, always bound to `127.0.0.1`.
+
+```json
+{
+  "schema": "mac-infra.firewall-watch/v1",
+  "state_dir": "/ABSOLUTE/state",
+  "max_entries": 10000,
+  "retention_days": 14,
+  "nettop_interval": "30s",
+  "deny_spike_count": 10,
+  "deny_spike_window": "5m",
+  "k": 3,
+  "novelty_similarity": 0.5,
+  "classifier_timeout": "120s",
+  "llama_server": "/opt/homebrew/bin/llama-server",
+  "model": "/ABSOLUTE/Qwen3-Embedding-0.6B-Q8_0.gguf",
+  "model_sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+  "labelled_pool": "/ABSOLUTE/fixtures-v1.jsonl",
+  "port": 18191
+}
+```
+
+`max_entries` independently caps dedup entries, signature cache entries, and
+retained events in total across all daily files. Dedup/events also expire by
+`retention_days`. Oldest last_seen dedup entries are evicted first. Evicted
+items can become new again; evicted executable cache entries can be inspected
+again. Signature inspection runs once per cached executable path, with
+`/usr/bin/codesign -dv --verbose=2`. Bundle IDs and process names without paths
+have unknown signers; this is observation metadata, not signature verification.
+
+The state directory must be owned by the caller, mode `0700`, and not a symlink.
+`state.json`, `events-YYYY-MM-DD.jsonl`, and `new-events.flag` are `0600`.
+Writes use same-directory temporary files and rename. State is authoritative;
+daily files are rebuilt atomically from its retained events, recovering
+projections after an interrupted write. The flag contains the latest event
+RFC3339 timestamp. A per-directory advisory lock refuses concurrent collectors.
+Directory ancestors and same-user concurrent replacement are not a security
+boundary. The files do not form a multi-file transaction, and sudden power
+loss durability is not guaranteed by rename alone.
+
+Raw peer IPs are never emitted or persisted. IPv4 peers become `/24`, IPv6
+peers `/64`; classes are `lan`, `tailnet` (`100.64/10`,
+`fd7a:115c:a1e0::/48`), `loopback`, and `internet-raw-ip`. IP literals in names
+and unknown message samples are redacted as well. Samples mask digits and
+are bounded to 16 templates of 256 bytes. Invalid/truncated/oversize JSON
+increments a separate counter; unknown `fw` shapes are counted and sampled.
+
+### Proposals and limits
+
+Hard rules precede policy: inbound allow by unsigned/ad-hoc/no-designated-
+requirement code, every non-allow ALF verdict (including unknown), and deny
+spikes propose `decide`. Nettop's `observed` sentinel is traffic observation,
+not an ALF allow verdict. Policy branches preserve the supplied benchmark's
+ordering, with rule IDs, and also recognize versioned interpreter names.
+The labelled embedding pool is loaded in memory at startup. Weighted kNN uses
+the benchmark instruction prefix and feature rendering, cosine similarity,
+and riskier-label tie breaking. A neighbour below the explicit novelty
+threshold gives `decide`/`novel`. Timeout, invalid response, or embedding failure
+gives `decide`/`classifier_unavailable`, never `noise`; deterministic rules still
+work. Startup errors (including hash mismatch or occupied port) refuse `run`
+and `classify` with exit 1. Pool failures leave the deterministic observer
+running with unmatched proposals failing to decide; it retries pool loading
+on nettop ticks. Item text is data; injection-looking names do not alter rules.
+
+The fixture scores are **synthetic and self-labelled by the policy author**;
+they are not evidence of accuracy on real host traffic. The copied policy is
+in `internal/security/firewallwatch/testdata/LABEL_POLICY.md`. The v1 corpus
+also contains a policy inconsistency: its hidden `.local/bin/claude` example
+is labelled digest while the benchmark's hidden-path rule says decide. The
+implementation preserves the conservative rule.
+
+The deny log shape has not been observed yet. Only verdict `1` is read as
+allow; every other code stays `verdict_code:N`, never guessed as deny or allow.
+A spike counts repeated known non-allow codes, not unknown-format log messages.
+ALF lines carry no port and direction; ports come from nettop sampling, which
+misses short flows. The sources are deliberately separate and are not joined
+by PID or guessed direction. ALF allow observations with missing direction
+can therefore reach kNN with unknown features. Nettop uses one numeric CSV
+sample (`/usr/bin/nettop -L 1 -n -x -J bytes_out`) per configured interval,
+including TCP/UDP rows with positive outbound bytes. This establishes outbound
+traffic, not who initiated a TCP connection; cumulative byte observations are
+not accurate per-interval upload deltas. Public numeric peers conservatively
+have class `internet-raw-ip` even when the app originally used DNS. Unknown
+CSV rows are counted; DNS-only and malformed endpoints never become flows.
+The stream is `/usr/bin/log stream --style ndjson --info --predicate
+'subsystem == "com.apple.ALF.ApplicationFirewall"'`. If its pipe ends, the
+watcher exits for the supervisor to restart; nettop errors appear in status.
+The line queue is bounded and classification is synchronous, so sustained
+backpressure may lose upstream log records. No firewall-state-change source,
+packet capture, reverse DNS, executable-path resolution by PID, or live host
+collector completeness is claimed.
+
+### Optional model verification and LaunchAgent example
+
+Ordinary Go tests use a loopback fake embedding service and skip the real
+model test. On a host with the exact pinned model and llama-server, run:
+
+```sh
+MAC_FIREWALL_REAL_MODEL=1 go test ./cmd/mac-firewall -run '^TestWatchRealModel$' -count=1 -v
+```
+
+The test invokes the `watch classify` command path on heldout v2 with the v1
+pool, `k=3`, novelty `0.5`, and timeout `120s`. It requires accuracy >=0.85 and
+zero decide-to-noise errors on these synthetic, self-labelled fixtures. It
+starts/reaps only its foreground child, does not sample host traffic, and
+installs no service. The test pins the specified Qwen3 model path and SHA-256.
+
+On a sandbox without Metal access, the equivalent CPU run is:
+
+```sh
+LLAMA_ARG_DEVICE=none LLAMA_ARG_N_GPU_LAYERS=0 LLAMA_ARG_KV_OFFLOAD=0 MAC_FIREWALL_REAL_MODEL=1 go test ./cmd/mac-firewall -run '^TestWatchRealModel$' -count=1 -v
+```
+
+Measured on 2026-10-19, llama-server build 10621, CPU backend: 29/31
+correct (93.55%), macro F1 0.9346, decide-to-noise 0; latency p50 140.5ms,
+p95 237.6ms. These fixtures are synthetic and self-labelled by the policy
+author. The default Metal run failed to allocate a command queue in the
+execution sandbox; setting only GPU layers to zero still initialized Metal.
+
+Measured on 2026-10-19 on the host (M1 Max, Metal, same build and model):
+28/31 correct (90.3%), macro F1 0.9009, decide-to-noise 0; latency p50
+20.7ms, p95 22.0ms. The two runs differ by one row because of numerics; on
+real events the accuracy is still unmeasured.
+
+[Example LaunchAgent](../assets/works.relux.mac-firewall-watch.plist) is
+**documentation only**, with `ProcessType=Background`, `KeepAlive`, and logs in
+the state dir. Replace all placeholder paths; create the private state dir
+and private stdout/stderr log files before any manual installation. Launchd's
+stdout/stderr logs are separate from bounded event retention and need their
+own operator log rotation. No installation/load/start command is provided or
+executed by the watch CLI.

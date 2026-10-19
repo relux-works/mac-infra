@@ -2,6 +2,7 @@
 // config through the mac-infra-core root helper. It never asks for sudo:
 // the helper is installed once and then serves the configured client user.
 // Plan is the default; only `apply --apply` changes the host.
+// The separate watch family is an unprivileged, shadow-only observer.
 package main
 
 import (
@@ -36,6 +37,7 @@ const usage = `mac-firewall status [--json]
 mac-firewall plan [--config PATH] [--json]
 mac-firewall apply [--config PATH] [--apply] [--json]
 mac-firewall init-config [--config PATH]
+mac-firewall watch run|digest|status|classify --config PATH (see watch help)
 mac-firewall version
 
 Config: ~/.config/mac-infra/firewall.json (schema mac-infra.firewall/v1) unless --config is given.
@@ -57,6 +59,8 @@ func run(args []string, out, errOut io.Writer) int {
 	case "version":
 		fmt.Fprintf(out, "mac-firewall %s %s %s\n", Version, Commit, BuildDate)
 		return 0
+	case "watch":
+		return runWatch(args[1:], out, errOut)
 	case "status", "plan", "apply", "init-config":
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n%s\n", command, usage)
