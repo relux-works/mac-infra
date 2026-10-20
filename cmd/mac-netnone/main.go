@@ -37,7 +37,7 @@ func runWith(ctx context.Context, args []string, out, errOut io.Writer, makeEngi
 	}
 	action := args[0]
 	if action == "help" || action == "--help" {
-		fmt.Fprintln(out, "mac-netnone prep --repo DIR --task TASK [--toolchain-dockerfile FILE]\nmac-netnone run --repo DIR --task TASK --out DIR [--toolchain-dockerfile FILE]\nmac-netnone selftest\nmac-netnone status\nmac-netnone stop\nprep/run/selftest: --max-load N (default CPU count), --cpus 4 --memory 8 --disk 40\nExit: 0 passed, 1 test/operational failure, 2 usage, 3 refused. Paths must be absolute existing directories.")
+		fmt.Fprintln(out, "mac-netnone prep --repo DIR --task TASK [--toolchain-dockerfile FILE]\nmac-netnone run --repo DIR --task TASK --out DIR [--toolchain-dockerfile FILE]\nmac-netnone selftest\nmac-netnone status\nmac-netnone stop\nprep/run/selftest: --arch arm64|amd64 (default arm64), --max-load N (default CPU count), --cpus 4 --memory 8 --disk 40\nExit: 0 passed, 1 test/operational failure, 2 usage, 3 refused. Paths must be absolute existing directories.")
 		return 0
 	}
 	if action == "version" {
@@ -60,6 +60,7 @@ func runWith(ctx context.Context, args []string, out, errOut io.Writer, makeEngi
 		flags.StringVar(&o.Out, "out", "", "absolute existing output directory")
 	}
 	if action == "prep" || action == "run" || action == "selftest" {
+		flags.StringVar(&o.Arch, "arch", "arm64", "container architecture: arm64 or amd64 (VZ Rosetta)")
 		flags.Float64Var(&o.MaxLoad, "max-load", 0, "maximum 5-minute load; default CPU count")
 		flags.IntVar(&o.CPUs, "cpus", 4, "VM CPUs")
 		flags.IntVar(&o.Memory, "memory", 8, "VM memory GiB")
@@ -72,6 +73,10 @@ func runWith(ctx context.Context, args []string, out, errOut io.Writer, makeEngi
 		return 2
 	}
 	if flags.NArg() != 0 {
+		return 2
+	}
+	if o.Arch != "arm64" && o.Arch != "amd64" {
+		fmt.Fprintln(errOut, "--arch must be arm64 or amd64")
 		return 2
 	}
 	invalid := false

@@ -238,6 +238,24 @@ func probeLines(output string) (string, string) {
 	}
 	return dns, tcp
 }
+
+// Require one exact architecture and ELF result from the same probe invocation.
+func probeArch(output, arch string) (string, string, bool) {
+	expected := "arch=aarch64 elf=183"
+	if arch == "amd64" {
+		expected = "arch=amd64 elf=62"
+	}
+	var observed []string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "arch=") || strings.HasPrefix(line, "elf=") {
+			observed = append(observed, line)
+		}
+	}
+	// Accept either ordering while rejecting duplicate or missing evidence.
+	sort.Strings(observed)
+	actual := strings.Join(observed, " ")
+	return expected, actual, len(observed) == 2 && actual == expected
+}
 func deniedTCP(s string) bool {
 	return strings.HasPrefix(s, "tcp=fail:") && (strings.Contains(s, "Network is unreachable") || strings.HasPrefix(s, "tcp=fail:java.net.NoRouteToHostException:"))
 }
@@ -313,6 +331,8 @@ func (s *session) selftest(ctx context.Context, o Options) error {
 		dns, tcp := probeLines(string(networked.Stdout))
 		add("prep DNS", "dns=ok", dns, dns == "dns=ok")
 		add("prep TCP", "tcp=ok", tcp, tcp == "tcp=ok")
+		expected, observed, archOK := probeArch(string(networked.Stdout), o.Arch)
+		add("prep arch", expected, observed, archOK)
 		warm := regexpPrepExit(string(networked.Stdout))
 		add("prep fixture", "task exit 0", fmt.Sprint(warm), warm == 0)
 		probeOptions := o
@@ -322,6 +342,8 @@ func (s *session) selftest(ctx context.Context, o Options) error {
 		dns, tcp = probeLines(string(probe.Stdout))
 		add("run DNS", "dns=fail:java.net.UnknownHostException", dns, probeErr == nil && probe.ExitCode == 0 && dns == "dns=fail:java.net.UnknownHostException")
 		add("run TCP", "unreachable network", tcp, probeErr == nil && probe.ExitCode == 0 && deniedTCP(tcp))
+		expected, observed, archOK = probeArch(string(probe.Stdout), o.Arch)
+		add("run arch", expected, observed, probeErr == nil && probe.ExitCode == 0 && archOK)
 		stamp, runErr := s.runTests(ctx, o, image)
 		var f *failure
 		expectedFailure := errors.As(runErr, &f) && f.code == 1

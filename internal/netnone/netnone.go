@@ -26,17 +26,27 @@ import (
 const Profile = "netnone"
 const BaseImage = "eclipse-temurin:17-jdk@sha256:fe947d993c32dd9cf651a4353a6ed723c2370b3a9d034ea4cab4775404ea531a"
 
+const BaseImageAMD64 = "eclipse-temurin:17-jdk@sha256:fc1394dc03c3de483ea03b14ccf0a076f772f7782aaeffc9d5a2cbde2ae5df0e"
+const BaseImageARM64 = "eclipse-temurin:17-jdk@sha256:c4378bc2c608f8ca536dc9a60a017a2d675501c55b00b2ac3db9b6a8200a3458"
+
+func baseImage(arch string) string {
+	if arch == "amd64" {
+		return BaseImageAMD64
+	}
+	return BaseImageARM64
+}
+
 //go:embed assets
 var assets embed.FS
 
 // Options are literal arguments, never interpolated into a host or guest script.
 type Options struct {
-	Repo, Task, Out, Toolchain string
-	MaxLoad                    float64
-	CPUs, Memory, Disk         int
+	Repo, Task, Out, Toolchain, Arch string
+	MaxLoad                          float64
+	CPUs, Memory, Disk               int
 }
 
-func DefaultOptions() Options { return Options{CPUs: 4, Memory: 8, Disk: 40} }
+func DefaultOptions() Options { return Options{Arch: "arm64", CPUs: 4, Memory: 8, Disk: 40} }
 
 type Engine struct {
 	Runner   Runner
@@ -105,6 +115,9 @@ func (e *Engine) execute(ctx context.Context, action string, o Options) error {
 	}
 	lifecycle := action == "prep" || action == "run" || action == "selftest"
 	if lifecycle {
+		if o.Arch != "arm64" && o.Arch != "amd64" {
+			return fail(2, "--arch must be arm64 or amd64")
+		}
 		if o.MaxLoad == 0 {
 			o.MaxLoad = float64(e.CPUCount())
 		}
@@ -158,7 +171,7 @@ func (e *Engine) execute(ctx context.Context, action string, o Options) error {
 	if o.Task == "" || strings.HasPrefix(o.Task, "-") {
 		return fail(2, "--task must be a nonempty Gradle task, not an option")
 	}
-	identity, err := toolchain(o.Toolchain)
+	identity, err := toolchain(o.Toolchain, o.Arch)
 	if err != nil {
 		return err
 	}
@@ -172,9 +185,9 @@ func (e *Engine) execute(ctx context.Context, action string, o Options) error {
 		if err != nil {
 			return err
 		}
-		rec, ok := records[recordKey(o.Repo, identity.SHA)]
-		if !ok || rec.Repo != o.Repo || rec.ToolchainSHA != identity.SHA || !imageID.MatchString(rec.Image) {
-			return fail(3, "refused: no prep record for this repo/toolchain; run mac-netnone prep first")
+		rec, ok := records[recordKey(o.Repo, identity.SHA, o.Arch)]
+		if !ok || rec.Repo != o.Repo || rec.ToolchainSHA != identity.SHA || rec.Arch != o.Arch || !imageID.MatchString(rec.Image) {
+			return fail(3, "refused: no prep record for this repo/toolchain/arch="+o.Arch+"; run mac-netnone prep first")
 		}
 		return s.lifecycle(ctx, o, func() error { _, err := s.runTests(ctx, o, rec.Image); return err })
 	}
@@ -229,6 +242,11 @@ func (s *session) lifecycle(ctx context.Context, o Options, work func() error) (
 		return fail(3, "refused: colima profile netnone is already running (not started by this invocation); stop it with mac-netnone stop")
 	}
 	args := []string{"start", "--profile", Profile, "--activate=false", "--ssh-config=false", "--template=false", "--port-forwarder", "none", "--mount-inotify=false", "--mount-type", "virtiofs", "--mount", o.Repo, "--mount", o.Out + ":w", "--vm-type", "vz", "--runtime", "docker", "--cpus", strconv.Itoa(o.CPUs), "--memory", strconv.Itoa(o.Memory), "--disk", strconv.Itoa(o.Disk)}
+	rosetta := "--vz-rosetta=false"
+	if o.Arch == "amd64" {
+		rosetta = "--vz-rosetta"
+	}
+	args = append(args, rosetta)
 	defer func() {
 		stopErr := s.stop(context.Background())
 		if stopErr != nil {
@@ -325,7 +343,7 @@ type toolchainID struct {
 	Data      []byte
 }
 
-func toolchain(path string) (toolchainID, error) {
+func toolchain(path, arch string) (toolchainID, error) {
 	if path == "" {
 		return toolchainID{SHA: "base"}, nil
 	}
@@ -340,8 +358,8 @@ func toolchain(path string) (toolchainID, error) {
 	if err != nil {
 		return toolchainID{}, err
 	}
-	if !validToolchain(data) {
-		return toolchainID{}, fail(2, "refused: toolchain Dockerfile requires pinned FROM "+BaseImage+", earlier pinned stages only, and no parser directives or heredocs")
+	if !validToolchain(data, arch) {
+		return toolchainID{}, fail(2, "refused: toolchain Dockerfile requires pinned FROM "+BaseImage+" or "+baseImage(arch)+", earlier pinned stages only, and no parser directives or heredocs")
 	}
 	sum := sha256.Sum256(data)
 	return toolchainID{Path: path, SHA: hex.EncodeToString(sum[:]), Data: data}, nil
@@ -350,7 +368,8 @@ func toolchain(path string) (toolchainID, error) {
 var parserDirective = regexp.MustCompile(`(?i)^#\s*(syntax|check|escape)\s*=`)
 var stageName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]*$`)
 
-func validToolchain(data []byte) bool {
+func validToolchain(data []byte, arch string) bool {
+	pinned := func(image string) bool { return image == BaseImage || image == baseImage(arch) }
 	seenInstruction, seenFrom := false, false
 	stages := map[string]bool{}
 	var instruction string
@@ -395,13 +414,13 @@ func validToolchain(data []byte) bool {
 		}
 		// Only a pinned base may introduce an alias. References cannot declare
 		// aliases or use numeric/forward stages, flags, or extra operands.
-		if len(fields) == 4 && fields[1] == BaseImage && strings.EqualFold(fields[2], "AS") && stageName.MatchString(fields[3]) {
+		if len(fields) == 4 && pinned(fields[1]) && strings.EqualFold(fields[2], "AS") && stageName.MatchString(fields[3]) {
 			name := strings.ToLower(fields[3])
 			if stages[name] {
 				return false
 			}
 			stages[name] = true
-		} else if len(fields) != 2 || (fields[1] != BaseImage && !stages[strings.ToLower(fields[1])]) {
+		} else if len(fields) != 2 || (!pinned(fields[1]) && !stages[strings.ToLower(fields[1])]) {
 			return false
 		}
 		seenFrom = true
@@ -412,6 +431,7 @@ func validToolchain(data []byte) bool {
 var imageID = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type Record struct {
+	Arch          string    `json:"arch"`
 	Repo          string    `json:"repo"`
 	Task          string    `json:"task"`
 	ToolchainPath string    `json:"toolchain_path"`
@@ -420,7 +440,7 @@ type Record struct {
 	Time          time.Time `json:"time"`
 }
 
-func recordKey(repo, sha string) string { return repo + "\n" + sha }
+func recordKey(repo, sha, arch string) string { return repo + "\n" + sha + "\n" + arch }
 func (s *session) records() (map[string]Record, error) {
 	data, err := os.ReadFile(filepath.Join(s.state, "prep-records.json"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -436,6 +456,22 @@ func (s *session) records() (map[string]Record, error) {
 	if r == nil {
 		return nil, errors.New("invalid prep records")
 	}
+	// Records written before architecture selection used the two-part key.
+	// Normalize only legacy keys; an explicit arm64 record takes precedence.
+	for key, rec := range r {
+		if rec.Arch != "" {
+			continue
+		}
+		rec.Arch = "arm64"
+		if key == rec.Repo+"\n"+rec.ToolchainSHA {
+			delete(r, key)
+			key = recordKey(rec.Repo, rec.ToolchainSHA, rec.Arch)
+			if _, exists := r[key]; exists {
+				continue
+			}
+		}
+		r[key] = rec
+	}
 	return r, nil
 }
 func (s *session) save(rec Record) error {
@@ -443,7 +479,7 @@ func (s *session) save(rec Record) error {
 	if err != nil {
 		return err
 	}
-	records[recordKey(rec.Repo, rec.ToolchainSHA)] = rec
+	records[recordKey(rec.Repo, rec.ToolchainSHA, rec.Arch)] = rec
 	data, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
 		return err

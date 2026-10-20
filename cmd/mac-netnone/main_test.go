@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,7 @@ func TestCommandValidation(t *testing.T) {
 		{nil, 2}, {[]string{"help"}, 0}, {[]string{"version"}, 0}, {[]string{"unknown"}, 2},
 		{[]string{"prep"}, 2}, {[]string{"run", "--repo", "/repo", "--task", "test"}, 2},
 		{[]string{"selftest", "--max-load", "0"}, 2}, {[]string{"selftest", "--max-load", "NaN"}, 2}, {[]string{"selftest", "--max-load", "+Inf"}, 2},
+		{[]string{"selftest", "--arch", "x86"}, 2}, {[]string{"selftest", "--arch", ""}, 2},
 		{[]string{"selftest", "--cpus", "0"}, 2}, {[]string{"selftest", "--memory", "-1"}, 2}, {[]string{"selftest", "--disk", "1.5"}, 2},
 		{[]string{"run", "--db-image", "x"}, 2}, {[]string{"status", "--repo", "/repo"}, 2}, {[]string{"stop", "extra"}, 2}, {[]string{"prep", "--help"}, 0},
 	} {
@@ -159,5 +161,106 @@ func TestTerminationSignals(t *testing.T) {
 				t.Fatal("signal left fake VM running", err)
 			}
 		})
+	}
+}
+
+type archCLIFake struct{ calls []netnone.Command }
+
+func (f *archCLIFake) Run(_ context.Context, c netnone.Command) (netnone.Result, error) {
+	f.calls = append(f.calls, c)
+	switch c.Name + " " + c.Args[0] {
+	case "colima list":
+		return netnone.Result{Stdout: []byte(`{"name":"netnone","status":"Stopped"}`)}, nil
+	case "colima start":
+		return netnone.Result{ExitCode: 7}, nil
+	case "colima stop":
+		return netnone.Result{}, nil
+	case "docker context":
+		if c.Args[1] == "ls" {
+			return netnone.Result{Stdout: []byte(`{"Name":"default","Current":true}`)}, nil
+		}
+		return netnone.Result{Stdout: []byte(`[{"Name":"default"}]`)}, nil
+	}
+	return netnone.Result{}, fmt.Errorf("unexpected fake call %s %v", c.Name, c.Args)
+}
+
+// CLI architecture flags reach Options on all lifecycle commands; omission selects arm64, and fake startup failure still stops.
+func TestCLIArchitectureOptions(t *testing.T) {
+	for _, action := range []string{"prep", "run", "selftest"} {
+		for _, archFlag := range []string{"", "arm64", "amd64"} {
+			t.Run(action+"/"+archFlag, func(t *testing.T) {
+				root, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				state := filepath.Join(root, "state")
+				if err := os.Mkdir(state, 0700); err != nil {
+					t.Fatal(err)
+				}
+				arch := archFlag
+				if arch == "" {
+					arch = "arm64"
+				}
+				records := map[string]any{root + "\nbase\n" + arch: map[string]string{"repo": root, "toolchain_sha256": "base", "arch": arch, "image_id": "sha256:" + strings.Repeat("a", 64)}}
+				data, err := json.Marshal(records)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(state, "prep-records.json"), data, 0600); err != nil {
+					t.Fatal(err)
+				}
+				args := []string{action}
+				if action != "selftest" {
+					args = append(args, "--repo", root, "--task", "test")
+				}
+				if action == "run" {
+					args = append(args, "--out", root)
+				}
+				if archFlag != "" {
+					args = append(args, "--arch", archFlag)
+				}
+				var out, errOut bytes.Buffer
+				f := &archCLIFake{}
+				code := runWith(context.Background(), args, &out, &errOut, func(out, errOut io.Writer) *netnone.Engine {
+					e := netnone.New(f, out, errOut)
+					e.Home = func() (string, error) { return root, nil }
+					e.StateDir = func(string) string { return state }
+					e.Load = func(context.Context) ([3]float64, error) { return [3]float64{}, nil }
+					e.UserEnv = []string{}
+					return e
+				})
+				if code != 1 {
+					t.Fatalf("startup fixture exit=%d %s", code, &errOut)
+				}
+				rosetta := "--vz-rosetta=false"
+				if arch == "amd64" {
+					rosetta = "--vz-rosetta"
+				}
+				starts, stops := 0, 0
+				for _, c := range f.calls {
+					if c.Name != "colima" {
+						continue
+					}
+					if c.Args[0] == "start" {
+						starts++
+						found := false
+						for _, a := range c.Args {
+							if a == rosetta {
+								found = true
+							}
+						}
+						if !found {
+							t.Fatalf("CLI arch did not reach startup: %v", c.Args)
+						}
+					}
+					if c.Args[0] == "stop" {
+						stops++
+					}
+				}
+				if starts != 1 || stops != 1 {
+					t.Fatalf("startup/stop=%d/%d", starts, stops)
+				}
+			})
+		}
 	}
 }

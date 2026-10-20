@@ -17,10 +17,11 @@ import (
 )
 
 const testImage = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-const warmOutput = "dns=ok\ntcp=ok\nnetnone-prep-test-exit=0\n"
-const deniedOutput = "dns=fail:java.net.UnknownHostException\ntcp=fail:java.net.SocketException:Network is unreachable\n"
+const warmOutput = "arch=aarch64\nelf=183\ndns=ok\ntcp=ok\nnetnone-prep-test-exit=0\n"
+const deniedOutput = "arch=aarch64\nelf=183\ndns=fail:java.net.UnknownHostException\ntcp=fail:java.net.SocketException:Network is unreachable\n"
 
 type fakeRunner struct {
+	arch            string
 	calls           []Command
 	hook            func(context.Context, Command) (Result, error, bool)
 	test            *testing.T
@@ -37,6 +38,12 @@ func has(args []string, want ...string) bool {
 		}
 	}
 	return false
+}
+func (f *fakeRunner) archOutput(output string) string {
+	if f.arch == "amd64" {
+		return strings.NewReplacer("arch=aarch64", "arch=amd64", "elf=183", "elf=62").Replace(output)
+	}
+	return output
 }
 func (f *fakeRunner) Run(ctx context.Context, c Command) (Result, error) {
 	// Capture stdin now, so later assertions do not depend on its consumption.
@@ -78,18 +85,20 @@ func (f *fakeRunner) Run(ctx context.Context, c Command) (Result, error) {
 			return Result{Stdout: []byte(fmt.Sprintf(`{"Name":%q,"Current":true}`, name))}, nil
 		case "build":
 			return Result{Stdout: []byte(testImage + "\n")}, nil
-		case "volume", "image":
+		case "image":
+			return Result{Stdout: []byte("linux/" + f.arch + "\n")}, nil
+		case "volume":
 			return Result{}, nil
 		case "run":
 			if has(c.Args, "/src/Probe.java") && !has(c.Args, "netnone-prep") {
 				output := f.probeOutput
 				if output == "" {
-					output = deniedOutput
+					output = f.archOutput(deniedOutput)
 				}
 				return Result{Stdout: []byte(output)}, nil
 			}
 			if has(c.Args, "-c", prepScript) || strings.Contains(strings.Join(c.Args, " "), "netnone-prep-test-exit") {
-				return Result{Stdout: []byte(warmOutput)}, nil
+				return Result{Stdout: []byte(f.archOutput(warmOutput))}, nil
 			}
 			if has(c.Args, "-c", runScript) {
 				// Simulate only the copied artifact, never execute the guest script.
@@ -146,7 +155,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	h := &harness{root: root, state: filepath.Join(root, "state"), home: filepath.Join(root, "home")}
-	h.f = &fakeRunner{test: t}
+	h.f = &fakeRunner{test: t, arch: "arm64"}
 	h.e = New(h.f, &h.out, &h.err)
 	h.e.Home = func() (string, error) { return h.home, nil }
 	h.e.StateDir = func(string) string { return h.state }
@@ -228,7 +237,7 @@ func TestPrepThenRun(t *testing.T) {
 				t.Fatalf("prep scratch %s", out)
 			}
 		}
-		want := []string{"start", "--profile", "netnone", "--activate=false", "--ssh-config=false", "--template=false", "--port-forwarder", "none", "--mount-inotify=false", "--mount-type", "virtiofs", "--mount", h.o.Repo, "--mount", out + ":w", "--vm-type", "vz", "--runtime", "docker", "--cpus", "4", "--memory", "8", "--disk", "40"}
+		want := []string{"start", "--profile", "netnone", "--activate=false", "--ssh-config=false", "--template=false", "--port-forwarder", "none", "--mount-inotify=false", "--mount-type", "virtiofs", "--mount", h.o.Repo, "--mount", out + ":w", "--vm-type", "vz", "--runtime", "docker", "--cpus", "4", "--memory", "8", "--disk", "40", "--vz-rosetta=false"}
 		if !reflect.DeepEqual(c.Args, want) {
 			t.Fatalf("start argv\ngot %q\nwant %q", c.Args, want)
 		}
@@ -244,7 +253,7 @@ func TestPrepThenRun(t *testing.T) {
 	}
 	b := builds[0].Args
 	dir := b[len(b)-1]
-	if !reflect.DeepEqual(b, []string{"build", "--quiet", "-t", "netnone-base:local", "-f", "-", dir}) {
+	if !reflect.DeepEqual(b, []string{"build", "--platform", "linux/arm64", "--quiet", "-t", "netnone-base:arm64", "-f", "-", dir}) {
 		t.Fatalf("build %q", b)
 	}
 	var warm, run *Command
@@ -260,11 +269,11 @@ func TestPrepThenRun(t *testing.T) {
 	if warm == nil || run == nil {
 		t.Fatal("missing warm/test container")
 	}
-	wantWarm := []string{"run", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", h.o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", "--entrypoint", "/bin/sh", testImage, "-c", prepScript, "netnone-prep", "test"}
+	wantWarm := []string{"run", "--platform", "linux/arm64", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", h.o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", "--entrypoint", "/bin/sh", testImage, "-c", prepScript, "netnone-prep", "test"}
 	if !reflect.DeepEqual(warm.Args, wantWarm) {
 		t.Fatalf("warm argv %q", warm.Args)
 	}
-	wantRun := []string{"run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", h.o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", "-v", filepath.Join(h.o.Out, "20261021T120002.000000000Z") + ":/out", "--entrypoint", "/bin/sh", testImage, "-c", runScript, "netnone-run", "test"}
+	wantRun := []string{"run", "--platform", "linux/arm64", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", h.o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", "-v", filepath.Join(h.o.Out, "20261021T120002.000000000Z") + ":/out", "--entrypoint", "/bin/sh", testImage, "-c", runScript, "netnone-run", "test"}
 	if !reflect.DeepEqual(run.Args, wantRun) {
 		t.Fatalf("run argv\ngot %q\nwant %q", run.Args, wantRun)
 	}
@@ -296,7 +305,7 @@ func TestPrepThenRun(t *testing.T) {
 }
 
 // Static contract: source copying excludes only directories, with build outputs
-// conditional on Gradle files in their parent; tar matches literal anchored paths.
+// conditional on Gradle files in their parent; copied exclusions are removed literally.
 func TestSourceExcludesParentConditional(t *testing.T) {
 	for _, want := range []string{
 		`find . -type d \( -name .gradle -o -name build \) -exec sh -c '`,
@@ -305,14 +314,17 @@ func TestSourceExcludesParentConditional(t *testing.T) {
 		`[ -f "$d/../settings.gradle" ] || [ -f "$d/../settings.gradle.kts" ]; then`,
 		`printf "%s\n" "$d"`,
 		`> /tmp/netnone-excludes`,
-		`tar --no-wildcards --anchored -X /tmp/netnone-excludes -cf - .`,
+		`cp -R -P -p /src/. /work/`,
+		`while IFS= read -r p; do`,
+		`rm -rf -- "/work/${p#./}"`,
+		`done < /tmp/netnone-excludes`,
 	} {
 		if !strings.Contains(copySource, want) {
 			t.Fatalf("parent-conditional copy contract missing %q", want)
 		}
 	}
-	if strings.Contains(copySource, "--exclude=") || strings.Contains(copySource, "-prune") {
-		t.Fatal("copy must not broadly exclude or prune source packages named build")
+	if strings.Contains(copySource, "tar -x") || strings.Contains(copySource, "--exclude=") || strings.Contains(copySource, "-prune") {
+		t.Fatal("copy must avoid tar extraction and broad exclusion of source packages named build")
 	}
 }
 
@@ -463,7 +475,7 @@ func TestPrepRecordRequired(t *testing.T) {
 	h.exec(t, "prep", 0)
 	h.exec(t, "run", 0)
 	builds := callsNamed(h.f.calls, "docker", "build")
-	if len(builds) != 2 || !reflect.DeepEqual(builds[1].Args, []string{"build", "--quiet", "-f", "-", filepath.Dir(file)}) {
+	if len(builds) != 2 || !reflect.DeepEqual(builds[1].Args, []string{"build", "--platform", "linux/arm64", "--quiet", "-f", "-", filepath.Dir(file)}) {
 		t.Fatalf("toolchain build argv %+v", builds)
 	}
 	assertPrivate(t, h)
@@ -907,13 +919,13 @@ func TestResourcesAndOutputPermissions(t *testing.T) {
 // Fixed guest scripts exclude stale build/cache trees, pass tasks literally, preserve normal task failure for artifact copying, and never bootstrap Gradle in offline mode (static contract only).
 func TestGuestScriptContracts(t *testing.T) {
 	for _, script := range []string{prepScript, runScript} {
-		for _, required := range []string{"tar --no-wildcards --anchored -X /tmp/netnone-excludes -cf - .", "tar --no-same-owner -xf -", "cd /work"} {
+		for _, required := range []string{`cp -R -P -p /src/. /work/`, `while IFS= read -r p; do`, `rm -rf -- "/work/${p#./}"`, `done < /tmp/netnone-excludes`, "source copy failed", "source exclusion removal failed", "source copy refused: invalid excluded path", "cd /work"} {
 			if !strings.Contains(script, required) {
 				t.Fatalf("guest copy contract missing %q", required)
 			}
 		}
-		if strings.Contains(script, "--no-daemon") || strings.Contains(script, "--exclude=src") {
-			t.Fatal("guest script disables daemon or excludes source")
+		if strings.Contains(script, "tar -x") || strings.Contains(script, "--no-daemon") || strings.Contains(script, "--exclude=src") {
+			t.Fatal("guest script uses tar extraction, disables daemon or excludes source")
 		}
 	}
 	if !strings.Contains(prepScript, "java /tmp/Probe.java || true") || !strings.Contains(prepScript, `./gradlew --refresh-dependencies "$1" --dry-run`) || !strings.Contains(prepScript, `./gradlew "$1"`) {

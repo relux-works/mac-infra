@@ -188,7 +188,7 @@ func TestBuildValidatedBytes(t *testing.T) {
 		t.Fatalf("builds=%d", len(builds))
 	}
 	base, _ := assets.ReadFile("assets/Dockerfile")
-	for i, want := range []string{string(base), original} {
+	for i, want := range []string{strings.Replace(string(base), BaseImage, BaseImageARM64, 1), original} {
 		c := builds[i]
 		if !has(c.Args, "-f", "-") || c.Stdin == nil {
 			t.Fatalf("build reopened path: %v", c.Args)
@@ -207,7 +207,7 @@ func TestBuildValidatedBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(original))
-	if _, ok := records[recordKey(h.o.Repo, hex.EncodeToString(sum[:]))]; !ok {
+	if _, ok := records[recordKey(h.o.Repo, hex.EncodeToString(sum[:]), h.o.Arch)]; !ok {
 		t.Fatal("record does not match validated bytes")
 	}
 }
@@ -244,8 +244,15 @@ func TestExplicitContainerEntrypoints(t *testing.T) {
 }
 
 // shellFixture executes only fixed guest scripts with local fake tools in t.TempDir.
-// Its tar fake emits/extracts a real local archive, with independently injected producer/consumer failures.
 func shellFixture(t *testing.T, script, mode string, dirs ...string) (string, error) {
+	t.Helper()
+	_, out, err := shellFixtureRoot(t, script, mode, dirs...)
+	return out, err
+}
+
+// Copy/removal fakes delegate to host tools except for the requested failure;
+// a fake find can supply malformed exclusion entries without altering the loop.
+func shellFixtureRoot(t *testing.T, script, mode string, dirs ...string) (string, string, error) {
 	t.Helper()
 	root := t.TempDir()
 	for _, dir := range []string{"src", "work", "tmp", "out", "bin"} {
@@ -258,7 +265,17 @@ func shellFixture(t *testing.T, script, mode string, dirs ...string) (string, er
 			t.Fatal(err)
 		}
 	}
-	writeFixture(t, filepath.Join(root, "src", "omitted.txt"), "source skipped by failing archive producer", 0600)
+	for path, contents := range map[string]string{
+		"omitted.txt":                       "source skipped by failing cp",
+		"mod/build.gradle":                  "// Gradle module",
+		"mod/build/stale.txt":               "stale build output",
+		".gradle/cache.txt":                 "stale local cache",
+		"dir with spaces/.gradle/cache.txt": "nested stale local cache",
+		"dir with spaces/kept.txt":          "source with spaces",
+		"src/test/java/build/Marker.java":   "class Marker {}",
+	} {
+		writeFixture(t, filepath.Join(root, "src", path), contents, 0600)
+	}
 	writeFixture(t, filepath.Join(root, "src", "gradlew"), `#!/bin/sh
 case " $* " in *" --dry-run "*) echo dry-run-ok; exit 0;; esac
 if [ "$FAKE_MODE" = dependency ]; then echo 'Could not resolve dependency' >&2; exit 7; fi
@@ -266,51 +283,113 @@ if [ "$FAKE_MODE" = test-failed ]; then mkdir -p module/build/test-results/test;
 exit 0
 `, 0700)
 	writeFixture(t, filepath.Join(root, "bin", "java"), "#!/bin/sh\nexit 0\n", 0700)
-	writeFixture(t, filepath.Join(root, "bin", "tar"), `#!/bin/sh
-case " $* " in
- *" -cf "*) if [ "$FAKE_MODE" = producer ]; then /usr/bin/tar -cf - ./gradlew; exit 7; fi; exec /usr/bin/tar -cf - .;;
- *" -xf "*) /usr/bin/tar -xf -; rc=$?; if [ "$FAKE_MODE" = consumer ]; then exit 8; fi; exit "$rc";;
+	writeFixture(t, filepath.Join(root, "bin", "cp"), `#!/bin/sh
+if [ "$FAKE_MODE" = cp-failure ]; then
+ /bin/cp -R -P -p "$FAKE_SRC/gradlew" "$FAKE_WORK/gradlew" || exit 99
+ exit 7
+fi
+exec /bin/cp "$@"
+`, 0700)
+	writeFixture(t, filepath.Join(root, "bin", "rm"), `#!/bin/sh
+if [ "$1" = -rf ]; then
+ echo exclusion-removal
+ if [ "$FAKE_MODE" = rm-failure ]; then exit 8; fi
+fi
+exec /bin/rm "$@"
+`, 0700)
+	writeFixture(t, filepath.Join(root, "bin", "find"), `#!/bin/sh
+case "$FAKE_MODE" in
+ exclude-dot) printf '.\n'; exit 0;;
+ exclude-root) printf './\n'; exit 0;;
+ exclude-no-prefix) printf 'mod/build\n'; exit 0;;
 esac
-exit 99
+exec /usr/bin/find "$@"
 `, 0700)
 	// Substitute only fixed absolute guest paths, never interpolate fixture input into shell code.
 	script = strings.NewReplacer("/src", filepath.Join(root, "src"), "/work", filepath.Join(root, "work"), "/tmp", filepath.Join(root, "tmp"), "/out", filepath.Join(root, "out")).Replace(script)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script, "fixture", "test")
-	cmd.Env = append(os.Environ(), "PATH="+filepath.Join(root, "bin")+":/usr/bin:/bin", "FAKE_MODE="+mode)
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Join(root, "bin")+":/usr/bin:/bin", "FAKE_MODE="+mode,
+		"FAKE_SRC="+filepath.Join(root, "src"), "FAKE_WORK="+filepath.Join(root, "work"))
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("guest fixture timed out: %s", out)
 	}
-	if mode == "producer" {
-		if _, err := os.Stat(filepath.Join(root, "work", "gradlew")); err != nil {
-			t.Fatal("producer control did not extract a valid partial archive", err)
-		}
-		if _, err := os.Stat(filepath.Join(root, "work", "omitted.txt")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatal("producer control did not omit a source file")
-		}
-	}
-	return string(out), err
+	return root, string(out), err
 }
 
-// F8: even a valid partial archive with successful extraction is rejected on the producer's own exit status.
-func TestCopySourceProducerFailure(t *testing.T) {
-	out, err := shellFixture(t, copySource+"echo copy-completed\n", "producer")
-	if err == nil || !strings.Contains(out, "source archive creation failed") || strings.Contains(out, "copy-completed") {
-		t.Fatalf("producer failure masked: err=%v out=%s", err, out)
+// F8: partial cp failure exits 1 with its diagnostic before exclusions or later commands run.
+func TestCopySourceCopyFailure(t *testing.T) {
+	root, out, err := shellFixtureRoot(t, copySource+"echo copy-completed\n", "cp-failure")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(out, "source copy failed") ||
+		strings.Contains(out, "copy-completed") || strings.Contains(out, "exclusion-removal") {
+		t.Fatalf("cp failure masked or later command ran: err=%v out=%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(root, "work", "gradlew")); err != nil {
+		t.Fatal("cp failure control did not copy a partial source", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "work", "omitted.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("cp failure control did not omit a source file")
 	}
 }
 
-// F8: extraction failure is independently rejected; ordinary source copying succeeds.
-func TestCopySourceExtraction(t *testing.T) {
-	out, err := shellFixture(t, copySource+"echo copy-completed\n", "consumer")
-	if err == nil || !strings.Contains(out, "source extraction failed") {
-		t.Fatalf("extraction failure masked: %v %s", err, out)
+// F8: failed exclusion removal exits 1, preserves the rejected tree and stops later commands.
+func TestCopySourceRemovalFailure(t *testing.T) {
+	root, out, err := shellFixtureRoot(t, copySource+"echo copy-completed\n", "rm-failure")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(out, "source exclusion removal failed") ||
+		!strings.Contains(out, "exclusion-removal") || strings.Contains(out, "copy-completed") {
+		t.Fatalf("rm failure masked or later command ran: err=%v out=%s", err, out)
 	}
-	out, err = shellFixture(t, copySource+"echo copy-completed\n", "")
+	if _, err := os.Stat(filepath.Join(root, "work", "mod", "build", "stale.txt")); err != nil {
+		t.Fatal("failed removal must leave copied build output", err)
+	}
+}
+
+// F8: host cp/rm remove Gradle outputs/caches, including paths with spaces,
+// while preserving source build packages, spaced filenames and the original repo.
+func TestCopySourceExclusionCorrectness(t *testing.T) {
+	root, out, err := shellFixtureRoot(t, copySource+"echo copy-completed\n", "")
 	if err != nil || !strings.Contains(out, "copy-completed") {
 		t.Fatalf("copy rejected: %v %s", err, out)
+	}
+	for _, path := range []string{"mod/build", ".gradle", "dir with spaces/.gradle"} {
+		if _, err := os.Stat(filepath.Join(root, "work", path)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("excluded path remains: %s: %v", path, err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "src", path)); err != nil {
+			t.Fatalf("original excluded path changed: %s: %v", path, err)
+		}
+	}
+	for path, want := range map[string]string{
+		"src/test/java/build/Marker.java": "class Marker {}",
+		"dir with spaces/kept.txt":        "source with spaces",
+		"mod/build.gradle":                "// Gradle module",
+	} {
+		data, err := os.ReadFile(filepath.Join(root, "work", path))
+		if err != nil || string(data) != want {
+			t.Fatalf("source not preserved: %s: %q %v", path, data, err)
+		}
+	}
+}
+
+// F8: malformed find entries are refused before any removal or later command;
+// the valid discovered-entry control is exercised by TestCopySourceExclusionCorrectness.
+func TestCopySourceInvalidExcludedPath(t *testing.T) {
+	for _, mode := range []string{"exclude-dot", "exclude-root", "exclude-no-prefix"} {
+		t.Run(mode, func(t *testing.T) {
+			root, out, err := shellFixtureRoot(t, copySource+"echo copy-completed\n", mode)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(out, "source copy refused: invalid excluded path") ||
+				strings.Contains(out, "exclusion-removal") || strings.Contains(out, "copy-completed") {
+				t.Fatalf("invalid exclusion admitted: err=%v out=%s", err, out)
+			}
+			if _, err := os.Stat(filepath.Join(root, "work", "mod", "build", "stale.txt")); err != nil {
+				t.Fatal("invalid exclusion changed the copied build tree", err)
+			}
+		})
 	}
 }
 
@@ -669,11 +748,11 @@ func TestSnapshotInspectEveryContext(t *testing.T) {
 // A continued instruction without a heredoc stays accepted (positive control).
 func TestToolchainContinuedHeredocStageForgery(t *testing.T) {
 	witness := "FROM " + BaseImage + "\nCOPY <\\\n<EOF /fake\nFROM " + BaseImage + " AS ubuntu\nEOF\nFROM ubuntu\n"
-	if validToolchain([]byte(witness)) {
+	if validToolchain([]byte(witness), "arm64") {
 		t.Fatal("continued heredoc opener accepted")
 	}
 	control := "FROM " + BaseImage + "\nRUN echo a \\\n  && echo b\n"
-	if !validToolchain([]byte(control)) {
+	if !validToolchain([]byte(control), "arm64") {
 		t.Fatal("continued instruction without heredoc rejected")
 	}
 }

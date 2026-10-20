@@ -32,14 +32,22 @@ if [ -f /tmp/netnone-copy-error ]; then
  echo "source copy refused: excluded directory path contains a newline" >&2
  exit 1
 fi
-if ! { tar --no-wildcards --anchored -X /tmp/netnone-excludes -cf - .; printf '%s\n' "$?" > /tmp/netnone-tar-status; } | (cd /work && tar --no-same-owner -xf -); then
- echo "source extraction failed" >&2
+# GNU tar 1.35 extraction uses a syscall that fails with ENOSYS under Linux Rosetta.
+# Use the same portable copy-then-remove flow for arm64 and amd64.
+if ! cp -R -P -p /src/. /work/; then
+ echo "source copy failed" >&2
  exit 1
 fi
-if [ "$(cat /tmp/netnone-tar-status)" != 0 ]; then
- echo "source archive creation failed" >&2
- exit 1
-fi
+while IFS= read -r p; do
+ case "$p" in
+  ./?*) ;;
+  *) echo "source copy refused: invalid excluded path" >&2; exit 1 ;;
+ esac
+ if ! rm -rf -- "/work/${p#./}"; then
+  echo "source exclusion removal failed" >&2
+  exit 1
+ fi
+done < /tmp/netnone-excludes
 cd /work
 `
 
@@ -99,7 +107,13 @@ func (s *session) prep(ctx context.Context, o Options, id toolchainID, fixture b
 	if err != nil {
 		return "", Result{}, err
 	}
-	build, err := checked(s.e.Runner.Run(ctx, Command{Name: "docker", Args: []string{"build", "--quiet", "-t", "netnone-base:local", "-f", "-", dir}, Env: s.env, Stdin: bytes.NewReader(data)}))
+	data = bytes.Replace(data, []byte("FROM "+BaseImage+"\n"), []byte("FROM "+baseImage(o.Arch)+"\n"), 1)
+	// The embedded base must build from the per-arch pin; a template that no
+	// longer starts with the index pin would otherwise build from the index.
+	if !bytes.HasPrefix(data, []byte("FROM "+baseImage(o.Arch)+"\n")) {
+		return "", Result{}, fmt.Errorf("embedded base Dockerfile does not start FROM %s", baseImage(o.Arch))
+	}
+	build, err := checked(s.e.Runner.Run(ctx, Command{Name: "docker", Args: []string{"build", "--platform", "linux/" + o.Arch, "--quiet", "-t", "netnone-base:" + o.Arch, "-f", "-", dir}, Env: s.env, Stdin: bytes.NewReader(data)}))
 	if err != nil {
 		return "", build, err
 	}
@@ -107,14 +121,20 @@ func (s *session) prep(ctx context.Context, o Options, id toolchainID, fixture b
 	if !imageID.MatchString(image) {
 		return "", build, errors.New("invalid base image id from docker build --quiet")
 	}
+	if err = s.assertArch(ctx, image, o.Arch); err != nil {
+		return "", build, err
+	}
 	if id.Path != "" {
-		build, err = checked(s.e.Runner.Run(ctx, Command{Name: "docker", Args: []string{"build", "--quiet", "-f", "-", filepath.Dir(id.Path)}, Env: s.env, Stdin: bytes.NewReader(id.Data)}))
+		build, err = checked(s.e.Runner.Run(ctx, Command{Name: "docker", Args: []string{"build", "--platform", "linux/" + o.Arch, "--quiet", "-f", "-", filepath.Dir(id.Path)}, Env: s.env, Stdin: bytes.NewReader(id.Data)}))
 		if err != nil {
 			return "", build, err
 		}
 		image = strings.TrimSpace(string(build.Stdout))
 		if !imageID.MatchString(image) {
 			return "", build, errors.New("invalid toolchain image id from docker build --quiet")
+		}
+		if err = s.assertArch(ctx, image, o.Arch); err != nil {
+			return "", build, err
 		}
 	}
 	if _, err = s.docker(ctx, "volume", "create", "netnone-gradle-home"); err != nil {
@@ -129,7 +149,7 @@ func (s *session) prep(ctx context.Context, o Options, id toolchainID, fixture b
 		script = strings.Replace(script, "java /tmp/Probe.java", "java /src/Probe.java", 1)
 	}
 	// HOME tmpfs needs explicit ownership: Docker defaults to root-owned 0750.
-	args := []string{"run", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", "--entrypoint", "/bin/sh", image, "-c", script, "netnone-prep", o.Task}
+	args := []string{"run", "--platform", "linux/" + o.Arch, "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", "--entrypoint", "/bin/sh", image, "-c", script, "netnone-prep", o.Task}
 	res, err := s.e.Runner.Run(ctx, Command{Name: "docker", Args: args, Env: s.env, Stdin: strings.NewReader(string(probe))})
 	fmt.Fprintf(s.e.Out, "prep (networked):\n%s%s", res.Stdout, res.Stderr)
 	if _, err = checked(res, err); err != nil {
@@ -149,7 +169,7 @@ func (s *session) prep(ctx context.Context, o Options, id toolchainID, fixture b
 	if path == "" {
 		path = "base"
 	}
-	err = s.save(Record{o.Repo, o.Task, path, id.SHA, image, s.e.Now().UTC()})
+	err = s.save(Record{Arch: o.Arch, Repo: o.Repo, Task: o.Task, ToolchainPath: path, ToolchainSHA: id.SHA, Image: image, Time: s.e.Now().UTC()})
 	return image, res, err
 }
 func regexpPrepExit(output string) int {
@@ -164,19 +184,29 @@ func regexpPrepExit(output string) int {
 	return -1
 }
 func (s *session) deniedArgs(o Options, image, entrypoint string) []string {
-	args := []string{"run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work"}
+	args := []string{"run", "--platform", "linux/" + o.Arch, "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work"}
 	if o.Out != "" {
 		args = append(args, "-v", o.Out+":/out")
 	}
 	return append(args, "--entrypoint", entrypoint, image)
 }
-func (s *session) runTests(ctx context.Context, o Options, image string) (string, error) {
-	inspected, err := s.call(ctx, "docker", "image", "inspect", image)
+func (s *session) assertArch(ctx context.Context, image, arch string) error {
+	inspected, err := s.call(ctx, "docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if inspected.ExitCode != 0 {
-		return "", fail(3, "refused: prepared image is unavailable; run mac-netnone prep first")
+		return fail(3, "refused: prepared image is unavailable; run mac-netnone prep first")
+	}
+	observed := strings.TrimSpace(string(inspected.Stdout))
+	if observed != "linux/"+arch {
+		return fail(3, fmt.Sprintf("refused: built image is %s, expected linux/%s", observed, arch))
+	}
+	return nil
+}
+func (s *session) runTests(ctx context.Context, o Options, image string) (string, error) {
+	if err := s.assertArch(ctx, image, o.Arch); err != nil {
+		return "", err
 	}
 	if err := s.resetWork(ctx); err != nil {
 		return "", err

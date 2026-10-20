@@ -1,8 +1,19 @@
 import java.net.*;
+import java.io.*;
+import java.nio.file.*;
 import java.util.concurrent.*;
 
 class Probe {
     public static void main(String[] args) {
+        System.out.println("arch=" + System.getProperty("os.arch"));
+        try (InputStream in = Files.newInputStream(Path.of("/proc/self/exe"))) {
+            byte[] header = in.readNBytes(20);
+            if (header.length != 20) throw new IOException("short ELF header");
+            int machine = Byte.toUnsignedInt(header[18]) | (Byte.toUnsignedInt(header[19]) << 8);
+            System.out.println("elf=" + machine);
+        } catch (IOException e) {
+            System.out.println("elf=unavailable");
+        }
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r); t.setDaemon(true); return t;
         });

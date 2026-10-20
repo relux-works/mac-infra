@@ -11,6 +11,11 @@ mac-netnone run --repo /absolute/repo --task test --out /absolute/results
 mac-netnone selftest
 mac-netnone status
 mac-netnone stop
+
+# For x86_64-only native tools (for example, Android AAPT2):
+mac-netnone prep --arch amd64 --repo /absolute/repo --task test
+mac-netnone run --arch amd64 --repo /absolute/repo --task test --out /absolute/results
+mac-netnone selftest --arch amd64
 ```
 
 Prep builds the digest-pinned Java 17 image and warms the dedicated Gradle cache
@@ -19,9 +24,23 @@ container bridge network. A failed warm task is tolerated only if at least one
 `build/test-results/**/*.xml` exists in `/work` afterward. A failure without test
 results, including dependency/bootstrap failure after a successful dry-run, fails
 prep and writes no successful prep record. Run requires a prep record
-matching the canonical repo and current toolchain Dockerfile hash. It executes
+matching the canonical repo, current toolchain Dockerfile hash and architecture.
+Legacy records without an `arch` field are treated as arm64; they do not
+authorize amd64 runs. `status` shows the architecture of each prep record. Run executes
 the recorded immutable image with `--network none` and `./gradlew --offline TASK`.
 Gradle daemon IPC on loopback stays available inside the container.
+
+`prep`, `run` and `selftest` accept `--arch arm64|amd64`, defaulting to `arm64`.
+Other values are usage errors (exit 2). Use `--arch amd64` for both prep and run
+when native tools are available only for linux/amd64, such as AAPT2. It uses VZ
+Rosetta and is slower than native arm64; the first amd64 prep pulls the amd64
+base image. Every Docker build and container run explicitly selects
+`--platform linux/<arch>`, including prep and the denied probe.
+
+The VM remains aarch64 with `--vm-type vz`. Every start explicitly passes
+`--vz-rosetta` for amd64 or `--vz-rosetta=false` for arm64, so saved Rosetta
+settings cannot carry into an arm64 run. Architecture selection keeps the
+existing isolation and shared-state snapshot contract.
 
 Each invocation uses the `netnone` profile in the private Colima home
 `~/.colima-netnone` (VZ, Docker runtime, 4 CPUs,
@@ -56,8 +75,12 @@ the repo into a fresh work volume. It excludes `.gradle` directories at every
 depth and `build` directories only when their parent contains `build.gradle`,
 `build.gradle.kts`, `settings.gradle` or `settings.gradle.kts`. Source packages,
 resources and files named `build` are preserved. Excluded directory paths with
-newlines are refused clearly. Archive creation and extraction failures are
-checked independently. It always attempts to copy all `build/test-results` and
+newlines are refused clearly. Both arm64 and amd64 use `cp -R -P -p` to copy
+source, then remove the excluded directories; copy and removal failures each
+stop execution. GNU tar 1.35 extraction fails with ENOSYS under Linux Rosetta,
+so amd64 also copies build outputs before removing them. This is slower for
+repos with large `build/` trees; clean those build trees for speed.
+It always attempts to copy all `build/test-results` and
 `build/reports` trees to `--out/<UTC timestamp>/`, retaining relative paths.
 Only the current timestamp directory is bound as `/out`; earlier runs are never
 mounted in the container. It is writable by UID 10001 during collection, then
@@ -73,15 +96,25 @@ refusals are 3.
 
 For additional build tools, pass `--toolchain-dockerfile /absolute/Dockerfile`
 to both prep and run. Its first FROM, after ordinary comments/blank lines/ARGs,
-must use this exact base:
+must use this exact index base or the per-arch manifest matching `--arch`:
 
 ```dockerfile
 FROM eclipse-temurin:17-jdk@sha256:fe947d993c32dd9cf651a4353a6ed723c2370b3a9d034ea4cab4775404ea531a
 ```
 
-Every FROM must use that exact base or reference an earlier stage declared as
-`FROM <pinned-base> AS <name>`. Only pinned-base declarations may use AS;
-flags such as `--platform`, numeric/forward/unknown stage references, and parser
+The embedded base substitutes the matching manifest into its owned Dockerfile
+bytes before building via stdin. Both manifests belong to the pinned index above:
+
+| Architecture | Manifest base |
+| --- | --- |
+| amd64 | `eclipse-temurin:17-jdk@sha256:fc1394dc03c3de483ea03b14ccf0a076f772f7782aaeffc9d5a2cbde2ae5df0e` |
+| arm64 | `eclipse-temurin:17-jdk@sha256:c4378bc2c608f8ca536dc9a60a017a2d675501c55b00b2ac3db9b6a8200a3458` |
+
+Every caller FROM must use that exact index or the matching manifest, or reference
+an earlier stage declared as
+`FROM <pinned-base> AS <name>`. Only pinned-base declarations may use AS.
+The other architecture's manifest and tag-only bases are refused (exit 2).
+Flags such as `--platform`, numeric/forward/unknown stage references, and parser
 directives (`# syntax=`, `# check=`, `# escape=`, ignoring case and optional
 spaces) before the first instruction are refused. Logical instructions
 containing `<<` (including heredocs, also when `<<` is split by a line
@@ -94,10 +127,16 @@ can pull content that this tool does not pin. Pinning those images, like
 The file must create or keep user `netnone` with UID/GID 10001 and keep
 `/work` and `/gradle` owned by 10001:10001. Docker copies the image mountpoint
 ownership into empty named volumes; no root chown container is run. The embedded
-base is always built first as `netnone-base:local`; the caller Dockerfile is then
+base is always built first as `netnone-base:<arch>`; the caller Dockerfile is then
 built from the exact validated bytes via `docker build -f - <context dir>`, with
 its own directory as context and no injected build arguments. The embedded base
-also uses Dockerfile stdin. Runtime entrypoints are explicitly `/bin/sh` for
+also uses Dockerfile stdin. After every base/toolchain build, the tool inspects
+`{{.Os}}/{{.Architecture}}` on the immutable image ID and requires `linux/<arch>`.
+Run repeats that assertion after startup, before the test container. A mismatch
+refuses with exit 3, writes no new prep record, and still stops the owned VM.
+Per-arch manifests and ID assertions avoid ambiguous index inspection with the
+classic image store, which may retain only one architecture per reference.
+Runtime entrypoints are explicitly `/bin/sh` for
 prep/run scripts and `java` for the selftest probe. Toolchain FROM instructions
 retain the checked pinned bases or stage references. Prep
 uses UID/GID 10001 with all capabilities dropped and `no-new-privileges`, on the
@@ -114,12 +153,17 @@ Before any profile operation, prep/run/selftest refuse when the host's 5-minute
 load exceeds `--max-load` (default: host CPU count). Equality is allowed. A
 nonblocking flock prevents overlapping invocations. The private `0700` state
 root is `~/Library/Application Support/mac-infra/netnone/`, containing `run.lock`,
-`docker-config/` and atomically written `prep-records.json`. Docker and Colima use
+`docker-config/` and atomically written `prep-records.json`, keyed by
+(repo, toolchain SHA, arch). Docker and Colima use
 the private-home socket and private Docker config. Shared-state snapshots detect
 endpoint drift; equal snapshots do not prove the absence of intermediate writes.
 `status` reads profile status, records, state path and lock ownership.
 
-Selftest retains its fixture/results under the state root. It checks networked
+Selftest retains its fixture/results under the state root. Its `prep arch` and
+`run arch` rows each require the JVM `os.arch` plus the little-endian ELF
+`e_machine` from bytes 18–19 of `/proc/self/exe`, the executing JVM launcher:
+`arch=amd64` with `elf=62`, or `arch=aarch64` with `elf=183`. Missing,
+duplicate or mismatched architecture evidence fails the row. It checks networked
 DNS/TCP probes, denied probes, and the complete expected JUnit testcase set:
 `OfflineTest.arithmetic` and `OfflineTest.buildPackageWasCopied` must pass;
 `NetworkTest.repositoryReachable` must fail with an actual UnknownHostException,
