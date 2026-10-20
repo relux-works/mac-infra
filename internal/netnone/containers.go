@@ -43,6 +43,13 @@ while IFS= read -r p; do
   ./?*) ;;
   *) echo "source copy refused: invalid excluded path" >&2; exit 1 ;;
  esac
+ # cp -p keeps a read-only (0555) excluded tree read-only; make it owner-
+ # writable first or its children cannot be removed. chmod -R follows no
+ # symlinks met during traversal (GNU and BSD).
+ if ! chmod -R u+w "/work/${p#./}"; then
+  echo "source exclusion removal failed" >&2
+  exit 1
+ fi
  if ! rm -rf -- "/work/${p#./}"; then
   echo "source exclusion removal failed" >&2
   exit 1

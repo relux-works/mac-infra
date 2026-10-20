@@ -276,6 +276,18 @@ func shellFixtureRoot(t *testing.T, script, mode string, dirs ...string) (string
 	} {
 		writeFixture(t, filepath.Join(root, "src", path), contents, 0600)
 	}
+	if mode == "readonly-build" {
+		// A populated read-only excluded tree, as a toolchain may leave behind.
+		readonly := filepath.Join(root, "src", "mod", "build")
+		if err := os.Chmod(readonly, 0555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			for _, dir := range []string{readonly, filepath.Join(root, "work", "mod", "build")} {
+				os.Chmod(dir, 0755)
+			}
+		})
+	}
 	writeFixture(t, filepath.Join(root, "src", "gradlew"), `#!/bin/sh
 case " $* " in *" --dry-run "*) echo dry-run-ok; exit 0;; esac
 if [ "$FAKE_MODE" = dependency ]; then echo 'Could not resolve dependency' >&2; exit 7; fi
@@ -872,5 +884,21 @@ func TestRestrictOutputDepthBound(t *testing.T) {
 	}
 	if runAt < 0 || stopAt < runAt {
 		t.Fatalf("VM not stopped after the run: run=%d stop=%d", runAt, stopAt)
+	}
+}
+
+// Review F1 (PR #25): cp -p keeps a populated 0555 excluded build tree
+// read-only; the copy makes it owner-writable before removal, so it is
+// removed and the copy completes. The source tree keeps its 0555 mode.
+func TestCopySourceReadOnlyExcludedTree(t *testing.T) {
+	root, out, err := shellFixtureRoot(t, copySource+"echo copy-completed\n", "readonly-build")
+	if err != nil || !strings.Contains(out, "copy-completed") {
+		t.Fatalf("read-only excluded tree blocked the copy: %v %s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(root, "work", "mod", "build")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only excluded tree remains: %v", err)
+	}
+	if st, err := os.Stat(filepath.Join(root, "src", "mod", "build")); err != nil || st.Mode().Perm() != 0555 {
+		t.Fatalf("source tree mode changed: %v %v", st, err)
 	}
 }
