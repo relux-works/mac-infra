@@ -1,4 +1,6 @@
 .temp/
+/tmp/
+/temp/
 bin/
 dist/
 build/
@@ -9,6 +11,15 @@ coverage.out
 .coverage/
 .DS_Store
 
-# Transient raw traces from task-board agent runs. Keep concise task outcomes
-# and progress records under .task-board/ tracked instead.
-.task-board/.resources/**/*_spawn-log_*.log
+# Local task-board state and orchestration policy.
+/task-board.config.json
+/.task-board/
+
+# Installed agent infrastructure and generated local instructions.
+/.agents/
+/.claude/
+/.codex/
+/.local/
+/.planning/
+/AGENTS.md
+/CLAUDE.md
