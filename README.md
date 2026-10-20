@@ -174,7 +174,8 @@ an earlier stage declared as
 The other architecture's manifest and tag-only bases are refused (exit 2).
 The builder never parses the caller's raw file. mac-netnone joins it into
 logical instructions the way Docker does (a backslash at the end of a line,
-followed only by spaces or tabs, continues it; comment and whitespace-only lines
+followed only by spaces or tabs, continues it; a CR outside a CRLF line ending
+is refused (exit 2); comment and whitespace-only lines
 inside a continuation are skipped; the next line's leading whitespace is kept),
 validates those, and builds from the Dockerfile it emits from them: one line
 per instruction, comments dropped, and the pinned index in FROM replaced by

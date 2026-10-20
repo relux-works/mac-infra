@@ -383,6 +383,12 @@ func validToolchain(data []byte, arch string) bool {
 // line's leading whitespace is kept. Parser directives before the first
 // instruction, heredocs and a continuation at EOF are refused.
 func logicalInstructions(data []byte) ([]string, bool) {
+	// Docker strips every trailing CR before it checks for a continuation;
+	// this parser strips one. Refusing any CR outside a CRLF pair keeps the
+	// two identical (CR CR LF and CR-space-LF would otherwise hide one).
+	if bytes.Contains(bytes.ReplaceAll(data, []byte("\r\n"), nil), []byte("\r")) {
+		return nil, false
+	}
 	var out []string
 	var cur string
 	continued, seenInstruction := false, false

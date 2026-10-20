@@ -1035,3 +1035,38 @@ func TestContinuationTrailingWhitespace(t *testing.T) {
 		}
 	}
 }
+
+// Review round 5 (PR #27): a CR outside a CRLF pair is refused before any
+// runner call on both arches, because Docker strips every trailing CR and
+// could then see a continuation that hides a stage declaration (the witnesses
+// below would turn FROM alpine into an external image). Plain CRLF files stay
+// accepted and keep their boundaries.
+func TestToolchainStrayCarriageReturn(t *testing.T) {
+	for _, arch := range []string{"amd64", "arm64"} {
+		for name, row := range map[string]struct {
+			content string
+			refused bool
+		}{
+			"cr-cr-lf":    {"FROM " + BaseImage + "\nRUN true \\\r\r\nFROM " + BaseImage + " AS alpine\nFROM alpine\n", true},
+			"cr-space-lf": {"FROM " + BaseImage + "\nRUN true \\\r \nFROM " + BaseImage + " AS alpine\nFROM alpine\n", true},
+			"bare-cr":     {"FROM " + BaseImage + "\rRUN true\n", true},
+			"crlf":        {"FROM " + BaseImage + " AS a\r\nRUN true \\\r\n  && echo ok\r\nFROM a\r\n", false},
+		} {
+			h := archHarness(t, arch)
+			h.o.Toolchain = filepath.Join(h.root, "Dockerfile")
+			writeFixture(t, h.o.Toolchain, row.content, 0600)
+			want := 0
+			if row.refused {
+				want = 2
+			}
+			h.exec(t, "prep", want)
+			if row.refused && len(h.f.calls) != 0 {
+				t.Fatalf("%s/%s: refused file reached the runner", arch, name)
+			}
+		}
+		out, ok := normalizeToolchain([]byte("FROM "+BaseImage+" AS a\r\nRUN true \\\r\n  && echo ok\r\nFROM a\r\n"), arch)
+		if !ok || string(out) != "FROM "+baseImage(arch)+" AS a\nRUN true   && echo ok\nFROM a\n" {
+			t.Fatalf("%s: CRLF emission %q (ok=%t)", arch, out, ok)
+		}
+	}
+}
