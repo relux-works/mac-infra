@@ -105,7 +105,7 @@ func TestArchitectureBuildPinsAndInspection(t *testing.T) {
 					if !strings.HasPrefix(string(data), "FROM "+row.pin+"\n") || !has(c.Args, "-t", "netnone-base:"+row.arch) {
 						t.Fatalf("wrong base/tag: %s %v", data, c.Args)
 					}
-				} else if string(data) != string(pinToolchain([]byte(original), row.arch)) || strings.Contains(string(data), BaseImage) {
+				} else if want, _ := normalizeToolchain([]byte(original), row.arch); string(data) != string(want) || strings.Contains(string(data), BaseImage) {
 					// The validated caller bytes are built with the index pinned to
 					// this architecture's manifest, and nothing else changed.
 					t.Fatalf("caller bytes not built as validated and arch-pinned: %s", data)

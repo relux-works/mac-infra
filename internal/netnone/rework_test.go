@@ -188,7 +188,8 @@ func TestBuildValidatedBytes(t *testing.T) {
 		t.Fatalf("builds=%d", len(builds))
 	}
 	base, _ := assets.ReadFile("assets/Dockerfile")
-	for i, want := range []string{strings.Replace(string(base), BaseImage, BaseImageARM64, 1), string(pinToolchain([]byte(original), "arm64"))} {
+	emitted, _ := normalizeToolchain([]byte(original), "arm64")
+	for i, want := range []string{strings.Replace(string(base), BaseImage, BaseImageARM64, 1), string(emitted)} {
 		c := builds[i]
 		if !has(c.Args, "-f", "-") || c.Stdin == nil {
 			t.Fatalf("build reopened path: %v", c.Args)
@@ -955,32 +956,34 @@ func TestCopySourceChmodFailure(t *testing.T) {
 	}
 }
 
-// Consumer bug (2026-10-21): the pinned index in a toolchain Dockerfile is
-// rewritten to the per-arch manifest everywhere it appears (single-line and
-// continued FROM, stage FROM, COPY --from) for both architectures; a file
-// already using the matching per-arch digest is unchanged.
-func TestPinToolchainRewritesIndex(t *testing.T) {
+// Consumer bug (2026-10-21): the builder receives a Dockerfile emitted from
+// the validated parse, one line per instruction, comments dropped, and the
+// pinned index in FROM replaced by the manifest for the arch. Continuations
+// join the way Docker joins them, so the next line's leading whitespace is
+// kept; nothing the builder sees can be split or hidden.
+func TestNormalizeToolchainEmission(t *testing.T) {
 	for _, arch := range []string{"amd64", "arm64"} {
-		in := "# base " + BaseImage + "\nFROM " + BaseImage + "\nUSER root\nCOPY input.txt /tmp/input/\n" +
-			"FROM \\\n  " + BaseImage + " AS b\nCOPY --from=" + BaseImage + " /etc/os-release /x\n"
-		out := string(pinToolchain([]byte(in), arch))
-		if strings.Contains(out, BaseImage) || strings.Count(out, baseImage(arch)) != 4 {
-			t.Fatalf("%s: index not fully pinned:\n%s", arch, out)
+		in := "# leading comment\r\nARG X=1\nFROM " + BaseImage + " AS base\nUSER root\n" +
+			"RUN echo foo\\\n  bar \\ \t\n\n# inside\n\u00a0\n  baz\n" +
+			"COPY --from=base /etc/os-release /x\nFROM base\n"
+		want := "ARG X=1\nFROM " + baseImage(arch) + " AS base\nUSER root\n" +
+			"RUN echo foo  bar   baz\nCOPY --from=base /etc/os-release /x\nFROM base\n"
+		got, ok := normalizeToolchain([]byte(in), arch)
+		if !ok || string(got) != want {
+			t.Fatalf("%s: emitted %q, want %q (ok=%t)", arch, got, want, ok)
 		}
-		if strings.Replace(out, baseImage(arch), BaseImage, -1) != in {
-			t.Fatalf("%s: rewrite changed more than the pin", arch)
-		}
-		already := "FROM " + baseImage(arch) + "\nUSER root\n"
-		if string(pinToolchain([]byte(already), arch)) != already {
-			t.Fatalf("%s: per-arch digest rewritten", arch)
+		if strings.Contains(string(got), BaseImage) || strings.Contains(string(got), "\\\n") {
+			t.Fatalf("%s: emitted index or continuation", arch)
 		}
 	}
 }
 
-// Review F1 (PR #27): a pinned-index reference split by a line continuation
-// inside the image name (FROM or COPY --from) is refused for both arches
-// before any runner call. A split before the reference and a one-line file
-// stay accepted (controls).
+// Review rounds 1-3 (PR #27): a FROM of the index split in any Docker-joined
+// way (plain, indented, whitespace after the backslash, blank, comment or
+// Unicode-whitespace continuation lines) is accepted and built pinned, since
+// the builder only sees the normalized emission. Any --from/from= that names
+// an image, in any spelling (plain, split, quoted fragments), is refused
+// before any runner call; --from naming a declared stage is accepted.
 func TestToolchainSplitIndexReference(t *testing.T) {
 	head, tail := "eclipse-temurin:17-jdk@", strings.TrimPrefix(BaseImage, "eclipse-temurin:17-jdk@")
 	for _, arch := range []string{"amd64", "arm64"} {
@@ -988,20 +991,20 @@ func TestToolchainSplitIndexReference(t *testing.T) {
 			content string
 			refused bool
 		}{
-			"split-from":        {"FROM " + head + "\\\n" + tail + "\nUSER root\n", true},
-			"split-from-indent": {"FROM " + head + "\\\n    " + tail + "\nUSER root\n", true},
-			"split-copy-from":   {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\\n" + tail + " /etc/os-release /x\n", true},
-			// Round-2 witnesses: whitespace after the backslash, a blank
-			// continuation line, and a comment that cancels a count comparison.
-			"trailing-ws":         {"FROM " + head + "\\ \t\n" + tail + "\nUSER root\n", true},
-			"blank-line":          {"FROM " + head + "\\\n\n" + tail + "\nUSER root\n", true},
-			"comment-cancel":      {"FROM " + head + "\\\n# " + BaseImage + "\n" + tail + "\nUSER root\n", true},
-			"copy-trailing-ws":    {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\ \n" + tail + " /etc/os-release /x\n", true},
-			"copy-blank-line":     {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\\n\n" + tail + " /etc/os-release /x\n", true},
-			"copy-comment-cancel": {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\\n# " + BaseImage + "\n" + tail + " /x /y\n", true},
-			"comment-full-index":  {"# built on " + BaseImage + "\nFROM " + BaseImage + "\nUSER root\n", false},
-			"split-before-ref":    {"FROM \\\n  " + BaseImage + "\nUSER root\n", false},
-			"one-line":            {"FROM " + BaseImage + "\nUSER root\nCOPY input.txt /tmp/input/\n", false},
+			"split-from":           {"FROM " + head + "\\\n" + tail + "\nUSER root\n", false},
+			"split-from-ws":        {"FROM " + head + "\\ \t\n" + tail + "\nUSER root\n", false},
+			"split-from-blank":     {"FROM " + head + "\\\n\n" + tail + "\nUSER root\n", false},
+			"split-from-nbsp":      {"FROM " + head + "\\\n\u00a0\n" + tail + "\nUSER root\n", false},
+			"split-from-comment":   {"FROM " + head + "\\\n# " + BaseImage + "\n" + tail + "\nUSER root\n", false},
+			"copy-from-index":      {"FROM " + BaseImage + "\nCOPY --from=" + BaseImage + " /etc/os-release /x\n", true},
+			"copy-from-split":      {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\\n" + tail + " /etc/os-release /x\n", true},
+			"copy-from-quoted":     {"FROM " + BaseImage + "\nCOPY --from=\"" + head + "\"\\\n\"" + tail + "\" /etc/os-release /x\n", true},
+			"copy-from-no-equals":  {"FROM " + BaseImage + " AS a\nCOPY --from a /x /y\n", true},
+			"mount-from-image":     {"FROM " + BaseImage + "\nRUN --mount=type=bind,from=" + BaseImage + ",target=/m true\n", true},
+			"copy-from-stage":      {"FROM " + BaseImage + " AS a\nFROM " + BaseImage + "\nCOPY --from=a /etc/os-release /x\n", false},
+			"copy-from-stage-quot": {"FROM " + BaseImage + " AS a\nFROM " + BaseImage + "\nCOPY --from=\"a\" /etc/os-release /x\n", false},
+			"mount-cache":          {"FROM " + BaseImage + "\nRUN --mount=type=cache,target=/root/.m2 true\n", false},
+			"one-line":             {"FROM " + BaseImage + "\nUSER root\nCOPY input.txt /tmp/input/\n", false},
 		} {
 			h := archHarness(t, arch)
 			h.o.Toolchain = filepath.Join(h.root, "Dockerfile")
@@ -1013,6 +1016,14 @@ func TestToolchainSplitIndexReference(t *testing.T) {
 			h.exec(t, "prep", want)
 			if row.refused && len(h.f.calls) != 0 {
 				t.Fatalf("%s/%s: refused file reached the runner", arch, name)
+			}
+			if !row.refused {
+				for _, c := range callsNamed(h.f.calls, "docker", "build") {
+					data, _ := io.ReadAll(c.Stdin)
+					if strings.Contains(string(data), BaseImage) || strings.Contains(string(data), head+"\n") {
+						t.Fatalf("%s/%s: builder received an unpinned or split index: %q", arch, name, data)
+					}
+				}
 			}
 		}
 	}

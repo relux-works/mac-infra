@@ -172,16 +172,19 @@ Every caller FROM must use that exact index or the matching manifest, or referen
 an earlier stage declared as
 `FROM <pinned-base> AS <name>`. Only pinned-base declarations may use AS.
 The other architecture's manifest and tag-only bases are refused (exit 2).
-Before building, mac-netnone rewrites every occurrence of the index in the
-caller's validated Dockerfile to the manifest matching `--arch`. The classic
-image store can otherwise resolve the index to the other architecture's local
-image, and a later step (for example COPY after USER) fails with "does not
-provide the specified platform". The selftest builds through such a
-toolchain fixture (index FROM, USER root, COPY) on both architectures.
-A reference to the index that is not written contiguously on one line (split
-by a line continuation, with or without trailing whitespace, blank lines or
-comment lines in between) is refused (exit 2): write each reference on one
-line. The check is deliberately conservative.
+The builder never parses the caller's raw file. mac-netnone joins it into
+logical instructions the way Docker does (a backslash at the end of a line,
+trailing whitespace allowed, continues it; comment and whitespace-only lines
+inside a continuation are skipped; the next line's leading whitespace is kept),
+validates those, and builds from the Dockerfile it emits from them: one line
+per instruction, comments dropped, and the pinned index in FROM replaced by
+the manifest matching `--arch`. The classic image store can otherwise resolve
+the index to the other architecture's local image, and a later step (for
+example COPY after USER) fails with "does not provide the specified platform".
+A `--from=`/`from=` value in any other instruction (COPY/ADD --from, RUN
+--mount) must name a declared stage, after quotes are removed; an image there
+is refused (exit 2). The selftest builds through a toolchain fixture of the
+reported shape (index FROM, USER root, COPY) on both architectures.
 Flags such as `--platform`, numeric/forward/unknown stage references, and parser
 directives (`# syntax=`, `# check=`, `# escape=`, ignoring case and optional
 spaces) before the first instruction are refused. Logical instructions
@@ -196,8 +199,8 @@ The file must create or keep user `netnone` with UID/GID 10001 and keep
 `/work` and `/gradle` owned by 10001:10001. Docker copies the image mountpoint
 ownership into empty named volumes; no root chown container is run. The embedded
 base is always built first as `netnone-base:<arch>`; the caller Dockerfile is then
-built from the validated bytes, with the pinned index rewritten to the
-per-arch manifest, via `docker build -f - <context dir>`, with
+built from the normalized emission of the validated instructions (see above),
+via `docker build -f - <context dir>`, with
 its own directory as context and no injected build arguments. The embedded base
 also uses Dockerfile stdin. After every base/toolchain build, the tool inspects
 `{{.Os}}/{{.Architecture}}` on the immutable image ID and requires `linux/<arch>`.

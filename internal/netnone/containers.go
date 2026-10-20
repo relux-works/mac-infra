@@ -137,7 +137,7 @@ func (s *session) prep(ctx context.Context, o Options, id toolchainID, fixture b
 		return "", build, err
 	}
 	if id.Path != "" {
-		build, err = checked(s.e.Runner.Run(ctx, Command{Name: "docker", Args: []string{"build", "--platform", "linux/" + o.Arch, "--quiet", "-f", "-", filepath.Dir(id.Path)}, Env: s.env, Stdin: bytes.NewReader(pinToolchain(id.Data, o.Arch))}))
+		build, err = checked(s.e.Runner.Run(ctx, Command{Name: "docker", Args: []string{"build", "--platform", "linux/" + o.Arch, "--quiet", "-f", "-", filepath.Dir(id.Path)}, Env: s.env, Stdin: bytes.NewReader(id.Build)}))
 		if err != nil {
 			return "", build, err
 		}

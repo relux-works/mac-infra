@@ -1,7 +1,6 @@
 package netnone
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -19,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/sys/unix"
 )
@@ -340,7 +340,9 @@ func acquireLock(state string) (*os.File, error) {
 
 type toolchainID struct {
 	Path, SHA string
-	Data      []byte
+	// Data is the caller's file as validated and hashed; Build is the
+	// single-line Dockerfile emitted from the same parse, which the builder gets.
+	Data, Build []byte
 }
 
 func toolchain(path, arch string) (toolchainID, error) {
@@ -358,87 +360,106 @@ func toolchain(path, arch string) (toolchainID, error) {
 	if err != nil {
 		return toolchainID{}, err
 	}
-	if !validToolchain(data, arch) {
-		return toolchainID{}, fail(2, "refused: toolchain Dockerfile requires pinned FROM "+BaseImage+" or "+baseImage(arch)+", earlier pinned stages only, and no parser directives or heredocs")
-	}
-	if splitIndexReference(data) {
-		return toolchainID{}, fail(2, "refused: toolchain Dockerfile splits "+BaseImage+" across a line continuation; write each reference to it on one line")
+	build, ok := normalizeToolchain(data, arch)
+	if !ok {
+		return toolchainID{}, fail(2, "refused: toolchain Dockerfile requires pinned FROM "+BaseImage+" or "+baseImage(arch)+", earlier pinned stages only, --from=/from= naming only declared stages, and no parser directives or heredocs")
 	}
 	sum := sha256.Sum256(data)
-	return toolchainID{Path: path, SHA: hex.EncodeToString(sum[:]), Data: data}, nil
-}
-
-// splitIndexReference reports a pinned-index reference that pinToolchain
-// would not rewrite because it is not contiguous in the file: split by a
-// continuation (with any trailing whitespace, blank or comment lines between)
-// or otherwise broken by whitespace. Every complete reference is removed
-// first, exactly the set that pinToolchain rewrites; then all whitespace and
-// backslashes are deleted. Any index still visible was split. This is
-// deliberately parser-free and conservative: an odd comment that only spells
-// the index across lines is refused too.
-func splitIndexReference(data []byte) bool {
-	var kept []string
-	for _, line := range strings.Split(strings.ReplaceAll(string(data), BaseImage, ""), "\n") {
-		// Docker drops comment lines inside a continuation; drop them all here.
-		if !strings.HasPrefix(strings.TrimSpace(line), "#") {
-			kept = append(kept, line)
-		}
-	}
-	rest := strings.Join(kept, "\n")
-	collapsed := strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == '\\' {
-			return -1
-		}
-		return r
-	}, rest)
-	return strings.Contains(collapsed, BaseImage)
+	return toolchainID{Path: path, SHA: hex.EncodeToString(sum[:]), Data: data, Build: build}, nil
 }
 
 var parserDirective = regexp.MustCompile(`(?i)^#\s*(syntax|check|escape)\s*=`)
 var stageName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]*$`)
 
 func validToolchain(data []byte, arch string) bool {
-	pinned := func(image string) bool { return image == BaseImage || image == baseImage(arch) }
-	seenInstruction, seenFrom := false, false
-	stages := map[string]bool{}
-	var instruction string
-	var continued bool
-	scan := bufio.NewScanner(strings.NewReader(string(data)))
-	for scan.Scan() {
-		line := strings.TrimSpace(scan.Text())
-		if !seenInstruction && parserDirective.MatchString(line) {
-			return false
+	_, ok := normalizeToolchain(data, arch)
+	return ok
+}
+
+// logicalInstructions joins a Dockerfile into logical instructions the way
+// Docker does: a backslash at the end of a line (trailing whitespace allowed,
+// an escaped "\\" excluded) continues it; inside a continuation, comment lines
+// and whitespace-only lines (Unicode whitespace) are skipped and the next
+// line's leading whitespace is kept. Parser directives before the first
+// instruction, heredocs and a continuation at EOF are refused.
+func logicalInstructions(data []byte) ([]string, bool) {
+	var out []string
+	var cur string
+	continued, seenInstruction := false, false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		trimmed := strings.TrimSpace(line)
+		if !seenInstruction && parserDirective.MatchString(trimmed) {
+			return nil, false
 		}
-		if line == "" || strings.HasPrefix(line, "#") {
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
-		}
-		// Heredoc bodies are not instructions; reject until parsed explicitly.
-		if strings.Contains(line, "<<") {
-			return false
 		}
 		seenInstruction = true
-		// An escaped trailing backslash is literal; it must not swallow the
-		// next instruction (which may itself be an unpinned FROM).
-		continued = strings.HasSuffix(line, `\`) && !strings.HasSuffix(line, `\\`)
 		if continued {
-			instruction += strings.TrimSuffix(line, `\`)
+			cur += line
+		} else {
+			cur = strings.TrimLeftFunc(line, unicode.IsSpace)
+		}
+		end := strings.TrimRightFunc(cur, unicode.IsSpace)
+		if strings.HasSuffix(end, `\`) && !strings.HasSuffix(end, `\\`) {
+			cur = strings.TrimSuffix(end, `\`)
+			continued = true
 			continue
 		}
-		instruction += line
-		// Docker joins continuation lines before it detects a heredoc, so the
-		// check runs on the whole logical instruction (`COPY <\` + `<EOF`).
-		if strings.Contains(instruction, "<<") {
-			return false
+		continued = false
+		if strings.Contains(end, "<<") {
+			return nil, false
 		}
+		out = append(out, end)
+		cur = ""
+	}
+	return out, !continued
+}
+
+// fromFlag finds --from=/from= values in non-FROM instructions (COPY/ADD
+// --from, RUN --mount=...,from=...). The value runs to the next whitespace or
+// comma; all quotes are removed before it is compared with declared stages.
+var fromFlag = regexp.MustCompile(`(?i)(?:--|[,\s])from(=?)`)
+
+// normalizeToolchain validates a caller toolchain Dockerfile and emits the
+// Dockerfile the builder receives: one line per logical instruction, comments
+// dropped, and the pinned index in FROM replaced by the manifest matching arch.
+// The builder never parses the caller's raw bytes, so the emitted text is
+// exactly what was validated.
+func normalizeToolchain(data []byte, arch string) ([]byte, bool) {
+	pinned := func(image string) bool { return image == BaseImage || image == baseImage(arch) }
+	instructions, ok := logicalInstructions(data)
+	if !ok {
+		return nil, false
+	}
+	seenFrom := false
+	stages := map[string]bool{}
+	var b strings.Builder
+	for _, instruction := range instructions {
 		fields := strings.Fields(instruction)
-		instruction = ""
 		if len(fields) == 0 {
-			return false
+			return nil, false
 		}
 		if !strings.EqualFold(fields[0], "FROM") {
 			if !seenFrom && !strings.EqualFold(fields[0], "ARG") {
-				return false
+				return nil, false
 			}
+			for _, m := range fromFlag.FindAllStringSubmatchIndex(instruction, -1) {
+				if instruction[m[2]:m[3]] != "=" {
+					return nil, false
+				}
+				rest := instruction[m[1]:]
+				end := strings.IndexFunc(rest, func(r rune) bool { return unicode.IsSpace(r) || r == ',' })
+				if end >= 0 {
+					rest = rest[:end]
+				}
+				if !stages[strings.ToLower(strings.NewReplacer(`"`, "", "'", "").Replace(rest))] {
+					return nil, false
+				}
+			}
+			b.WriteString(instruction)
+			b.WriteString("\n")
 			continue
 		}
 		// Only a pinned base may introduce an alias. References cannot declare
@@ -446,25 +467,23 @@ func validToolchain(data []byte, arch string) bool {
 		if len(fields) == 4 && pinned(fields[1]) && strings.EqualFold(fields[2], "AS") && stageName.MatchString(fields[3]) {
 			name := strings.ToLower(fields[3])
 			if stages[name] {
-				return false
+				return nil, false
 			}
 			stages[name] = true
-		} else if len(fields) != 2 || (!pinned(fields[1]) && !stages[strings.ToLower(fields[1])]) {
-			return false
+			b.WriteString("FROM " + baseImage(arch) + " AS " + fields[3] + "\n")
+		} else if len(fields) == 2 && pinned(fields[1]) {
+			b.WriteString("FROM " + baseImage(arch) + "\n")
+		} else if len(fields) == 2 && stages[strings.ToLower(fields[1])] {
+			b.WriteString("FROM " + fields[1] + "\n")
+		} else {
+			return nil, false
 		}
 		seenFrom = true
 	}
-	return scan.Err() == nil && !continued && instruction == "" && seenFrom
-}
-
-// pinToolchain rewrites the pinned index, wherever it appears in validated
-// toolchain bytes (single-line or continued FROM, stage FROM, COPY --from), to
-// the per-arch manifest digest of that same index. The legacy builder can
-// otherwise resolve the index to a local image of the other architecture, and
-// a later step then fails with "does not provide the specified platform".
-// Validation already admitted the index, so the result stays pinned.
-func pinToolchain(data []byte, arch string) []byte {
-	return bytes.ReplaceAll(data, []byte(BaseImage), []byte(baseImage(arch)))
+	if !seenFrom {
+		return nil, false
+	}
+	return []byte(b.String()), true
 }
 
 var imageID = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
