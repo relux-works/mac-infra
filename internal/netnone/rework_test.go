@@ -991,8 +991,17 @@ func TestToolchainSplitIndexReference(t *testing.T) {
 			"split-from":        {"FROM " + head + "\\\n" + tail + "\nUSER root\n", true},
 			"split-from-indent": {"FROM " + head + "\\\n    " + tail + "\nUSER root\n", true},
 			"split-copy-from":   {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\\n" + tail + " /etc/os-release /x\n", true},
-			"split-before-ref":  {"FROM \\\n  " + BaseImage + "\nUSER root\n", false},
-			"one-line":          {"FROM " + BaseImage + "\nUSER root\nCOPY input.txt /tmp/input/\n", false},
+			// Round-2 witnesses: whitespace after the backslash, a blank
+			// continuation line, and a comment that cancels a count comparison.
+			"trailing-ws":         {"FROM " + head + "\\ \t\n" + tail + "\nUSER root\n", true},
+			"blank-line":          {"FROM " + head + "\\\n\n" + tail + "\nUSER root\n", true},
+			"comment-cancel":      {"FROM " + head + "\\\n# " + BaseImage + "\n" + tail + "\nUSER root\n", true},
+			"copy-trailing-ws":    {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\ \n" + tail + " /etc/os-release /x\n", true},
+			"copy-blank-line":     {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\\n\n" + tail + " /etc/os-release /x\n", true},
+			"copy-comment-cancel": {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\\n# " + BaseImage + "\n" + tail + " /x /y\n", true},
+			"comment-full-index":  {"# built on " + BaseImage + "\nFROM " + BaseImage + "\nUSER root\n", false},
+			"split-before-ref":    {"FROM \\\n  " + BaseImage + "\nUSER root\n", false},
+			"one-line":            {"FROM " + BaseImage + "\nUSER root\nCOPY input.txt /tmp/input/\n", false},
 		} {
 			h := archHarness(t, arch)
 			h.o.Toolchain = filepath.Join(h.root, "Dockerfile")

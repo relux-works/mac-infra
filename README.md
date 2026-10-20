@@ -178,8 +178,10 @@ image store can otherwise resolve the index to the other architecture's local
 image, and a later step (for example COPY after USER) fails with "does not
 provide the specified platform". The selftest builds through such a
 toolchain fixture (index FROM, USER root, COPY) on both architectures.
-A reference to the index that is split by a line continuation inside the
-image name is refused (exit 2): write each reference on one line.
+A reference to the index that is not written contiguously on one line (split
+by a line continuation, with or without trailing whitespace, blank lines or
+comment lines in between) is refused (exit 2): write each reference on one
+line. The check is deliberately conservative.
 Flags such as `--platform`, numeric/forward/unknown stage references, and parser
 directives (`# syntax=`, `# check=`, `# escape=`, ignoring case and optional
 spaces) before the first instruction are refused. Logical instructions

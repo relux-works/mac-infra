@@ -368,38 +368,30 @@ func toolchain(path, arch string) (toolchainID, error) {
 	return toolchainID{Path: path, SHA: hex.EncodeToString(sum[:]), Data: data}, nil
 }
 
-// splitIndexReference reports a pinned-index reference that exists only once
-// continuation lines are joined (for example "...17-jdk@\" then "sha256:...").
-// pinToolchain rewrites whole references only, so such a reference would reach
-// the builder unpinned. Lines are joined as Docker joins them, with comment
-// lines inside a continuation dropped, both with and without the next line's
-// leading whitespace.
+// splitIndexReference reports a pinned-index reference that pinToolchain
+// would not rewrite because it is not contiguous in the file: split by a
+// continuation (with any trailing whitespace, blank or comment lines between)
+// or otherwise broken by whitespace. Every complete reference is removed
+// first, exactly the set that pinToolchain rewrites; then all whitespace and
+// backslashes are deleted. Any index still visible was split. This is
+// deliberately parser-free and conservative: an odd comment that only spells
+// the index across lines is refused too.
 func splitIndexReference(data []byte) bool {
-	raw := strings.Count(string(data), BaseImage)
-	for _, trim := range []bool{false, true} {
-		var joined strings.Builder
-		continued := false
-		for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-			if continued && strings.HasPrefix(strings.TrimSpace(line), "#") {
-				continue
-			}
-			if continued && trim {
-				line = strings.TrimLeft(line, " \t")
-			}
-			if strings.HasSuffix(line, `\`) && !strings.HasSuffix(line, `\\`) {
-				joined.WriteString(strings.TrimSuffix(line, `\`))
-				continued = true
-				continue
-			}
-			joined.WriteString(line)
-			joined.WriteString("\n")
-			continued = false
-		}
-		if strings.Count(joined.String(), BaseImage) > raw {
-			return true
+	var kept []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(data), BaseImage, ""), "\n") {
+		// Docker drops comment lines inside a continuation; drop them all here.
+		if !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			kept = append(kept, line)
 		}
 	}
-	return false
+	rest := strings.Join(kept, "\n")
+	collapsed := strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == '\\' {
+			return -1
+		}
+		return r
+	}, rest)
+	return strings.Contains(collapsed, BaseImage)
 }
 
 var parserDirective = regexp.MustCompile(`(?i)^#\s*(syntax|check|escape)\s*=`)
