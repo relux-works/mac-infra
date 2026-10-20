@@ -276,6 +276,23 @@ func shellFixtureRoot(t *testing.T, script, mode string, dirs ...string) (string
 	} {
 		writeFixture(t, filepath.Join(root, "src", path), contents, 0600)
 	}
+	if mode == "nested-readonly" {
+		// An excluded build tree that itself contains an excluded .gradle tree,
+		// both populated and read-only: removing the outer one takes the inner.
+		writeFixture(t, filepath.Join(root, "src", "mod", "build", "generated", ".gradle", "cache.txt"), "nested cache", 0600)
+		inner := filepath.Join(root, "src", "mod", "build", "generated", ".gradle")
+		outer := filepath.Join(root, "src", "mod", "build")
+		for _, dir := range []string{inner, outer} {
+			if err := os.Chmod(dir, 0555); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Cleanup(func() {
+			for _, dir := range []string{outer, inner, filepath.Join(root, "work", "mod", "build"), filepath.Join(root, "work", "mod", "build", "generated", ".gradle")} {
+				os.Chmod(dir, 0755)
+			}
+		})
+	}
 	if mode == "readonly-build" {
 		// A populated read-only excluded tree, as a toolchain may leave behind.
 		readonly := filepath.Join(root, "src", "mod", "build")
@@ -308,6 +325,10 @@ if [ "$1" = -rf ]; then
  if [ "$FAKE_MODE" = rm-failure ]; then exit 8; fi
 fi
 exec /bin/rm "$@"
+`, 0700)
+	writeFixture(t, filepath.Join(root, "bin", "chmod"), `#!/bin/sh
+if [ "$FAKE_MODE" = chmod-failure ]; then echo chmod-attempted; exit 9; fi
+exec /bin/chmod "$@"
 `, 0700)
 	writeFixture(t, filepath.Join(root, "bin", "find"), `#!/bin/sh
 case "$FAKE_MODE" in
@@ -900,5 +921,36 @@ func TestCopySourceReadOnlyExcludedTree(t *testing.T) {
 	}
 	if st, err := os.Stat(filepath.Join(root, "src", "mod", "build")); err != nil || st.Mode().Perm() != 0555 {
 		t.Fatalf("source tree mode changed: %v %v", st, err)
+	}
+}
+
+// Review F2 (PR #25): an exclusion nested in an earlier, already removed
+// exclusion is skipped rather than failing the copy; both read-only trees
+// are gone from /work and the copy completes.
+func TestCopySourceNestedExclusions(t *testing.T) {
+	root, out, err := shellFixtureRoot(t, copySource+"echo copy-completed\n", "nested-readonly")
+	if err != nil || !strings.Contains(out, "copy-completed") {
+		t.Fatalf("nested exclusion blocked the copy: %v %s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(root, "work", "mod", "build")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outer excluded tree remains: %v", err)
+	}
+	excludes, _ := os.ReadFile(filepath.Join(root, "tmp", "netnone-excludes"))
+	if !strings.Contains(string(excludes), "./mod/build\n") || !strings.Contains(string(excludes), "./mod/build/generated/.gradle\n") {
+		t.Fatalf("fixture did not produce nested exclusions: %q", excludes)
+	}
+}
+
+// Review F2 (PR #25): skipping vanished exclusions does not hide a genuine
+// chmod failure on an existing excluded path; the copy stops before removal.
+func TestCopySourceChmodFailure(t *testing.T) {
+	root, out, err := shellFixtureRoot(t, copySource+"echo copy-completed\n", "chmod-failure")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(out, "chmod-attempted") ||
+		!strings.Contains(out, "source exclusion removal failed") || strings.Contains(out, "copy-completed") {
+		t.Fatalf("chmod failure masked: err=%v out=%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(root, "work", "mod", "build", "stale.txt")); err != nil {
+		t.Fatal("excluded tree removed despite chmod failure", err)
 	}
 }

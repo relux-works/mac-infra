@@ -46,6 +46,11 @@ while IFS= read -r p; do
  # cp -p keeps a read-only (0555) excluded tree read-only; make it owner-
  # writable first or its children cannot be removed. chmod -R follows no
  # symlinks met during traversal (GNU and BSD).
+ # find lists an excluded tree before exclusions nested inside it, so an
+ # earlier removal may already have taken this path; nothing is left to do.
+ if [ ! -e "/work/${p#./}" ] && [ ! -L "/work/${p#./}" ]; then
+  continue
+ fi
  if ! chmod -R u+w "/work/${p#./}"; then
   echo "source exclusion removal failed" >&2
   exit 1
