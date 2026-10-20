@@ -109,10 +109,11 @@ func privateEnv(env []string, home, state string) []string {
 	result := []string{}
 	for _, e := range env {
 		key, _, _ := strings.Cut(e, "=")
-		if strings.HasPrefix(key, "DOCKER_") || key == "COLIMA_PROFILE" {
+		if strings.HasPrefix(key, "DOCKER_") || key == "COLIMA_PROFILE" || key == "COLIMA_HOME" || key == "LIMA_HOME" {
 			continue
 		}
 		result = append(result, e)
 	}
-	return append(result, "DOCKER_HOST=unix://"+filepath.Join(home, ".colima/netnone/docker.sock"), "DOCKER_CONFIG="+filepath.Join(state, "docker-config"))
+	root := filepath.Join(home, ".colima-netnone")
+	return append(result, "COLIMA_HOME="+root, "LIMA_HOME="+filepath.Join(root, "_lima"), "DOCKER_HOST=unix://"+filepath.Join(root, "netnone/docker.sock"), "DOCKER_CONFIG="+filepath.Join(state, "docker-config"))
 }

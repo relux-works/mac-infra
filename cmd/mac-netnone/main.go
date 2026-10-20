@@ -19,10 +19,14 @@ var Commit = "unknown"
 var BuildDate = "unknown"
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := terminationContext()
 	defer cancel()
 	os.Exit(runWith(ctx, os.Args[1:], os.Stdout, os.Stderr, func(out, err io.Writer) *netnone.Engine { return netnone.New(&netnone.ExecRunner{}, out, err) }))
 }
+func terminationContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+}
+
 func run(args []string, out, errOut io.Writer) int {
 	return runWith(context.Background(), args, out, errOut, func(out, err io.Writer) *netnone.Engine { return netnone.New(&netnone.ExecRunner{}, out, err) })
 }

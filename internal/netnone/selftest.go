@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -97,7 +98,15 @@ func (s *session) snapshot(ctx context.Context) (snapshot, error) {
 		if _, exists := snap[key]; exists {
 			return nil, errors.New("duplicate context")
 		}
-		snap[key] = fmt.Sprint(current)
+		inspect, err := checked(s.e.Runner.Run(ctx, Command{Name: "docker", Args: []string{"context", "inspect", name}, Env: s.e.UserEnv, Timeout: 20 * time.Second}))
+		if err != nil {
+			return nil, err
+		}
+		if !json.Valid(inspect.Stdout) {
+			return nil, errors.New("invalid context inspect evidence")
+		}
+		sum := sha256.Sum256(inspect.Stdout)
+		snap[key] = fmt.Sprint(current) + ":" + hex.EncodeToString(sum[:])
 	}
 	if len(rows) == 0 {
 		return nil, errors.New("no docker contexts in snapshot")
@@ -164,6 +173,26 @@ func (s *session) snapshot(ctx context.Context) (snapshot, error) {
 		}
 		snap[key] = status
 	}
+	// Inspect only the default home, never the tool-private Colima namespace.
+	configs, err := filepath.Glob(filepath.Join(s.home, ".colima", "*", "colima.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range configs {
+		if filepath.Base(filepath.Dir(path)) == Profile {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(data)
+		rel, err := filepath.Rel(s.home, path)
+		if err != nil {
+			return nil, err
+		}
+		snap[rel] = hex.EncodeToString(sum[:])
+	}
 	return snap, nil
 }
 func snapshotDiff(a, b snapshot) string {
@@ -210,7 +239,7 @@ func probeLines(output string) (string, string) {
 	return dns, tcp
 }
 func deniedTCP(s string) bool {
-	return strings.HasPrefix(s, "tcp=fail:") && (strings.Contains(s, "Network is unreachable") || strings.HasPrefix(s, "tcp=fail:java.net.NoRouteToHostException:") || strings.HasPrefix(s, "tcp=fail:java.net.ConnectException:"))
+	return strings.HasPrefix(s, "tcp=fail:") && (strings.Contains(s, "Network is unreachable") || strings.HasPrefix(s, "tcp=fail:java.net.NoRouteToHostException:"))
 }
 func materializeFixture(root string) error {
 	err := fs.WalkDir(assets, "assets/fixture", func(path string, d fs.DirEntry, err error) error {
@@ -286,7 +315,9 @@ func (s *session) selftest(ctx context.Context, o Options) error {
 		add("prep TCP", "tcp=ok", tcp, tcp == "tcp=ok")
 		warm := regexpPrepExit(string(networked.Stdout))
 		add("prep fixture", "task exit 0", fmt.Sprint(warm), warm == 0)
-		args := append(s.deniedArgs(o, image), "java", "/src/Probe.java")
+		probeOptions := o
+		probeOptions.Out = ""
+		args := append(s.deniedArgs(probeOptions, image, "java"), "/src/Probe.java")
 		probe, probeErr := s.call(ctx, "docker", args...)
 		dns, tcp = probeLines(string(probe.Stdout))
 		add("run DNS", "dns=fail:java.net.UnknownHostException", dns, probeErr == nil && probe.ExitCode == 0 && dns == "dns=fail:java.net.UnknownHostException")
@@ -316,7 +347,8 @@ func (s *session) selftest(ctx context.Context, o Options) error {
 		diff = snapshotDiff(before, after)
 	}
 	add("shared state", "identical before/after", diff, same)
-	add("lifecycle", "completed and stopped", fmt.Sprint(workErr), workErr == nil)
+	stopped, stopErr := s.profile(snapCtx)
+	add("lifecycle", "completed and stopped", fmt.Sprintf("work=%v; state=%s; verification=%v", workErr, stopped, stopErr), workErr == nil && stopErr == nil && stopped == "stopped")
 	fmt.Fprintln(s.e.Out, "| check | expected | observed | pass/fail |\n| --- | --- | --- | --- |")
 	passed := true
 	clean := func(v string) string { return strings.NewReplacer("|", "\\|", "\n", " ", "\r", " ").Replace(v) }
@@ -356,6 +388,7 @@ type junitCase struct {
 
 func inspectJUnit(root string) (bool, bool, string) {
 	offline, network := 0, 0
+	expected := map[string]int{"arithmetic": 0, "buildPackageWasCopied": 0}
 	offOK, netOK := true, true
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -396,15 +429,21 @@ func inspectJUnit(root string) (bool, bool, string) {
 			switch c.Class {
 			case "OfflineTest":
 				offline++
+				name := strings.TrimSuffix(c.Name, "()")
+				if _, ok := expected[name]; !ok {
+					offOK = false
+				} else {
+					expected[name]++
+				}
 				offOK = offOK && len(c.Failures) == 0 && len(c.Errors) == 0 && c.Skipped == nil
 			case "NetworkTest":
 				network++
-				good := c.Skipped == nil && len(c.Failures)+len(c.Errors) > 0
+				good := strings.TrimSuffix(c.Name, "()") == "repositoryReachable" && c.Skipped == nil && len(c.Failures)+len(c.Errors) > 0
 				for _, f := range c.Failures {
-					good = good && networkException(f.Type+" "+f.Message+" "+f.Text)
+					good = good && networkFailure(f.Type, f.Message, f.Text)
 				}
 				for _, f := range c.Errors {
-					good = good && networkException(f.Type+" "+f.Message+" "+f.Text)
+					good = good && networkFailure(f.Type, f.Message, f.Text)
 				}
 				netOK = netOK && good
 			}
@@ -414,19 +453,41 @@ func inspectJUnit(root string) (bool, bool, string) {
 	if err != nil {
 		return false, false, err.Error()
 	}
-	return offline > 0 && offOK, network > 0 && netOK, fmt.Sprintf("OfflineTest cases=%d pass=%t; NetworkTest cases=%d network-fail=%t", offline, offOK, network, netOK)
+	offlinePass := expected["arithmetic"] == 1 && expected["buildPackageWasCopied"] == 1 && offOK
+	networkFail := network == 1 && netOK
+	return offlinePass, networkFail, fmt.Sprintf("OfflineTest cases=%d arithmetic=%d buildPackageWasCopied=%d pass=%t; NetworkTest cases=%d network-fail=%t", offline, expected["arithmetic"], expected["buildPackageWasCopied"], offlinePass, network, networkFail)
 }
-func networkException(text string) bool {
+
+var exceptionClass = regexp.MustCompile(`\b(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*(?:Exception|Error)\b`)
+
+// Only failure body text supplies a missing type; a message may merely mention
+// an expected exception and must not supply its identity.
+func networkFailure(kind, message, text string) bool {
+	if kind == "" {
+		kind = exceptionClass.FindString(text)
+		if kind == "" {
+			return false
+		}
+	}
+	return typedNetworkException(kind, message+" "+text)
+}
+
+func networkException(text string) bool { return typedNetworkException("", text) }
+func typedNetworkException(kind, text string) bool {
 	lower := strings.ToLower(text)
 	for _, bad := range []string{"could not resolve", "could not download", "dependency resolution", "dependency-resolution", "no cached version", "could not find", "resolve dependencies"} {
 		if strings.Contains(lower, bad) {
 			return false
 		}
 	}
-	for _, name := range []string{"java.net.UnknownHostException", "java.net.ConnectException", "java.net.NoRouteToHostException"} {
-		if strings.Contains(text, name) {
-			return true
-		}
+	if kind == "" {
+		kind = exceptionClass.FindString(text)
+	}
+	switch kind {
+	case "java.net.UnknownHostException", "java.net.NoRouteToHostException":
+		return true
+	case "java.net.SocketException":
+		return strings.Contains(text, "Network is unreachable")
 	}
 	return false
 }

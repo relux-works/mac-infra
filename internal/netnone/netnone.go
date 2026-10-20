@@ -2,6 +2,7 @@ package netnone
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -228,43 +229,68 @@ func (s *session) lifecycle(ctx context.Context, o Options, work func() error) (
 		return fail(3, "refused: colima profile netnone is already running (not started by this invocation); stop it with mac-netnone stop")
 	}
 	args := []string{"start", "--profile", Profile, "--activate=false", "--ssh-config=false", "--template=false", "--port-forwarder", "none", "--mount-inotify=false", "--mount-type", "virtiofs", "--mount", o.Repo, "--mount", o.Out + ":w", "--vm-type", "vz", "--runtime", "docker", "--cpus", strconv.Itoa(o.CPUs), "--memory", strconv.Itoa(o.Memory), "--disk", strconv.Itoa(o.Disk)}
-	if _, err = checked(s.call(ctx, "colima", args...)); err != nil {
-		return err
-	}
 	defer func() {
 		stopErr := s.stop(context.Background())
 		if stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("stop failed: %w", stopErr))
 		}
 	}()
+	if _, err = checked(s.call(ctx, "colima", args...)); err != nil {
+		return err
+	}
 	return work()
 }
 func (s *session) profile(ctx context.Context) (string, error) {
-	r, err := s.call(ctx, "colima", "status", "--profile", Profile, "--json")
+	r, err := checked(s.call(ctx, "colima", "list", "--json"))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("cannot list colima profiles: %w", err)
 	}
-	if r.ExitCode != 0 {
-		msg := strings.ToLower(string(r.Stderr) + string(r.Stdout))
-		if strings.Contains(msg, "not running") || strings.Contains(msg, "does not exist") || strings.Contains(msg, "not found") {
-			return "stopped", nil
-		}
-		return "", fmt.Errorf("cannot read colima profile status: %s", msg)
-	}
-	var v struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(r.Stdout, &v); err != nil {
-		return "", fmt.Errorf("invalid colima status: %w", err)
-	}
-	switch strings.ToLower(v.Status) {
-	case "running":
-		return "running", nil
-	case "stopped":
+	if len(bytes.TrimSpace(r.Stdout)) == 0 {
 		return "stopped", nil
 	}
-	return "", fmt.Errorf("unknown colima status %q", v.Status)
+	rows, err := objects(r.Stdout)
+	if err != nil {
+		return "", fmt.Errorf("invalid colima list: %w", err)
+	}
+	state := "stopped"
+	found := false
+	for _, row := range rows {
+		name, err := profileField(row, "name")
+		if err != nil {
+			return "", err
+		}
+		if name != Profile {
+			continue
+		}
+		if found {
+			return "", errors.New("duplicate netnone profile")
+		}
+		found = true
+		status, err := profileField(row, "status")
+		if err != nil {
+			return "", err
+		}
+		switch status {
+		case "Running":
+			state = "running"
+		case "Stopped":
+			state = "stopped"
+		default:
+			return "", fmt.Errorf("unknown colima status %q", status)
+		}
+	}
+	return state, nil
 }
+
+// Colima list's required keys are exact; only extra fields are ignored.
+func profileField(row map[string]json.RawMessage, key string) (string, error) {
+	var value string
+	if err := json.Unmarshal(row[key], &value); err != nil || value == "" {
+		return "", fmt.Errorf("invalid or missing colima %s", key)
+	}
+	return value, nil
+}
+
 func directory(path string) (string, error) {
 	if !filepath.IsAbs(path) || strings.ContainsAny(path, ":,") {
 		return "", fail(2, "refused: mount paths must be absolute directories without ':' or ','")
@@ -294,7 +320,10 @@ func acquireLock(state string) (*os.File, error) {
 	return f, nil
 }
 
-type toolchainID struct{ Path, SHA string }
+type toolchainID struct {
+	Path, SHA string
+	Data      []byte
+}
 
 func toolchain(path string) (toolchainID, error) {
 	if path == "" {
@@ -312,10 +341,10 @@ func toolchain(path string) (toolchainID, error) {
 		return toolchainID{}, err
 	}
 	if !validToolchain(data) {
-		return toolchainID{}, fail(2, "refused: toolchain Dockerfile requires pinned FROM "+BaseImage+", earlier pinned stages only, and no parser directives")
+		return toolchainID{}, fail(2, "refused: toolchain Dockerfile requires pinned FROM "+BaseImage+", earlier pinned stages only, and no parser directives or heredocs")
 	}
 	sum := sha256.Sum256(data)
-	return toolchainID{path, hex.EncodeToString(sum[:])}, nil
+	return toolchainID{Path: path, SHA: hex.EncodeToString(sum[:]), Data: data}, nil
 }
 
 var parserDirective = regexp.MustCompile(`(?i)^#\s*(syntax|check|escape)\s*=`)
@@ -334,6 +363,10 @@ func validToolchain(data []byte) bool {
 		}
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
+		}
+		// Heredoc bodies are not instructions; reject until parsed explicitly.
+		if strings.Contains(line, "<<") {
+			return false
 		}
 		seenInstruction = true
 		// An escaped trailing backslash is literal; it must not swallow the

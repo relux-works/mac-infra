@@ -3,10 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/relux-works/mac-infra/internal/netnone"
 )
@@ -35,7 +40,7 @@ type cliFake struct{ calls []netnone.Command }
 
 func (f *cliFake) Run(_ context.Context, c netnone.Command) (netnone.Result, error) {
 	f.calls = append(f.calls, c)
-	return netnone.Result{Stdout: []byte(`{"status":"Running"}`)}, nil
+	return netnone.Result{Stdout: []byte(`{"name":"netnone","status":"Running"}`)}, nil
 }
 
 // CLI flags reach the fake-backed engine and its load refusal preserves exit 3 without any tool command.
@@ -62,5 +67,97 @@ func TestCLIRefusalAndStatus(t *testing.T) {
 		} else if code != 0 || len(f.calls) != 1 || !strings.Contains(out.String(), `"Profile":"running"`) {
 			t.Fatalf("status %d %s %s", code, &out, &err)
 		}
+	}
+}
+
+type signalFake struct{ root string }
+
+func (f signalFake) Run(ctx context.Context, c netnone.Command) (netnone.Result, error) {
+	switch c.Args[0] {
+	case "list":
+		return netnone.Result{Stdout: []byte(`{"name":"netnone","status":"Stopped"}`)}, nil
+	case "start":
+		if err := os.WriteFile(filepath.Join(f.root, "ready"), []byte("ready"), 0600); err != nil {
+			return netnone.Result{}, err
+		}
+		<-ctx.Done()
+		return netnone.Result{}, ctx.Err()
+	case "stop":
+		if ctx.Err() != nil {
+			return netnone.Result{}, ctx.Err()
+		}
+		return netnone.Result{}, os.WriteFile(filepath.Join(f.root, "stopped"), []byte("stopped"), 0600)
+	}
+	return netnone.Result{}, fmt.Errorf("unexpected command: %s %v", c.Name, c.Args)
+}
+
+// F4: real INT/TERM/HUP delivered to our own helper PID cancel fake startup and complete rollback before exit.
+func TestTerminationSignals(t *testing.T) {
+	if root := os.Getenv("NETNONE_SIGNAL_FIXTURE"); root != "" {
+		ctx, cancel := terminationContext()
+		defer cancel()
+		e := netnone.New(signalFake{root}, io.Discard, io.Discard)
+		e.Home = func() (string, error) { return root, nil }
+		e.StateDir = func(string) string { return filepath.Join(root, "state") }
+		e.Load = func(context.Context) ([3]float64, error) { return [3]float64{}, nil }
+		o := netnone.DefaultOptions()
+		o.Repo = root
+		o.Task = "test"
+		if code := e.Execute(ctx, "prep", o); code != 1 {
+			t.Fatalf("signal exit=%d", code)
+		}
+		if _, err := os.Stat(filepath.Join(root, "stopped")); err != nil {
+			t.Fatal("signal did not finish stop", err)
+		}
+		return
+	}
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
+		t.Run(sig.String(), func(t *testing.T) {
+			root := t.TempDir()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestTerminationSignals$")
+			cmd.Env = append(os.Environ(), "NETNONE_SIGNAL_FIXTURE="+root)
+			var output bytes.Buffer
+			cmd.Stdout = &output
+			cmd.Stderr = &output
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			// cmd.Process.Pid is the sole process this test owns; never use pattern-based process control.
+			t.Logf("signal helper pid=%d", cmd.Process.Pid)
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			defer func() { _ = cmd.Process.Kill() }()
+			deadline := time.NewTimer(10 * time.Second)
+			defer deadline.Stop()
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+		ready:
+			for {
+				if _, err := os.Stat(filepath.Join(root, "ready")); err == nil {
+					break ready
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("helper stopped before signal: %v %s", err, &output)
+				case <-deadline.C:
+					t.Fatal("helper did not reach fake startup")
+				case <-ticker.C:
+				}
+			}
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("signal bypassed cleanup: %v %s", err, &output)
+				}
+			case <-deadline.C:
+				t.Fatal("signal cleanup timed out")
+			}
+			if _, err := os.Stat(filepath.Join(root, "stopped")); err != nil {
+				t.Fatal("signal left fake VM running", err)
+			}
+		})
 	}
 }

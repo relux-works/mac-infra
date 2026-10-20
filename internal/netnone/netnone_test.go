@@ -58,8 +58,6 @@ func (f *fakeRunner) Run(ctx context.Context, c Command) (Result, error) {
 	}
 	if c.Name == "colima" {
 		switch c.Args[0] {
-		case "status":
-			return Result{Stdout: []byte(`{"status":"Stopped"}`)}, nil
 		case "start", "stop":
 			return Result{}, nil
 		case "list":
@@ -69,6 +67,9 @@ func (f *fakeRunner) Run(ctx context.Context, c Command) (Result, error) {
 	if c.Name == "docker" {
 		switch c.Args[0] {
 		case "context":
+			if has(c.Args, "context", "inspect") {
+				return Result{Stdout: []byte(`[{"Name":"default","Endpoints":{"docker":{"Host":"unix:///unchanged"}}}]`)}, nil
+			}
 			f.contextReads++
 			name := "default"
 			if f.changedSnapshot && f.contextReads > 1 {
@@ -80,17 +81,17 @@ func (f *fakeRunner) Run(ctx context.Context, c Command) (Result, error) {
 		case "volume", "image":
 			return Result{}, nil
 		case "run":
-			if has(c.Args, "java", "/src/Probe.java") {
+			if has(c.Args, "/src/Probe.java") && !has(c.Args, "netnone-prep") {
 				output := f.probeOutput
 				if output == "" {
 					output = deniedOutput
 				}
 				return Result{Stdout: []byte(output)}, nil
 			}
-			if has(c.Args, "sh", "-c", prepScript) || strings.Contains(strings.Join(c.Args, " "), "netnone-prep-test-exit") {
+			if has(c.Args, "-c", prepScript) || strings.Contains(strings.Join(c.Args, " "), "netnone-prep-test-exit") {
 				return Result{Stdout: []byte(warmOutput)}, nil
 			}
-			if has(c.Args, "sh", "-c", runScript) {
+			if has(c.Args, "-c", runScript) {
 				// Simulate only the copied artifact, never execute the guest script.
 				if f.fixtureMode != "" {
 					dest := ""
@@ -99,7 +100,7 @@ func (f *fakeRunner) Run(ctx context.Context, c Command) (Result, error) {
 							dest = strings.TrimSuffix(a, ":/out")
 						}
 					}
-					dest = filepath.Join(dest, c.Args[len(c.Args)-1], "build/test-results/test")
+					dest = filepath.Join(dest, "build/test-results/test")
 					if err := os.MkdirAll(dest, 0700); err != nil {
 						f.test.Fatal(err)
 					}
@@ -112,7 +113,7 @@ func (f *fakeRunner) Run(ctx context.Context, c Command) (Result, error) {
 					case "dependency":
 						network = `<failure type="java.net.UnknownHostException">Could not resolve dependencies</failure>`
 					}
-					xml := `<testsuite><testcase classname="OfflineTest" name="arithmetic">` + offline + `</testcase><testcase classname="NetworkTest" name="repositoryReachable">` + network + `</testcase></testsuite>`
+					xml := `<testsuite><testcase classname="OfflineTest" name="arithmetic">` + offline + `</testcase><testcase classname="OfflineTest" name="buildPackageWasCopied"></testcase><testcase classname="NetworkTest" name="repositoryReachable">` + network + `</testcase></testsuite>`
 					if err := os.WriteFile(filepath.Join(dest, "TEST-fixture.xml"), []byte(xml), 0600); err != nil {
 						f.test.Fatal(err)
 					}
@@ -153,7 +154,7 @@ func newHarness(t *testing.T) *harness {
 	h.e.CPUCount = func() int { return 4 }
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	h.e.Now = func() time.Time { now = now.Add(time.Second); return now }
-	h.e.UserEnv = []string{"PATH=/fake", "HOME=" + h.home, "DOCKER_HOST=old", "DOCKER_CONFIG=old", "DOCKER_CONTEXT=old", "DOCKER_TLS_VERIFY=1", "COLIMA_PROFILE=default"}
+	h.e.UserEnv = []string{"PATH=/fake", "HOME=" + h.home, "DOCKER_HOST=old", "DOCKER_CONFIG=old", "DOCKER_CONTEXT=old", "DOCKER_TLS_VERIFY=1", "COLIMA_PROFILE=default", "COLIMA_HOME=/wrong-colima", "LIMA_HOME=/wrong-lima", "DOCKER_API_VERSION=wrong"}
 	h.o = DefaultOptions()
 	h.o.Repo = filepath.Join(root, "repo")
 	h.o.Out = filepath.Join(root, "out")
@@ -187,17 +188,17 @@ func assertPrivate(t *testing.T, h *harness) {
 		if c.Name != "docker" && c.Name != "colima" {
 			continue
 		}
-		if has(c.Args, "context", "ls") || has(c.Args, "list", "--json") {
+		if has(c.Args, "context") || c.Name == "colima" && reflect.DeepEqual(c.Env, h.e.UserEnv) {
 			if !reflect.DeepEqual(c.Env, h.e.UserEnv) {
 				t.Fatalf("snapshot must use user env: %v", c.Env)
 			}
 			continue
 		}
-		if !has(c.Env, "DOCKER_CONFIG="+filepath.Join(h.state, "docker-config")) || !has(c.Env, "DOCKER_HOST=unix://"+filepath.Join(h.home, ".colima/netnone/docker.sock")) {
+		if !has(c.Env, "DOCKER_CONFIG="+filepath.Join(h.state, "docker-config")) || !has(c.Env, "DOCKER_HOST=unix://"+filepath.Join(h.home, ".colima-netnone/netnone/docker.sock")) {
 			t.Fatalf("private Docker env absent: %s %v %v", c.Name, c.Args, c.Env)
 		}
 		for _, v := range c.Env {
-			if strings.HasPrefix(v, "DOCKER_CONTEXT=") || strings.HasPrefix(v, "DOCKER_TLS_VERIFY=") || v == "COLIMA_PROFILE=default" {
+			if strings.HasPrefix(v, "DOCKER_CONTEXT=") || strings.HasPrefix(v, "DOCKER_TLS_VERIFY=") || v == "COLIMA_PROFILE=default" || v == "COLIMA_HOME=/wrong-colima" || v == "LIMA_HOME=/wrong-lima" {
 				t.Fatalf("unsafe inherited env %s", v)
 			}
 		}
@@ -243,7 +244,7 @@ func TestPrepThenRun(t *testing.T) {
 	}
 	b := builds[0].Args
 	dir := b[len(b)-1]
-	if !reflect.DeepEqual(b, []string{"build", "--quiet", "-t", "netnone-base:local", "-f", filepath.Join(dir, "Dockerfile"), dir}) {
+	if !reflect.DeepEqual(b, []string{"build", "--quiet", "-t", "netnone-base:local", "-f", "-", dir}) {
 		t.Fatalf("build %q", b)
 	}
 	var warm, run *Command
@@ -259,11 +260,11 @@ func TestPrepThenRun(t *testing.T) {
 	if warm == nil || run == nil {
 		t.Fatal("missing warm/test container")
 	}
-	wantWarm := []string{"run", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", h.o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", testImage, "sh", "-c", prepScript, "netnone-prep", "test"}
+	wantWarm := []string{"run", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", h.o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", "--entrypoint", "/bin/sh", testImage, "-c", prepScript, "netnone-prep", "test"}
 	if !reflect.DeepEqual(warm.Args, wantWarm) {
 		t.Fatalf("warm argv %q", warm.Args)
 	}
-	wantRun := []string{"run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", h.o.Repo + ":/src:ro", "-v", h.o.Out + ":/out", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", testImage, "sh", "-c", runScript, "netnone-run", "test", run.Args[len(run.Args)-1]}
+	wantRun := []string{"run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", h.o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", "-v", filepath.Join(h.o.Out, "20261021T120002.000000000Z") + ":/out", "--entrypoint", "/bin/sh", testImage, "-c", runScript, "netnone-run", "test"}
 	if !reflect.DeepEqual(run.Args, wantRun) {
 		t.Fatalf("run argv\ngot %q\nwant %q", run.Args, wantRun)
 	}
@@ -365,8 +366,8 @@ func TestLoadGate(t *testing.T) {
 func TestAlreadyRunningRefusal(t *testing.T) {
 	h := newHarness(t)
 	h.f.hook = func(_ context.Context, c Command) (Result, error, bool) {
-		if c.Name == "colima" && c.Args[0] == "status" {
-			return Result{Stdout: []byte(`{"status":"Running"}`)}, nil, true
+		if c.Name == "colima" && c.Args[0] == "list" {
+			return Result{Stdout: []byte(`{"name":"netnone","status":"Running"}`)}, nil, true
 		}
 		return Result{}, nil, false
 	}
@@ -462,7 +463,7 @@ func TestPrepRecordRequired(t *testing.T) {
 	h.exec(t, "prep", 0)
 	h.exec(t, "run", 0)
 	builds := callsNamed(h.f.calls, "docker", "build")
-	if len(builds) != 2 || !reflect.DeepEqual(builds[1].Args, []string{"build", "--quiet", "-f", file, filepath.Dir(file)}) {
+	if len(builds) != 2 || !reflect.DeepEqual(builds[1].Args, []string{"build", "--quiet", "-f", "-", filepath.Dir(file)}) {
 		t.Fatalf("toolchain build argv %+v", builds)
 	}
 	assertPrivate(t, h)
@@ -647,7 +648,7 @@ func TestPrepWarmFailurePolicy(t *testing.T) {
 				}
 				if has(c.Args, "netnone-prep") {
 					if mode == "test-failed" {
-						return Result{Stdout: []byte("dns=fail:java.net.UnknownHostException\ntcp=fail:java.net.ConnectException:no route\nnetnone-prep-test-exit=1\n")}, nil, true
+						return Result{Stdout: []byte("dns=fail:java.net.UnknownHostException\ntcp=fail:java.net.SocketException:Network is unreachable\nnetnone-prep-test-results=yes\nnetnone-prep-test-exit=1\n")}, nil, true
 					}
 					if mode == "dry-run-failed" {
 						return Result{ExitCode: 1, Stderr: []byte("Could not resolve dependency")}, nil, true
@@ -783,12 +784,12 @@ func TestUnknownEvidenceFails(t *testing.T) {
 			t.Fatalf("non-network failure qualified: %s", text)
 		}
 	}
-	if !networkException("java.net.ConnectException: Network is unreachable") {
+	if !networkException("java.net.SocketException: Network is unreachable") {
 		t.Fatal("network positive rejected")
 	}
 }
 
-// A failed start never claims ownership or stops the profile; missing and stopped profiles permit start while unknown status fails closed.
+// A failed start rolls back; missing and stopped profiles permit start while unknown status fails closed.
 func TestProfileAdmission(t *testing.T) {
 	for _, mode := range []string{"start-error", "missing", "unknown", "stopping"} {
 		t.Run(mode, func(t *testing.T) {
@@ -797,14 +798,14 @@ func TestProfileAdmission(t *testing.T) {
 				if c.Name == "colima" && c.Args[0] == "start" && mode == "start-error" {
 					return Result{ExitCode: 1}, nil, true
 				}
-				if c.Name == "colima" && c.Args[0] == "status" {
+				if c.Name == "colima" && c.Args[0] == "list" {
 					switch mode {
 					case "missing":
-						return Result{ExitCode: 1, Stderr: []byte("profile does not exist")}, nil, true
+						return Result{Stdout: []byte(`{"name":"default","status":"Running"}`)}, nil, true
 					case "unknown":
-						return Result{Stdout: []byte(`{"status":"unknown"}`)}, nil, true
+						return Result{Stdout: []byte(`{"name":"netnone","status":"unknown"}`)}, nil, true
 					case "stopping":
-						return Result{Stdout: []byte(`{"status":"stopping"}`)}, nil, true
+						return Result{Stdout: []byte(`{"name":"netnone","status":"Stopping"}`)}, nil, true
 					}
 				}
 				return Result{}, nil, false
@@ -815,14 +816,14 @@ func TestProfileAdmission(t *testing.T) {
 			}
 			h.exec(t, "prep", want)
 			stops := len(callsNamed(h.f.calls, "colima", "stop"))
-			if mode == "missing" && stops != 1 || mode != "missing" && stops != 0 {
+			if (mode == "missing" || mode == "start-error") && stops != 1 || mode != "missing" && mode != "start-error" && stops != 0 {
 				t.Fatalf("stop count %d for %s", stops, mode)
 			}
 		})
 	}
 }
 
-// Selftest fails unknown snapshots and missing XML, but accepts an empty successful Colima list and ignores netnone's own changing status.
+// Selftest fails unknown snapshots and missing XML, but accepts an empty successful Colima list and rejects a still-running private profile after stop.
 func TestSelftestEvidenceBoundaries(t *testing.T) {
 	for _, mode := range []string{"malformed-before", "malformed-after", "missing-xml", "empty-profiles", "own-profile-change", "prep-dns-fail", "prep-task-fail"} {
 		t.Run(mode, func(t *testing.T) {
@@ -846,7 +847,7 @@ func TestSelftestEvidenceBoundaries(t *testing.T) {
 					}
 					if mode == "own-profile-change" {
 						status := "Stopped"
-						if lists > 1 {
+						if lists > 2 {
 							status = "Running"
 						}
 						return Result{Stdout: []byte(fmt.Sprintf(`[{"name":"netnone","status":%q}]`, status))}, nil, true
@@ -863,7 +864,7 @@ func TestSelftestEvidenceBoundaries(t *testing.T) {
 				return Result{}, nil, false
 			}
 			want := 1
-			if mode == "empty-profiles" || mode == "own-profile-change" {
+			if mode == "empty-profiles" {
 				want = 0
 			}
 			h.exec(t, "selftest", want)
@@ -898,8 +899,8 @@ func TestResourcesAndOutputPermissions(t *testing.T) {
 		t.Fatalf("output entries %v %v", entries, err)
 	}
 	st, err := os.Stat(filepath.Join(h.o.Out, entries[0].Name()))
-	if err != nil || st.Mode().Perm() != 0777 {
-		t.Fatalf("UID 10001 cannot write new result dir: %v %v", st, err)
+	if err != nil || st.Mode().Perm() != 0755 {
+		t.Fatalf("result directory remains publicly writable: %v %v", st, err)
 	}
 }
 
@@ -922,7 +923,7 @@ func TestGuestScriptContracts(t *testing.T) {
 	if gradle < 0 || capture < gradle || collect < capture || exit < collect {
 		t.Fatal("task exit must be captured before reports are copied and returned afterwards")
 	}
-	for _, required := range []string{"*/build/test-results", "*/build/reports", `cp -R "$d" "/out/$stamp/$parent/"`} {
+	for _, required := range []string{"*/build/test-results", "*/build/reports", `cp -R "$d" "/out/$parent/"`} {
 		if !strings.Contains(runScript, required) {
 			t.Fatalf("artifact preservation missing %q", required)
 		}

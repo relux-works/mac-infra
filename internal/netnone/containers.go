@@ -1,9 +1,11 @@
 package netnone
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,16 +14,30 @@ import (
 
 const copySource = `set -eu
 cd /src
+rm -f /tmp/netnone-copy-error
 find . -type d \( -name .gradle -o -name build \) -exec sh -c '
  for d do
   if [ "${d##*/}" = .gradle ] ||
      [ -f "$d/../build.gradle" ] || [ -f "$d/../build.gradle.kts" ] ||
      [ -f "$d/../settings.gradle" ] || [ -f "$d/../settings.gradle.kts" ]; then
+   case "$d" in *"
+"*) printf error > /tmp/netnone-copy-error; continue ;; esac
    printf "%s\n" "$d"
   fi
  done
 ' sh {} + > /tmp/netnone-excludes
-tar --no-wildcards --anchored -X /tmp/netnone-excludes -cf - . | (cd /work && tar --no-same-owner -xf -)
+if [ -f /tmp/netnone-copy-error ]; then
+ echo "source copy refused: excluded directory path contains a newline" >&2
+ exit 1
+fi
+if ! { tar --no-wildcards --anchored -X /tmp/netnone-excludes -cf - .; printf '%s\n' "$?" > /tmp/netnone-tar-status; } | (cd /work && tar --no-same-owner -xf -); then
+ echo "source extraction failed" >&2
+ exit 1
+fi
+if [ "$(cat /tmp/netnone-tar-status)" != 0 ]; then
+ echo "source archive creation failed" >&2
+ exit 1
+fi
 cd /work
 `
 
@@ -33,6 +49,14 @@ java /tmp/Probe.java || true
 set +e
 ./gradlew "$1"
 rc=$?
+if [ "$rc" -ne 0 ]; then
+ results=$(find . -type f -path '*/build/test-results/*.xml' -print -quit)
+ if [ -z "$results" ]; then
+  echo "warm task failed before test results; prep refused" >&2
+  exit "$rc"
+ fi
+ printf 'netnone-prep-test-results=yes\n'
+fi
 printf 'netnone-prep-test-exit=%s\n' "$rc"
 exit 0
 `
@@ -40,15 +64,13 @@ const runScript = copySource + `set +e
 ./gradlew --offline "$1"
 rc=$?
 set -e
-mkdir -p "/out/$2"
 find . -type d \( -path '*/build/test-results' -o -path '*/build/reports' \) -prune -exec sh -c '
- stamp=$1; shift
  for d do
   parent=$(dirname "$d")
-  mkdir -p "/out/$stamp/$parent" || exit 1
-  cp -R "$d" "/out/$stamp/$parent/" || exit 1
+  mkdir -p "/out/$parent" || exit 1
+  cp -R "$d" "/out/$parent/" || exit 1
  done
-' sh "$2" {} + || exit 125
+' sh {} + || exit 125
 exit "$rc"
 `
 
@@ -75,10 +97,7 @@ func (s *session) prep(ctx context.Context, o Options, id toolchainID, fixture b
 	if err != nil {
 		return "", Result{}, err
 	}
-	if err = os.WriteFile(filepath.Join(dir, "Dockerfile"), data, 0600); err != nil {
-		return "", Result{}, err
-	}
-	build, err := s.docker(ctx, "build", "--quiet", "-t", "netnone-base:local", "-f", filepath.Join(dir, "Dockerfile"), dir)
+	build, err := checked(s.e.Runner.Run(ctx, Command{Name: "docker", Args: []string{"build", "--quiet", "-t", "netnone-base:local", "-f", "-", dir}, Env: s.env, Stdin: bytes.NewReader(data)}))
 	if err != nil {
 		return "", build, err
 	}
@@ -87,7 +106,7 @@ func (s *session) prep(ctx context.Context, o Options, id toolchainID, fixture b
 		return "", build, errors.New("invalid base image id from docker build --quiet")
 	}
 	if id.Path != "" {
-		build, err = s.docker(ctx, "build", "--quiet", "-f", id.Path, filepath.Dir(id.Path))
+		build, err = checked(s.e.Runner.Run(ctx, Command{Name: "docker", Args: []string{"build", "--quiet", "-f", "-", filepath.Dir(id.Path)}, Env: s.env, Stdin: bytes.NewReader(id.Data)}))
 		if err != nil {
 			return "", build, err
 		}
@@ -108,19 +127,22 @@ func (s *session) prep(ctx context.Context, o Options, id toolchainID, fixture b
 		script = strings.Replace(script, "java /tmp/Probe.java", "java /src/Probe.java", 1)
 	}
 	// HOME tmpfs needs explicit ownership: Docker defaults to root-owned 0750.
-	args := []string{"run", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", image, "sh", "-c", script, "netnone-prep", o.Task}
+	args := []string{"run", "--rm", "-i", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", "--entrypoint", "/bin/sh", image, "-c", script, "netnone-prep", o.Task}
 	res, err := s.e.Runner.Run(ctx, Command{Name: "docker", Args: args, Env: s.env, Stdin: strings.NewReader(string(probe))})
 	fmt.Fprintf(s.e.Out, "prep (networked):\n%s%s", res.Stdout, res.Stderr)
 	if _, err = checked(res, err); err != nil {
 		return "", res, err
 	}
-	// Warm task failures are informational; bootstrap/dry-run/runner failures are
+	// Warm failures require test-result evidence; bootstrap/dry-run/runner failures are
 	// operational failures. The script emits this marker only after the task ran.
 	marker := regexpPrepExit(string(res.Stdout))
+	if marker > 0 && !strings.Contains(string(res.Stdout), "netnone-prep-test-results=yes\n") {
+		return "", res, errors.New("warm task failed without test results; prep refused")
+	}
 	if marker < 0 {
 		return "", res, errors.New("prep did not report the warm test task exit")
 	}
-	fmt.Fprintf(s.e.Out, "prep warm task exit=%d (test failure does not fail prep)\n", marker)
+	fmt.Fprintf(s.e.Out, "prep warm task exit=%d (failure tolerated only with test results)\n", marker)
 	path := id.Path
 	if path == "" {
 		path = "base"
@@ -139,8 +161,12 @@ func regexpPrepExit(output string) int {
 	}
 	return -1
 }
-func (s *session) deniedArgs(o Options, image string) []string {
-	return []string{"run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", o.Repo + ":/src:ro", "-v", o.Out + ":/out", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work", image}
+func (s *session) deniedArgs(o Options, image, entrypoint string) []string {
+	args := []string{"run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "10001:10001", "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/netnone:rw,size=64m,uid=10001,gid=10001,mode=0700", "-v", "netnone-gradle-home:/gradle", "-v", "netnone-work:/work", "-v", o.Repo + ":/src:ro", "-e", "GRADLE_USER_HOME=/gradle", "-w", "/work"}
+	if o.Out != "" {
+		args = append(args, "-v", o.Out+":/out")
+	}
+	return append(args, "--entrypoint", entrypoint, image)
 }
 func (s *session) runTests(ctx context.Context, o Options, image string) (string, error) {
 	inspected, err := s.call(ctx, "docker", "image", "inspect", image)
@@ -163,9 +189,32 @@ func (s *session) runTests(ctx context.Context, o Options, image string) (string
 	if err := os.Chmod(dest, 0777); err != nil {
 		return stamp, err
 	}
-	args := append(s.deniedArgs(o, image), "sh", "-c", runScript, "netnone-run", o.Task, stamp)
+	defer func() {
+		walkErr := filepath.WalkDir(dest, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				fmt.Fprintf(s.e.Err, "output permissions: %v\n", err)
+				return nil
+			}
+			mode := os.FileMode(0644)
+			if d.IsDir() {
+				mode = 0755
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if err := os.Chmod(path, mode); err != nil {
+				fmt.Fprintf(s.e.Err, "output permissions: %s: %v\n", path, err)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			fmt.Fprintf(s.e.Err, "output permissions: %v\n", walkErr)
+		}
+	}()
+	o.Out = dest
+	args := append(s.deniedArgs(o, image, "/bin/sh"), "-c", runScript, "netnone-run", o.Task)
 	r, err := s.call(ctx, "docker", args...)
-	fmt.Fprintf(s.e.Out, "%s%s\nout: %s\n", r.Stdout, r.Stderr, filepath.Join(o.Out, stamp))
+	fmt.Fprintf(s.e.Out, "%s%s\nout: %s\n", r.Stdout, r.Stderr, dest)
 	if err != nil {
 		return stamp, err
 	}
