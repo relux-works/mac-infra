@@ -62,6 +62,8 @@ checked independently. It always attempts to copy all `build/test-results` and
 Only the current timestamp directory is bound as `/out`; earlier runs are never
 mounted in the container. It is writable by UID 10001 during collection, then
 restricted to 0755 (directories) and 0644 (files), including after a failed task.
+The cleanup never follows a symlink: it opens every entry with `O_NOFOLLOW`
+relative to its parent directory, so a link planted by the test is skipped.
 The host user owns results through virtiofs. Permission failures are reported
 without failing the run. The existing output root and previous runs retain their
 permissions. Keep the output root private if reports are sensitive. Nonzero test exits produce CLI exit 1; usage errors are 2 and
@@ -79,8 +81,9 @@ Every FROM must use that exact base or reference an earlier stage declared as
 `FROM <pinned-base> AS <name>`. Only pinned-base declarations may use AS;
 flags such as `--platform`, numeric/forward/unknown stage references, and parser
 directives (`# syntax=`, `# check=`, `# escape=`, ignoring case and optional
-spaces) before the first instruction are refused. Instructions containing `<<`
-(including heredocs) are refused until the validator supports their bodies.
+spaces) before the first instruction are refused. Logical instructions
+containing `<<` (including heredocs, also when `<<` is split by a line
+continuation) are refused until the validator supports their bodies.
 Backslash line continuations
 are supported. `COPY --from=<external image>` and `RUN --mount=from=<image>`
 can pull content that this tool does not pin. Pinning those images, like

@@ -458,13 +458,22 @@ func inspectJUnit(root string) (bool, bool, string) {
 	return offlinePass, networkFail, fmt.Sprintf("OfflineTest cases=%d arithmetic=%d buildPackageWasCopied=%d pass=%t; NetworkTest cases=%d network-fail=%t", offline, expected["arithmetic"], expected["buildPackageWasCopied"], offlinePass, network, networkFail)
 }
 
-var exceptionClass = regexp.MustCompile(`\b(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*(?:Exception|Error)\b`)
+var exceptionHeader = regexp.MustCompile(`^((?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*(?:Exception|Error))(?::|$)`)
 
-// Only failure body text supplies a missing type; a message may merely mention
-// an expected exception and must not supply its identity.
+// Only the exception header of the failure body (its first non-empty line,
+// as in a stack trace) supplies a missing type. A message, or later prose
+// such as "AssertionError: expected java.net.UnknownHostException", may merely
+// mention an expected exception and must not supply its identity.
 func networkFailure(kind, message, text string) bool {
 	if kind == "" {
-		kind = exceptionClass.FindString(text)
+		for _, line := range strings.Split(text, "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				if m := exceptionHeader.FindStringSubmatch(line); m != nil {
+					kind = m[1]
+				}
+				break
+			}
+		}
 		if kind == "" {
 			return false
 		}
@@ -472,16 +481,13 @@ func networkFailure(kind, message, text string) bool {
 	return typedNetworkException(kind, message+" "+text)
 }
 
-func networkException(text string) bool { return typedNetworkException("", text) }
+func networkException(text string) bool { return networkFailure("", "", text) }
 func typedNetworkException(kind, text string) bool {
 	lower := strings.ToLower(text)
 	for _, bad := range []string{"could not resolve", "could not download", "dependency resolution", "dependency-resolution", "no cached version", "could not find", "resolve dependencies"} {
 		if strings.Contains(lower, bad) {
 			return false
 		}
-	}
-	if kind == "" {
-		kind = exceptionClass.FindString(text)
 	}
 	switch kind {
 	case "java.net.UnknownHostException", "java.net.NoRouteToHostException":

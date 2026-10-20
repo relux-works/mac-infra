@@ -377,6 +377,11 @@ func validToolchain(data []byte) bool {
 			continue
 		}
 		instruction += line
+		// Docker joins continuation lines before it detects a heredoc, so the
+		// check runs on the whole logical instruction (`COPY <\` + `<EOF`).
+		if strings.Contains(instruction, "<<") {
+			return false
+		}
 		fields := strings.Fields(instruction)
 		instruction = ""
 		if len(fields) == 0 {

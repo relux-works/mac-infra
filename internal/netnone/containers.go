@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 const copySource = `set -eu
@@ -189,28 +191,10 @@ func (s *session) runTests(ctx context.Context, o Options, image string) (string
 	if err := os.Chmod(dest, 0777); err != nil {
 		return stamp, err
 	}
-	defer func() {
-		walkErr := filepath.WalkDir(dest, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				fmt.Fprintf(s.e.Err, "output permissions: %v\n", err)
-				return nil
-			}
-			mode := os.FileMode(0644)
-			if d.IsDir() {
-				mode = 0755
-			}
-			if d.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-			if err := os.Chmod(path, mode); err != nil {
-				fmt.Fprintf(s.e.Err, "output permissions: %s: %v\n", path, err)
-			}
-			return nil
-		})
-		if walkErr != nil {
-			fmt.Fprintf(s.e.Err, "output permissions: %v\n", walkErr)
-		}
-	}()
+	// The container may still be writing here after a cancellation, so the
+	// cleanup never follows a path: every chmod goes through a descriptor opened
+	// with O_NOFOLLOW below the directory created above.
+	defer restrictOutput(dest, s.e.Err)
 	o.Out = dest
 	args := append(s.deniedArgs(o, image, "/bin/sh"), "-c", runScript, "netnone-run", o.Task)
 	r, err := s.call(ctx, "docker", args...)
@@ -222,4 +206,55 @@ func (s *session) runTests(ctx context.Context, o Options, image string) (string
 		return stamp, fail(1, fmt.Sprintf("test task failed (container exit %d)", r.ExitCode))
 	}
 	return stamp, nil
+}
+
+// restrictOutput sets directories to 0755 and regular files to 0644 below
+// root. Symlinks and other file types are skipped; a name swapped for a
+// symlink between listing and opening fails with ELOOP and is skipped too.
+func restrictOutput(root string, errOut io.Writer) {
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		fmt.Fprintf(errOut, "output permissions: %s: %v\n", root, err)
+		return
+	}
+	restrictDir(fd, root, errOut)
+}
+
+func restrictDir(fd int, path string, errOut io.Writer) {
+	dir := os.NewFile(uintptr(fd), path)
+	defer dir.Close()
+	if err := unix.Fchmod(fd, 0755); err != nil {
+		fmt.Fprintf(errOut, "output permissions: %s: %v\n", path, err)
+	}
+	names, err := dir.Readdirnames(-1)
+	if err != nil {
+		fmt.Fprintf(errOut, "output permissions: %s: %v\n", path, err)
+	}
+	for _, name := range names {
+		child := filepath.Join(path, name)
+		cfd, err := unix.Openat(fd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		if err != nil {
+			if err != unix.ELOOP {
+				fmt.Fprintf(errOut, "output permissions: %s: %v\n", child, err)
+			}
+			continue
+		}
+		var st unix.Stat_t
+		if err := unix.Fstat(cfd, &st); err != nil {
+			fmt.Fprintf(errOut, "output permissions: %s: %v\n", child, err)
+			unix.Close(cfd)
+			continue
+		}
+		switch st.Mode & unix.S_IFMT {
+		case unix.S_IFDIR:
+			restrictDir(cfd, child, errOut)
+		case unix.S_IFREG:
+			if err := unix.Fchmod(cfd, 0644); err != nil {
+				fmt.Fprintf(errOut, "output permissions: %s: %v\n", child, err)
+			}
+			unix.Close(cfd)
+		default:
+			unix.Close(cfd)
+		}
+	}
 }

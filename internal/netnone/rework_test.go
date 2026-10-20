@@ -1,6 +1,7 @@
 package netnone
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -655,5 +656,85 @@ func TestSnapshotInspectEveryContext(t *testing.T) {
 				t.Fatal("unknown inspect evidence accepted")
 			}
 		})
+	}
+}
+
+// F1 (round 2): a heredoc opener split by a line continuation is joined
+// before the check, as Docker joins it, so it cannot forge a pinned stage.
+// A continued instruction without a heredoc stays accepted (positive control).
+func TestToolchainContinuedHeredocStageForgery(t *testing.T) {
+	witness := "FROM " + BaseImage + "\nCOPY <\\\n<EOF /fake\nFROM " + BaseImage + " AS ubuntu\nEOF\nFROM ubuntu\n"
+	if validToolchain([]byte(witness)) {
+		t.Fatal("continued heredoc opener accepted")
+	}
+	control := "FROM " + BaseImage + "\nRUN echo a \\\n  && echo b\n"
+	if !validToolchain([]byte(control)) {
+		t.Fatal("continued instruction without heredoc rejected")
+	}
+}
+
+// F13: output cleanup never follows a symlink. Links to a host file or a host
+// directory are skipped, so their targets keep their modes, while real
+// entries are restricted. A name swapped for a symlink after listing is the
+// same case at open time: O_NOFOLLOW fails with ELOOP and the entry is skipped.
+// Limit: the concurrent swap itself is not raced here.
+func TestRestrictOutputNeverFollowsSymlinks(t *testing.T) {
+	outside := t.TempDir()
+	hostFile := filepath.Join(outside, "host-file")
+	writeFixture(t, hostFile, "host", 0600)
+	hostDir := filepath.Join(outside, "host-dir")
+	if err := os.Mkdir(hostDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, filepath.Join(hostDir, "inner"), "inner", 0600)
+	root := filepath.Join(t.TempDir(), "stamp")
+	writeFixture(t, filepath.Join(root, "build/test-results/TEST.xml"), "result", 0666)
+	if err := os.Chmod(filepath.Join(root, "build"), 0777); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{"file-link": hostFile, "build/dir-link": hostDir} {
+		if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var errOut bytes.Buffer
+	restrictOutput(root, &errOut)
+	for path, want := range map[string]os.FileMode{hostFile: 0600, hostDir: 0700, filepath.Join(hostDir, "inner"): 0600, root: 0755, filepath.Join(root, "build"): 0755, filepath.Join(root, "build/test-results/TEST.xml"): 0644} {
+		st, err := os.Stat(path)
+		if err != nil || st.Mode().Perm() != want {
+			t.Fatalf("%s: mode %v want %v (%v)", path, st.Mode().Perm(), want, err)
+		}
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("symlinks reported as errors: %s", &errOut)
+	}
+	// A root that is itself a symlink is refused, not followed.
+	link := filepath.Join(t.TempDir(), "stamp-link")
+	if err := os.Symlink(hostDir, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hostDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	restrictOutput(link, &errOut)
+	if st, _ := os.Stat(hostDir); st.Mode().Perm() != 0700 || errOut.Len() == 0 {
+		t.Fatalf("symlinked root followed: %v %q", st.Mode().Perm(), &errOut)
+	}
+}
+
+// F11 (round 2): a type-less failure qualifies only through its leading
+// exception header; prose that names a network exception later does not.
+func TestJUnitExceptionHeaderOnly(t *testing.T) {
+	for text, want := range map[string]bool{
+		"AssertionError: expected java.net.UnknownHostException":                   false,
+		"java.lang.AssertionError: expected java.net.UnknownHostException":         false,
+		"expected java.net.UnknownHostException\njava.net.UnknownHostException: x": false,
+		"java.net.UnknownHostException: repo.maven.apache.org\n\tat NetworkTest":   true,
+		"\njava.net.SocketException: Network is unreachable":                       true,
+		"java.net.ConnectException: Connection refused":                            false,
+	} {
+		if got := networkFailure("", "", text); got != want {
+			t.Errorf("%q: got %t want %t", text, got, want)
+		}
 	}
 }
