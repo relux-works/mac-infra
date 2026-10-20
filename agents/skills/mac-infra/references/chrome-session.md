@@ -27,7 +27,7 @@ mac-chrome-session list
 mac-chrome-session run-js \
   --window-id 123456 \
   --tab-id 123457 \
-  --origin https://example.com \
+  --origin https://site.example \
   --script 'JSON.stringify({origin:location.origin,readyState:document.readyState})'
 ```
 
@@ -43,7 +43,7 @@ reads and prints `guard: unguarded`; treat that output as unguarded evidence.
 mac-chrome-session run-js \
   --window-id 123456 \
   --tab-id 123457 \
-  --origin https://example.com \
+  --origin https://site.example \
   --file .temp/browser/read.js \
   --out .temp/browser/result.txt
 ```
@@ -65,7 +65,7 @@ printf '%s' '{"version":1,"resource":"/api/private/document.pdf","maxBytes":2621
   | mac-chrome-session fetch-file \
       --window-id 123456 \
       --tab-id 123457 \
-      --origin https://example.com \
+      --origin https://site.example \
       --out .temp/BUG-000000-example/document.pdf \
       --request-stdin
 ```
@@ -145,7 +145,7 @@ limit; command arguments own projection, predicates, and pagination:
 mac-chrome-session extract \
   --window-id 123456 \
   --tab-id 123457 \
-  --origin https://example.com \
+  --origin https://site.example \
   --template .temp/browser/items.json \
   --fields author,text \
   --where-field text \
@@ -185,7 +185,7 @@ Resolve the real resource instead. Two bounded discovery paths, in order:
 mac-chrome-session run-js \
   --window-id 123456 \
   --tab-id 123457 \
-  --origin https://api.example.com \
+  --origin https://api.site.example \
   --script '(function(){
      var x=new XMLHttpRequest();
      x.open("GET","/api/v1/records/"+RECORD_ID,false);
@@ -208,7 +208,7 @@ Then hand the reconstructed path to `fetch-file` on private stdin, as in
 
 The origin guard still binds to the tab, not to the site. A portal commonly
 renders the view on one host and serves its API from another
-(`https://lk.example.com` bound to `https://www.example.com/api/...`). Pin
+(`https://lk.site.example` bound to `https://www.site.example/api/...`). Pin
 `fetch-file` to a tab that is already on the API origin. Never relax
 `--origin`, navigate the authenticated view away, or reach for browser
 credentials to close that gap.
@@ -267,7 +267,7 @@ Visible handoff is a separate explicitly authorized command:
 mac-chrome-session focus \
   --window-id 123456 \
   --tab-id 123457 \
-  --origin https://example.com \
+  --origin https://site.example \
   --human-authorized
 ```
 
@@ -297,7 +297,7 @@ printf '%s\n' \
   mac-chrome-session trusted-input \
     --window-id 123456 \
     --tab-id 123457 \
-    --origin https://example.com \
+    --origin https://site.example \
     --human-authorized \
     --request-stdin
 ```
@@ -342,7 +342,7 @@ printf '%s\n' \
   mac-chrome-session upload \
     --window-id 123456 \
     --tab-id 123457 \
-    --origin https://example.com \
+    --origin https://site.example \
     --human-authorized \
     --request-stdin
 ```
@@ -461,7 +461,7 @@ mac-chrome-session heartbeat start \
   --browser chrome \
   --window-id 123456 \
   --tab-id 123457 \
-  --origin https://example.com \
+  --origin https://site.example \
   --interval 45s \
   --ttl 8h
 

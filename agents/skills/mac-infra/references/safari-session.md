@@ -29,7 +29,7 @@ mac-safari-session check-js
 Create a task-owned background window and record the returned id:
 
 ```bash
-mac-safari-session open-bg "https://example.com/private/page"
+mac-safari-session open-bg "https://site.example/private/page"
 ```
 
 Run JavaScript only with the exact window id and expected origin:
@@ -37,12 +37,12 @@ Run JavaScript only with the exact window id and expected origin:
 ```bash
 mac-safari-session run-js \
   --window-id 12345 \
-  --origin https://example.com \
+  --origin https://site.example \
   --script 'document.body.innerText.slice(0, 5000)'
 
 mac-safari-session run-js \
   --window-id 12345 \
-  --origin https://example.com \
+  --origin https://site.example \
   --file .temp/mac-safari-session/extract.js \
   --out .temp/mac-safari-session/result.txt
 ```
@@ -55,13 +55,13 @@ Snapshot and authenticated fetch paths enforce the same target/origin contract:
 
 ```bash
 mac-safari-session snapshot \
-  --url "https://example.com/private/page" \
-  --origin https://example.com \
+  --url "https://site.example/private/page" \
+  --origin https://site.example \
   --json .temp/mac-safari-session/page-snapshot.json
 
 mac-safari-session fetch-file \
-  --page "https://example.com/private/page" \
-  --origin https://example.com \
+  --page "https://site.example/private/page" \
+  --origin https://site.example \
   --resource "/api/private/file.pdf" \
   --out documents/raw/file.pdf \
   --meta documents/raw/file.pdf.json
@@ -105,7 +105,7 @@ Safari exposes the shared Go heartbeat manager directly through
 mac-safari-session heartbeat start \
   --name safari-session \
   --window-id 12345 \
-  --origin https://example.com \
+  --origin https://site.example \
   --interval 45s \
   --ttl 8h
 
