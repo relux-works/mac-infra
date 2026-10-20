@@ -64,6 +64,8 @@ mounted in the container. It is writable by UID 10001 during collection, then
 restricted to 0755 (directories) and 0644 (files), including after a failed task.
 The cleanup never follows a symlink: it opens every entry with `O_NOFOLLOW`
 relative to its parent directory, so a link planted by the test is skipped.
+The walk stops 64 directory levels below the run directory; deeper contents
+keep their modes and are reported.
 The host user owns results through virtiofs. Permission failures are reported
 without failing the run. The existing output root and previous runs retain their
 permissions. Keep the output root private if reports are sensitive. Nonzero test exits produce CLI exit 1; usage errors are 2 and
@@ -122,7 +124,8 @@ DNS/TCP probes, denied probes, and the complete expected JUnit testcase set:
 `OfflineTest.arithmetic` and `OfflineTest.buildPackageWasCopied` must pass;
 `NetworkTest.repositoryReachable` must fail with an actual UnknownHostException,
 NoRouteToHostException, or SocketException with "Network is unreachable".
-The failure type (or first exception class in text when no type exists) decides;
+The failure type (or, when there is none, the exception header on the first
+non-empty line of the failure text) decides;
 an assertion merely mentioning a network exception cannot qualify. The denied
 TCP probe accepts only "Network is unreachable" or NoRouteToHostException;
 connection refused is not evidence of network denial. After cleanup, a fresh

@@ -39,6 +39,11 @@ func writeFixture(t *testing.T, path, data string, mode os.FileMode) {
 	if err := os.WriteFile(path, []byte(data), mode); err != nil {
 		t.Fatal(err)
 	}
+	// WriteFile is subject to the umask; set the exact mode so permission
+	// assertions start from what the fixture claims.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // F2/F3: all operational calls share the private namespace despite inherited root/context overrides.
@@ -736,5 +741,57 @@ func TestJUnitExceptionHeaderOnly(t *testing.T) {
 		if got := networkFailure("", "", text); got != want {
 			t.Errorf("%q: got %t want %t", text, got, want)
 		}
+	}
+}
+
+// F14: the output cleanup walk is bounded. A tree deeper than
+// outputDepthLimit, written by the test container, completes cleanup:
+// shallow entries are restricted, the subtree past the limit is left
+// unchanged and reported, and the VM is still stopped after the run.
+func TestRestrictOutputDepthBound(t *testing.T) {
+	h := newHarness(t)
+	h.exec(t, "prep", 0)
+	var bind string
+	h.f.hook = func(_ context.Context, c Command) (Result, error, bool) {
+		if has(c.Args, "netnone-run") {
+			for _, a := range c.Args {
+				if strings.HasSuffix(a, ":/out") {
+					bind = strings.TrimSuffix(a, ":/out")
+				}
+			}
+			writeFixture(t, filepath.Join(bind, "shallow.xml"), "shallow", 0666)
+			deep := bind
+			for i := 0; i < outputDepthLimit+6; i++ {
+				deep = filepath.Join(deep, "d")
+			}
+			writeFixture(t, filepath.Join(deep, "deep.xml"), "deep", 0666)
+		}
+		return Result{}, nil, false
+	}
+	h.exec(t, "run", 0)
+	if st, err := os.Stat(filepath.Join(bind, "shallow.xml")); err != nil || st.Mode().Perm() != 0644 {
+		t.Fatalf("shallow result not restricted: %v %v", st, err)
+	}
+	deep := bind
+	for i := 0; i < outputDepthLimit+6; i++ {
+		deep = filepath.Join(deep, "d")
+	}
+	if st, err := os.Stat(filepath.Join(deep, "deep.xml")); err != nil || st.Mode().Perm() != 0666 {
+		t.Fatalf("cleanup went past the depth limit: %v %v", st, err)
+	}
+	if !strings.Contains(h.err.String(), fmt.Sprintf("deeper than %d levels", outputDepthLimit)) {
+		t.Fatalf("skipped subtree not reported: %s", &h.err)
+	}
+	runAt, stopAt := -1, -1
+	for i, c := range h.f.calls {
+		if has(c.Args, "netnone-run") {
+			runAt = i
+		}
+		if c.Name == "colima" && has(c.Args, "stop") {
+			stopAt = i
+		}
+	}
+	if runAt < 0 || stopAt < runAt {
+		t.Fatalf("VM not stopped after the run: run=%d stop=%d", runAt, stopAt)
 	}
 }

@@ -208,23 +208,33 @@ func (s *session) runTests(ctx context.Context, o Options, image string) (string
 	return stamp, nil
 }
 
+// outputDepthLimit bounds the cleanup walk: at most this many directory levels
+// below root are opened, so descriptors and path bytes stay bounded and a deep
+// tree written by a test cannot exhaust the host or delay the VM stop.
+const outputDepthLimit = 64
+
 // restrictOutput sets directories to 0755 and regular files to 0644 below
 // root. Symlinks and other file types are skipped; a name swapped for a
 // symlink between listing and opening fails with ELOOP and is skipped too.
+// Directories deeper than outputDepthLimit are left as they are and reported.
 func restrictOutput(root string, errOut io.Writer) {
 	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		fmt.Fprintf(errOut, "output permissions: %s: %v\n", root, err)
 		return
 	}
-	restrictDir(fd, root, errOut)
+	restrictDir(fd, root, 0, errOut)
 }
 
-func restrictDir(fd int, path string, errOut io.Writer) {
+func restrictDir(fd int, path string, depth int, errOut io.Writer) {
 	dir := os.NewFile(uintptr(fd), path)
 	defer dir.Close()
 	if err := unix.Fchmod(fd, 0755); err != nil {
 		fmt.Fprintf(errOut, "output permissions: %s: %v\n", path, err)
+	}
+	if depth >= outputDepthLimit {
+		fmt.Fprintf(errOut, "output permissions: %s: deeper than %d levels; contents left unchanged\n", path, outputDepthLimit)
+		return
 	}
 	names, err := dir.Readdirnames(-1)
 	if err != nil {
@@ -247,7 +257,7 @@ func restrictDir(fd int, path string, errOut io.Writer) {
 		}
 		switch st.Mode & unix.S_IFMT {
 		case unix.S_IFDIR:
-			restrictDir(cfd, child, errOut)
+			restrictDir(cfd, child, depth+1, errOut)
 		case unix.S_IFREG:
 			if err := unix.Fchmod(cfd, 0644); err != nil {
 				fmt.Fprintf(errOut, "output permissions: %s: %v\n", child, err)
