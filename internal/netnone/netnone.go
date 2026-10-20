@@ -361,8 +361,45 @@ func toolchain(path, arch string) (toolchainID, error) {
 	if !validToolchain(data, arch) {
 		return toolchainID{}, fail(2, "refused: toolchain Dockerfile requires pinned FROM "+BaseImage+" or "+baseImage(arch)+", earlier pinned stages only, and no parser directives or heredocs")
 	}
+	if splitIndexReference(data) {
+		return toolchainID{}, fail(2, "refused: toolchain Dockerfile splits "+BaseImage+" across a line continuation; write each reference to it on one line")
+	}
 	sum := sha256.Sum256(data)
 	return toolchainID{Path: path, SHA: hex.EncodeToString(sum[:]), Data: data}, nil
+}
+
+// splitIndexReference reports a pinned-index reference that exists only once
+// continuation lines are joined (for example "...17-jdk@\" then "sha256:...").
+// pinToolchain rewrites whole references only, so such a reference would reach
+// the builder unpinned. Lines are joined as Docker joins them, with comment
+// lines inside a continuation dropped, both with and without the next line's
+// leading whitespace.
+func splitIndexReference(data []byte) bool {
+	raw := strings.Count(string(data), BaseImage)
+	for _, trim := range []bool{false, true} {
+		var joined strings.Builder
+		continued := false
+		for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+			if continued && strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			if continued && trim {
+				line = strings.TrimLeft(line, " \t")
+			}
+			if strings.HasSuffix(line, `\`) && !strings.HasSuffix(line, `\\`) {
+				joined.WriteString(strings.TrimSuffix(line, `\`))
+				continued = true
+				continue
+			}
+			joined.WriteString(line)
+			joined.WriteString("\n")
+			continued = false
+		}
+		if strings.Count(joined.String(), BaseImage) > raw {
+			return true
+		}
+	}
+	return false
 }
 
 var parserDirective = regexp.MustCompile(`(?i)^#\s*(syntax|check|escape)\s*=`)

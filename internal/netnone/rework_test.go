@@ -976,3 +976,35 @@ func TestPinToolchainRewritesIndex(t *testing.T) {
 		}
 	}
 }
+
+// Review F1 (PR #27): a pinned-index reference split by a line continuation
+// inside the image name (FROM or COPY --from) is refused for both arches
+// before any runner call. A split before the reference and a one-line file
+// stay accepted (controls).
+func TestToolchainSplitIndexReference(t *testing.T) {
+	head, tail := "eclipse-temurin:17-jdk@", strings.TrimPrefix(BaseImage, "eclipse-temurin:17-jdk@")
+	for _, arch := range []string{"amd64", "arm64"} {
+		for name, row := range map[string]struct {
+			content string
+			refused bool
+		}{
+			"split-from":        {"FROM " + head + "\\\n" + tail + "\nUSER root\n", true},
+			"split-from-indent": {"FROM " + head + "\\\n    " + tail + "\nUSER root\n", true},
+			"split-copy-from":   {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\\n" + tail + " /etc/os-release /x\n", true},
+			"split-before-ref":  {"FROM \\\n  " + BaseImage + "\nUSER root\n", false},
+			"one-line":          {"FROM " + BaseImage + "\nUSER root\nCOPY input.txt /tmp/input/\n", false},
+		} {
+			h := archHarness(t, arch)
+			h.o.Toolchain = filepath.Join(h.root, "Dockerfile")
+			writeFixture(t, h.o.Toolchain, row.content, 0600)
+			want := 0
+			if row.refused {
+				want = 2
+			}
+			h.exec(t, "prep", want)
+			if row.refused && len(h.f.calls) != 0 {
+				t.Fatalf("%s/%s: refused file reached the runner", arch, name)
+			}
+		}
+	}
+}

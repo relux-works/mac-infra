@@ -178,6 +178,8 @@ image store can otherwise resolve the index to the other architecture's local
 image, and a later step (for example COPY after USER) fails with "does not
 provide the specified platform". The selftest builds through such a
 toolchain fixture (index FROM, USER root, COPY) on both architectures.
+A reference to the index that is split by a line continuation inside the
+image name is refused (exit 2): write each reference on one line.
 Flags such as `--platform`, numeric/forward/unknown stage references, and parser
 directives (`# syntax=`, `# check=`, `# escape=`, ignoring case and optional
 spaces) before the first instruction are refused. Logical instructions
@@ -192,7 +194,8 @@ The file must create or keep user `netnone` with UID/GID 10001 and keep
 `/work` and `/gradle` owned by 10001:10001. Docker copies the image mountpoint
 ownership into empty named volumes; no root chown container is run. The embedded
 base is always built first as `netnone-base:<arch>`; the caller Dockerfile is then
-built from the exact validated bytes via `docker build -f - <context dir>`, with
+built from the validated bytes, with the pinned index rewritten to the
+per-arch manifest, via `docker build -f - <context dir>`, with
 its own directory as context and no injected build arguments. The embedded base
 also uses Dockerfile stdin. After every base/toolchain build, the tool inspects
 `{{.Os}}/{{.Architecture}}` on the immutable image ID and requires `linux/<arch>`.
