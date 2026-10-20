@@ -362,7 +362,7 @@ func toolchain(path, arch string) (toolchainID, error) {
 	}
 	build, ok := normalizeToolchain(data, arch)
 	if !ok {
-		return toolchainID{}, fail(2, "refused: toolchain Dockerfile requires pinned FROM "+BaseImage+" or "+baseImage(arch)+", earlier pinned stages only, --from=/from= naming only declared stages, and no parser directives or heredocs")
+		return toolchainID{}, fail(2, "refused: toolchain Dockerfile requires pinned FROM "+BaseImage+" or "+baseImage(arch)+", earlier pinned stages only, and no parser directives or heredocs")
 	}
 	sum := sha256.Sum256(data)
 	return toolchainID{Path: path, SHA: hex.EncodeToString(sum[:]), Data: data, Build: build}, nil
@@ -377,8 +377,8 @@ func validToolchain(data []byte, arch string) bool {
 }
 
 // logicalInstructions joins a Dockerfile into logical instructions the way
-// Docker does: a backslash at the end of a line (trailing whitespace allowed,
-// an escaped "\\" excluded) continues it; inside a continuation, comment lines
+// Docker does: a backslash at the end of a line (trailing spaces and tabs
+// allowed, an escaped "\\" excluded) continues it; inside a continuation, comment lines
 // and whitespace-only lines (Unicode whitespace) are skipped and the next
 // line's leading whitespace is kept. Parser directives before the first
 // instruction, heredocs and a continuation at EOF are refused.
@@ -401,7 +401,9 @@ func logicalInstructions(data []byte) ([]string, bool) {
 		} else {
 			cur = strings.TrimLeftFunc(line, unicode.IsSpace)
 		}
-		end := strings.TrimRightFunc(cur, unicode.IsSpace)
+		// Docker allows only ASCII space and tab after a continuation backslash;
+		// any other trailing character, Unicode whitespace included, ends it.
+		end := strings.TrimRight(cur, " \t")
 		if strings.HasSuffix(end, `\`) && !strings.HasSuffix(end, `\\`) {
 			cur = strings.TrimSuffix(end, `\`)
 			continued = true
@@ -417,16 +419,12 @@ func logicalInstructions(data []byte) ([]string, bool) {
 	return out, !continued
 }
 
-// fromFlag finds --from=/from= values in non-FROM instructions (COPY/ADD
-// --from, RUN --mount=...,from=...). The value runs to the next whitespace or
-// comma; all quotes are removed before it is compared with declared stages.
-var fromFlag = regexp.MustCompile(`(?i)(?:--|[,\s])from(=?)`)
-
 // normalizeToolchain validates a caller toolchain Dockerfile and emits the
 // Dockerfile the builder receives: one line per logical instruction, comments
 // dropped, and the pinned index in FROM replaced by the manifest matching arch.
-// The builder never parses the caller's raw bytes, so the emitted text is
-// exactly what was validated.
+// The builder never parses the caller's raw bytes, so every FROM it sees is the
+// validated, arch-pinned one. Images named in other instructions (COPY --from,
+// RUN --mount from=) are the caller's to pin, like any other download.
 func normalizeToolchain(data []byte, arch string) ([]byte, bool) {
 	pinned := func(image string) bool { return image == BaseImage || image == baseImage(arch) }
 	instructions, ok := logicalInstructions(data)
@@ -444,19 +442,6 @@ func normalizeToolchain(data []byte, arch string) ([]byte, bool) {
 		if !strings.EqualFold(fields[0], "FROM") {
 			if !seenFrom && !strings.EqualFold(fields[0], "ARG") {
 				return nil, false
-			}
-			for _, m := range fromFlag.FindAllStringSubmatchIndex(instruction, -1) {
-				if instruction[m[2]:m[3]] != "=" {
-					return nil, false
-				}
-				rest := instruction[m[1]:]
-				end := strings.IndexFunc(rest, func(r rune) bool { return unicode.IsSpace(r) || r == ',' })
-				if end >= 0 {
-					rest = rest[:end]
-				}
-				if !stages[strings.ToLower(strings.NewReplacer(`"`, "", "'", "").Replace(rest))] {
-					return nil, false
-				}
 			}
 			b.WriteString(instruction)
 			b.WriteString("\n")

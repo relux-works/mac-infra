@@ -116,16 +116,14 @@ an earlier stage declared as
 The other architecture's manifest and tag-only bases are refused (exit 2).
 The builder never parses the caller's raw file. mac-netnone joins it into
 logical instructions the way Docker does (a backslash at the end of a line,
-trailing whitespace allowed, continues it; comment and whitespace-only lines
+followed only by spaces or tabs, continues it; comment and whitespace-only lines
 inside a continuation are skipped; the next line's leading whitespace is kept),
 validates those, and builds from the Dockerfile it emits from them: one line
 per instruction, comments dropped, and the pinned index in FROM replaced by
 the manifest matching `--arch`. The classic image store can otherwise resolve
 the index to the other architecture's local image, and a later step (for
 example COPY after USER) fails with "does not provide the specified platform".
-A `--from=`/`from=` value in any other instruction (COPY/ADD --from, RUN
---mount) must name a declared stage, after quotes are removed; an image there
-is refused (exit 2). The selftest builds through a toolchain fixture of the
+The selftest builds through a toolchain fixture of the
 reported shape (index FROM, USER root, COPY) on both architectures.
 Flags such as `--platform`, numeric/forward/unknown stage references, and parser
 directives (`# syntax=`, `# check=`, `# escape=`, ignoring case and optional
@@ -134,7 +132,8 @@ containing `<<` (including heredocs, also when `<<` is split by a line
 continuation) are refused until the validator supports their bodies.
 Backslash line continuations
 are supported. `COPY --from=<external image>` and `RUN --mount=from=<image>`
-can pull content that this tool does not pin. Pinning those images, like
+can pull content that this tool does not pin or rewrite. Pinning those images
+(use the per-arch manifest digest there, for the same platform reason), like
 `sdkmanager` packages and other toolchain downloads, is the caller's responsibility.
 
 The file must create or keep user `netnone` with UID/GID 10001 and keep

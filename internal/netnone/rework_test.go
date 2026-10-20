@@ -978,53 +978,60 @@ func TestNormalizeToolchainEmission(t *testing.T) {
 	}
 }
 
-// Review rounds 1-3 (PR #27): a FROM of the index split in any Docker-joined
-// way (plain, indented, whitespace after the backslash, blank, comment or
-// Unicode-whitespace continuation lines) is accepted and built pinned, since
-// the builder only sees the normalized emission. Any --from/from= that names
-// an image, in any spelling (plain, split, quoted fragments), is refused
-// before any runner call; --from naming a declared stage is accepted.
+// Review rounds 1-4 (PR #27): every FROM the builder receives is the
+// validated, arch-pinned one. A FROM of the index split in any Docker-joined
+// way (plain, indented, space/tab after the backslash, blank, comment or
+// Unicode-whitespace continuation lines) is accepted and emitted pinned on one
+// line. Images in other instructions (COPY --from, RUN --mount from=) are the
+// caller's to pin and pass through unchanged. Limit: Docker's own parse of the
+// emitted file is not executed here; the real selftest covers the build.
 func TestToolchainSplitIndexReference(t *testing.T) {
 	head, tail := "eclipse-temurin:17-jdk@", strings.TrimPrefix(BaseImage, "eclipse-temurin:17-jdk@")
 	for _, arch := range []string{"amd64", "arm64"} {
-		for name, row := range map[string]struct {
-			content string
-			refused bool
-		}{
-			"split-from":           {"FROM " + head + "\\\n" + tail + "\nUSER root\n", false},
-			"split-from-ws":        {"FROM " + head + "\\ \t\n" + tail + "\nUSER root\n", false},
-			"split-from-blank":     {"FROM " + head + "\\\n\n" + tail + "\nUSER root\n", false},
-			"split-from-nbsp":      {"FROM " + head + "\\\n\u00a0\n" + tail + "\nUSER root\n", false},
-			"split-from-comment":   {"FROM " + head + "\\\n# " + BaseImage + "\n" + tail + "\nUSER root\n", false},
-			"copy-from-index":      {"FROM " + BaseImage + "\nCOPY --from=" + BaseImage + " /etc/os-release /x\n", true},
-			"copy-from-split":      {"FROM " + BaseImage + "\nCOPY --from=" + head + "\\\n" + tail + " /etc/os-release /x\n", true},
-			"copy-from-quoted":     {"FROM " + BaseImage + "\nCOPY --from=\"" + head + "\"\\\n\"" + tail + "\" /etc/os-release /x\n", true},
-			"copy-from-no-equals":  {"FROM " + BaseImage + " AS a\nCOPY --from a /x /y\n", true},
-			"mount-from-image":     {"FROM " + BaseImage + "\nRUN --mount=type=bind,from=" + BaseImage + ",target=/m true\n", true},
-			"copy-from-stage":      {"FROM " + BaseImage + " AS a\nFROM " + BaseImage + "\nCOPY --from=a /etc/os-release /x\n", false},
-			"copy-from-stage-quot": {"FROM " + BaseImage + " AS a\nFROM " + BaseImage + "\nCOPY --from=\"a\" /etc/os-release /x\n", false},
-			"mount-cache":          {"FROM " + BaseImage + "\nRUN --mount=type=cache,target=/root/.m2 true\n", false},
-			"one-line":             {"FROM " + BaseImage + "\nUSER root\nCOPY input.txt /tmp/input/\n", false},
+		for name, content := range map[string]string{
+			"split-from":         "FROM " + head + "\\\n" + tail + "\nUSER root\n",
+			"split-from-ws":      "FROM " + head + "\\ \t\n" + tail + "\nUSER root\n",
+			"split-from-blank":   "FROM " + head + "\\\n\n" + tail + "\nUSER root\n",
+			"split-from-nbsp":    "FROM " + head + "\\\n\u00a0\n" + tail + "\nUSER root\n",
+			"split-from-comment": "FROM " + head + "\\\n# " + BaseImage + "\n" + tail + "\nUSER root\n",
+			"copy-from-image":    "FROM " + BaseImage + "\nCOPY --from=" + BaseImageAMD64 + " /etc/os-release /x\n",
+			"one-line":           "FROM " + BaseImage + "\nUSER root\nCOPY input.txt /tmp/input/\n",
 		} {
 			h := archHarness(t, arch)
 			h.o.Toolchain = filepath.Join(h.root, "Dockerfile")
-			writeFixture(t, h.o.Toolchain, row.content, 0600)
-			want := 0
-			if row.refused {
-				want = 2
-			}
-			h.exec(t, "prep", want)
-			if row.refused && len(h.f.calls) != 0 {
-				t.Fatalf("%s/%s: refused file reached the runner", arch, name)
-			}
-			if !row.refused {
-				for _, c := range callsNamed(h.f.calls, "docker", "build") {
-					data, _ := io.ReadAll(c.Stdin)
-					if strings.Contains(string(data), BaseImage) || strings.Contains(string(data), head+"\n") {
-						t.Fatalf("%s/%s: builder received an unpinned or split index: %q", arch, name, data)
-					}
+			writeFixture(t, h.o.Toolchain, content, 0600)
+			h.exec(t, "prep", 0)
+			builds := callsNamed(h.f.calls, "docker", "build")
+			data, _ := io.ReadAll(builds[len(builds)-1].Stdin)
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(strings.ToUpper(line), "FROM ") && line != "FROM "+baseImage(arch) {
+					t.Fatalf("%s/%s: builder FROM %q is not the %s pin", arch, name, line, arch)
 				}
 			}
+			if strings.Contains(string(data), "\\\n") {
+				t.Fatalf("%s/%s: builder received a continuation: %q", arch, name, data)
+			}
+		}
+	}
+}
+
+// Review round 4 (PR #27): only ASCII space and tab may follow a continuation
+// backslash, as in Docker. A backslash followed by NBSP, VT, FF or EM SPACE
+// does not continue the line, so the next instruction stays separate (the
+// marker RUN is not swallowed); space and tab are the continuation controls.
+func TestContinuationTrailingWhitespace(t *testing.T) {
+	for name, ws := range map[string]string{"nbsp": "\u00a0", "vt": "\v", "ff": "\f", "em-space": "\u2003"} {
+		in := "FROM " + BaseImage + "\nRUN printf '%s' foo\\" + ws + "\nRUN touch /marker\n"
+		out, ok := normalizeToolchain([]byte(in), "amd64")
+		if !ok || !strings.Contains(string(out), "\nRUN touch /marker\n") || strings.Count(string(out), "RUN ") != 2 {
+			t.Fatalf("%s: instruction boundary lost: %q (ok=%t)", name, out, ok)
+		}
+	}
+	for name, ws := range map[string]string{"space": " ", "tab": "\t"} {
+		in := "FROM " + BaseImage + "\nRUN printf '%s' foo \\" + ws + "\n  bar\n"
+		out, ok := normalizeToolchain([]byte(in), "amd64")
+		if !ok || !strings.Contains(string(out), "RUN printf '%s' foo   bar\n") {
+			t.Fatalf("%s: continuation not joined: %q (ok=%t)", name, out, ok)
 		}
 	}
 }
