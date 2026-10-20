@@ -14,12 +14,15 @@ BUILD_VERSION="dev"
 BUILD_COMMIT="unknown"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 REBUILD_KEYVAULT=0
+ALLOW_UNPROVABLE=0
 
 usage() {
   cat <<EOF
-Usage: ./scripts/setup.sh [--bin-dir PATH] [--rebuild-keyvault]
+Usage: ./scripts/setup.sh [--bin-dir PATH] [--rebuild-keyvault] [--allow-unprovable]
 
 Builds mac-infra Go tools and installs the global agent skill.
+Refuses worktree, dirty or unprovable builds. --allow-unprovable skips
+provenance checks for a developer's own checkout, with a WARNING.
 An existing bin/mac-keyvault is kept: keyvault keys trust exactly that
 binary, and a rebuild makes each key wait on a keychain prompt. Pass
 --rebuild-keyvault only in a planned owner sitting, after booting out
@@ -41,6 +44,10 @@ while [[ $# -gt 0 ]]; do
       REBUILD_KEYVAULT=1
       shift
       ;;
+    --allow-unprovable)
+      ALLOW_UNPROVABLE=1
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -56,6 +63,15 @@ done
 if ! command -v go >/dev/null 2>&1; then
   echo "go is required" >&2
   exit 1
+fi
+
+warn_unprovable() {
+  echo "WARNING: --allow-unprovable: installed binaries are not provably built from a reviewed commit." >&2
+}
+if [[ "$ALLOW_UNPROVABLE" == 1 ]]; then
+  warn_unprovable
+else
+  "$SCRIPT_DIR/provenance-guard.sh" preflight "$PROJECT_ROOT"
 fi
 
 # Linking the build directory onto itself would replace every binary with a
@@ -128,19 +144,6 @@ if [[ "$CHROME_OBSERVED_REQUIREMENT" != *"$CHROME_DESIGNATED_REQUIREMENT"* ]]; t
   echo "mac-chrome-session signing did not produce the stable designated requirement" >&2
   exit 1
 fi
-echo "Installing stable Chrome/Safari heartbeat launcher identity..."
-mkdir -p "$HEARTBEAT_LAUNCHER_DIR"
-chmod 700 "$HEARTBEAT_LAUNCHER_DIR"
-HEARTBEAT_LAUNCHER_TMP="$(mktemp "$HEARTBEAT_LAUNCHER_DIR/.mac-browser-heartbeat-launcher.XXXXXX")"
-cp "$BUILD_DIR/mac-chrome-session" "$HEARTBEAT_LAUNCHER_TMP"
-chmod 700 "$HEARTBEAT_LAUNCHER_TMP"
-mv -f "$HEARTBEAT_LAUNCHER_TMP" "$HEARTBEAT_LAUNCHER"
-/usr/bin/codesign --verify --strict "$HEARTBEAT_LAUNCHER"
-HEARTBEAT_OBSERVED_REQUIREMENT=$(/usr/bin/codesign -d -r- "$HEARTBEAT_LAUNCHER" 2>&1)
-if [[ "$HEARTBEAT_OBSERVED_REQUIREMENT" != *"$CHROME_DESIGNATED_REQUIREMENT"* ]]; then
-  echo "stable heartbeat launcher lost its designated requirement" >&2
-  exit 1
-fi
 echo "Building mac-browser-site..."
 go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-browser-site" ./cmd/mac-browser-site
 echo "Building mac-document-sanitize..."
@@ -170,6 +173,43 @@ if [[ "$KEYVAULT_DECISION" == build ]]; then
   fi
 else
   echo "Keeping the existing bin/mac-keyvault (keyvault keys trust exactly this binary; see --rebuild-keyvault)"
+fi
+
+if [[ "$ALLOW_UNPROVABLE" != 1 ]]; then
+  BUILT_BINARIES=(
+    "$BUILD_DIR/mac-audio-reset"
+    "$BUILD_DIR/mac-audio-sweep"
+    "$BUILD_DIR/mac-load-profile"
+    "$BUILD_DIR/mac-video-profile"
+    "$BUILD_DIR/mac-disk-profile"
+    "$BUILD_DIR/mac-cleanup"
+    "$BUILD_DIR/mac-safari-session"
+    "$BUILD_DIR/mac-chrome-session"
+    "$BUILD_DIR/mac-browser-site"
+    "$BUILD_DIR/mac-document-sanitize"
+    "$BUILD_DIR/mac-infra-core"
+    "$BUILD_DIR/mac-security"
+    "$BUILD_DIR/mac-netnone"
+    "$BUILD_DIR/mac-firewall"
+  )
+  if [[ "$KEYVAULT_DECISION" == build ]]; then
+    BUILT_BINARIES+=("$BUILD_DIR/mac-keyvault")
+  fi
+  "$SCRIPT_DIR/provenance-guard.sh" verify "$PROJECT_ROOT" "${BUILT_BINARIES[@]}"
+fi
+
+echo "Installing stable Chrome/Safari heartbeat launcher identity..."
+mkdir -p "$HEARTBEAT_LAUNCHER_DIR"
+chmod 700 "$HEARTBEAT_LAUNCHER_DIR"
+HEARTBEAT_LAUNCHER_TMP="$(mktemp "$HEARTBEAT_LAUNCHER_DIR/.mac-browser-heartbeat-launcher.XXXXXX")"
+cp "$BUILD_DIR/mac-chrome-session" "$HEARTBEAT_LAUNCHER_TMP"
+chmod 700 "$HEARTBEAT_LAUNCHER_TMP"
+mv -f "$HEARTBEAT_LAUNCHER_TMP" "$HEARTBEAT_LAUNCHER"
+/usr/bin/codesign --verify --strict "$HEARTBEAT_LAUNCHER"
+HEARTBEAT_OBSERVED_REQUIREMENT=$(/usr/bin/codesign -d -r- "$HEARTBEAT_LAUNCHER" 2>&1)
+if [[ "$HEARTBEAT_OBSERVED_REQUIREMENT" != *"$CHROME_DESIGNATED_REQUIREMENT"* ]]; then
+  echo "stable heartbeat launcher lost its designated requirement" >&2
+  exit 1
 fi
 
 ln -sf "$BUILD_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-reset"
@@ -251,3 +291,7 @@ echo "  mac-infra-core idle-lock-prevention status"
 echo
 echo "Then reset audio without sudo:"
 echo "  mac-audio-reset reset"
+
+if [[ "$ALLOW_UNPROVABLE" == 1 ]]; then
+  warn_unprovable
+fi
