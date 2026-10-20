@@ -188,7 +188,7 @@ func TestBuildValidatedBytes(t *testing.T) {
 		t.Fatalf("builds=%d", len(builds))
 	}
 	base, _ := assets.ReadFile("assets/Dockerfile")
-	for i, want := range []string{strings.Replace(string(base), BaseImage, BaseImageARM64, 1), original} {
+	for i, want := range []string{strings.Replace(string(base), BaseImage, BaseImageARM64, 1), string(pinToolchain([]byte(original), "arm64"))} {
 		c := builds[i]
 		if !has(c.Args, "-f", "-") || c.Stdin == nil {
 			t.Fatalf("build reopened path: %v", c.Args)
@@ -952,5 +952,27 @@ func TestCopySourceChmodFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "work", "mod", "build", "stale.txt")); err != nil {
 		t.Fatal("excluded tree removed despite chmod failure", err)
+	}
+}
+
+// Consumer bug (2026-10-21): the pinned index in a toolchain Dockerfile is
+// rewritten to the per-arch manifest everywhere it appears (single-line and
+// continued FROM, stage FROM, COPY --from) for both architectures; a file
+// already using the matching per-arch digest is unchanged.
+func TestPinToolchainRewritesIndex(t *testing.T) {
+	for _, arch := range []string{"amd64", "arm64"} {
+		in := "# base " + BaseImage + "\nFROM " + BaseImage + "\nUSER root\nCOPY input.txt /tmp/input/\n" +
+			"FROM \\\n  " + BaseImage + " AS b\nCOPY --from=" + BaseImage + " /etc/os-release /x\n"
+		out := string(pinToolchain([]byte(in), arch))
+		if strings.Contains(out, BaseImage) || strings.Count(out, baseImage(arch)) != 4 {
+			t.Fatalf("%s: index not fully pinned:\n%s", arch, out)
+		}
+		if strings.Replace(out, baseImage(arch), BaseImage, -1) != in {
+			t.Fatalf("%s: rewrite changed more than the pin", arch)
+		}
+		already := "FROM " + baseImage(arch) + "\nUSER root\n"
+		if string(pinToolchain([]byte(already), arch)) != already {
+			t.Fatalf("%s: per-arch digest rewritten", arch)
+		}
 	}
 }

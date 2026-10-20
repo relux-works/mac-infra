@@ -62,7 +62,7 @@ func TestArchitectureArgv(t *testing.T) {
 					t.Fatalf("missing/wrong platform: %v", c.Args)
 				}
 			}
-			if starts != 3 || builds != 3 || runs != 5 {
+			if starts != 3 || builds != 4 || runs != 5 { // selftest builds the base and its toolchain fixture
 				t.Fatalf("unexpected coverage starts/builds/runs=%d/%d/%d", starts, builds, runs)
 			}
 			assertPrivate(t, h)
@@ -105,8 +105,10 @@ func TestArchitectureBuildPinsAndInspection(t *testing.T) {
 					if !strings.HasPrefix(string(data), "FROM "+row.pin+"\n") || !has(c.Args, "-t", "netnone-base:"+row.arch) {
 						t.Fatalf("wrong base/tag: %s %v", data, c.Args)
 					}
-				} else if string(data) != original {
-					t.Fatal("caller validated bytes changed")
+				} else if string(data) != string(pinToolchain([]byte(original), row.arch)) || strings.Contains(string(data), BaseImage) {
+					// The validated caller bytes are built with the index pinned to
+					// this architecture's manifest, and nothing else changed.
+					t.Fatalf("caller bytes not built as validated and arch-pinned: %s", data)
 				}
 			}
 			h.exec(t, "run", 0)

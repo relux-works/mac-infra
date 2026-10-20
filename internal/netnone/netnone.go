@@ -428,6 +428,16 @@ func validToolchain(data []byte, arch string) bool {
 	return scan.Err() == nil && !continued && instruction == "" && seenFrom
 }
 
+// pinToolchain rewrites the pinned index, wherever it appears in validated
+// toolchain bytes (single-line or continued FROM, stage FROM, COPY --from), to
+// the per-arch manifest digest of that same index. The legacy builder can
+// otherwise resolve the index to a local image of the other architecture, and
+// a later step then fails with "does not provide the specified platform".
+// Validation already admitted the index, so the result stays pinned.
+func pinToolchain(data []byte, arch string) []byte {
+	return bytes.ReplaceAll(data, []byte(BaseImage), []byte(baseImage(arch)))
+}
+
 var imageID = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type Record struct {

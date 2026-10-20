@@ -114,6 +114,12 @@ Every caller FROM must use that exact index or the matching manifest, or referen
 an earlier stage declared as
 `FROM <pinned-base> AS <name>`. Only pinned-base declarations may use AS.
 The other architecture's manifest and tag-only bases are refused (exit 2).
+Before building, mac-netnone rewrites every occurrence of the index in the
+caller's validated Dockerfile to the manifest matching `--arch`. The classic
+image store can otherwise resolve the index to the other architecture's local
+image, and a later step (for example COPY after USER) fails with "does not
+provide the specified platform". The selftest builds through such a
+toolchain fixture (index FROM, USER root, COPY) on both architectures.
 Flags such as `--platform`, numeric/forward/unknown stage references, and parser
 directives (`# syntax=`, `# check=`, `# escape=`, ignoring case and optional
 spaces) before the first instruction are refused. Logical instructions

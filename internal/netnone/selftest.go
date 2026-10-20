@@ -308,6 +308,16 @@ func (s *session) selftest(ctx context.Context, o Options) error {
 	if err = materializeFixture(o.Repo); err != nil {
 		return err
 	}
+	// The selftest builds through a caller-style toolchain Dockerfile (pinned
+	// index FROM, USER, COPY) so that path is qualified on every arch.
+	toolchainDir := filepath.Join(scratch, "toolchain")
+	if err = materializeAssetDir("assets/selftest-toolchain", toolchainDir); err != nil {
+		return err
+	}
+	selftestToolchain, err := toolchain(filepath.Join(toolchainDir, "Dockerfile"), o.Arch)
+	if err != nil {
+		return err
+	}
 	if err = os.Mkdir(o.Out, 0755); err != nil {
 		return err
 	}
@@ -324,10 +334,11 @@ func (s *session) selftest(ctx context.Context, o Options) error {
 		checks = append(checks, verdict{check, expected, observed, pass})
 	}
 	workErr := s.lifecycle(ctx, o, func() error {
-		image, networked, err := s.prep(ctx, o, toolchainID{SHA: "base"}, true)
+		image, networked, err := s.prep(ctx, o, selftestToolchain, true)
 		if err != nil {
 			return err
 		}
+		add("toolchain build", "index FROM + USER + COPY built as linux/"+o.Arch, image, true)
 		dns, tcp := probeLines(string(networked.Stdout))
 		add("prep DNS", "dns=ok", dns, dns == "dns=ok")
 		add("prep TCP", "tcp=ok", tcp, tcp == "tcp=ok")
@@ -518,4 +529,27 @@ func typedNetworkException(kind, text string) bool {
 		return strings.Contains(text, "Network is unreachable")
 	}
 	return false
+}
+
+// materializeAssetDir copies one embedded asset directory to dest as private
+// regular files.
+func materializeAssetDir(src, dest string) error {
+	return fs.WalkDir(assets, src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dest, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		data, err := assets.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0644)
+	})
 }
