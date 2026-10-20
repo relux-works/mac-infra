@@ -2,6 +2,7 @@ package browserfacade
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/relux-works/mac-infra/internal/browsersession"
@@ -70,5 +71,75 @@ func TestAdapterValidationRefusesTargetAndPaginationAmbiguity(t *testing.T) {
 	}
 	if _, err := DecodeAdapter([]byte(`{"unknown":true}`)); ErrorCode(err) != "ADAPTER_INVALID" {
 		t.Fatalf("decode error=%v", err)
+	}
+}
+
+// Bug (2026-10-21): an adapter whose itemSelector is a CSS attribute selector
+// decodes; before the fix every command, schema() included, refused with
+// SENSITIVE_RESPONSE_UNKNOWN. A secret-bearing attribute selector is refused.
+func TestDecodeAdapterAcceptsAttributeSelector(t *testing.T) {
+	adapter := testAdapter("next-page", 1)
+	adapter.Template.ItemSelector = `[data-widget="searchResults"] > div`
+	data, err := json.Marshal(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAdapter(data); err != nil {
+		t.Fatalf("attribute selector adapter refused: %v", err)
+	}
+	adapter.Template.ItemSelector = `[data-token="abcdefgh12345"] > div`
+	data, _ = json.Marshal(adapter)
+	if _, err := DecodeAdapter(data); err == nil {
+		t.Fatal("secret-bearing attribute selector admitted")
+	}
+}
+
+// The mutation-name refusal names the required pattern, so an adapter author
+// can fix a camelCase name such as openCart; a kebab-case name is accepted.
+func TestDecodeAdapterMutationNameMessage(t *testing.T) {
+	adapter := testAdapter("next-page", 1)
+	adapter.Mutations = map[string]Mutation{"openCart": {Description: "open the cart", Selector: "a.cart"}}
+	data, _ := json.Marshal(adapter)
+	_, err := DecodeAdapter(data)
+	if err == nil || !strings.Contains(err.Error(), "^[a-z][a-z0-9-]{0,47}$") || !strings.Contains(err.Error(), "open-cart") {
+		t.Fatalf("mutation name error lacks the pattern: %v", err)
+	}
+	adapter.Mutations = map[string]Mutation{"open-cart": {Description: "open the cart", Selector: "a.cart"}}
+	data, _ = json.Marshal(adapter)
+	if _, err := DecodeAdapter(data); err != nil {
+		t.Fatalf("kebab-case mutation refused: %v", err)
+	}
+}
+
+// Review F4 (PR #29): a mutation description that hides a credential inside a
+// harmless assignment is refused by DecodeAdapter, so schema() cannot emit it.
+func TestDecodeAdapterRefusesNestedCredentialInDescription(t *testing.T) {
+	adapter := testAdapter("next-page", 1)
+	adapter.Mutations = map[string]Mutation{"open-cart": {Description: "note 'title': 'cookie=abcdefgh12345'", Selector: "a.cart"}}
+	data, _ := json.Marshal(adapter)
+	if _, err := DecodeAdapter(data); err == nil {
+		t.Fatal("credential in a mutation description admitted")
+	}
+}
+
+// Review F8 (PR #29): a Kelvin-sign cookie name in a mutation description is
+// refused by DecodeAdapter, so schema() cannot emit it.
+func TestDecodeAdapterRefusesFoldedCredentialName(t *testing.T) {
+	adapter := testAdapter("next-page", 1)
+	adapter.Mutations = map[string]Mutation{"open-cart": {Description: "coo\u212aie=abcdefgh12345", Selector: "a.cart"}}
+	data, _ := json.Marshal(adapter)
+	if _, err := DecodeAdapter(data); err == nil {
+		t.Fatal("folded credential name in a mutation description admitted")
+	}
+}
+
+// Review F9 (PR #29): 0Key (Kelvin sign) in a mutation description is refused
+// by DecodeAdapter, so schema() cannot emit the value.
+func TestDecodeAdapterRefusesRawBoundaryFoldedName(t *testing.T) {
+	adapter := testAdapter("next-page", 1)
+	adapter.Mutations = map[string]Mutation{"open-cart": {Description: "0\u212aey=abcdefgh12345", Selector: "a.cart"}}
+	data, _ := json.Marshal(adapter)
+	if _, err := DecodeAdapter(data); err == nil {
+		t.Fatal("0Key credential in a mutation description admitted")
 	}
 }

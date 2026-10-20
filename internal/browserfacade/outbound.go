@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/relux-works/mac-infra/internal/docsanitize"
@@ -33,11 +34,10 @@ type OutboundDecision struct {
 }
 
 var (
-	outboundURLPattern        = regexp.MustCompile(`(?i)\bhttps?://[^\\\s"'<>]+`)
-	outboundSecretPattern     = regexp.MustCompile(`(?i)(?:authorization\s*:|proxy-authorization\s*:|set-cookie\s*:|cookie\s*:|bearer\s+[a-z0-9._~+/=-]{8,}|x-api-key\s*:|x-auth-token\s*:|(?:client[_-]?secret|refresh[_-]?token|access[_-]?token|api[_-]?key|signature)\s*[=:]\s*[^\s,;]{4,}|gh[pousr]_[a-z0-9]{16,}|github_pat_[a-z0-9_]{20,}|gl(?:pat|ptt|ft|rt|cbt|imt|soat|oas|ffct|agent|dt)-[a-z0-9_-]{10,}|(?:akia|asia)[a-z0-9]{16}|sk-(?:proj-)?[a-z0-9_-]{16,}|sk_(?:live|test)_[a-z0-9]{16,}|xox[baprs]-[a-z0-9-]{10,}|npm_[a-z0-9]{16,}|[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})`)
-	encodedSecretHintPattern  = regexp.MustCompile(`(?i)(?:https?|bearer|authorization|token|secret|api[_-]?key|signature)(?:%[0-9a-f]{2})`)
-	outboundAssignmentPattern = regexp.MustCompile(`(?i)\b([a-z][a-z0-9_. -]{0,63})\s*[=:]\s*[^\s,;]{1,}`)
-	opaqueCredentialPattern   = regexp.MustCompile(`\b[A-Za-z0-9_-]{32,256}\b`)
+	outboundURLPattern       = regexp.MustCompile(`(?i)\bhttps?://[^\\\s"'<>]+`)
+	outboundSecretPattern    = regexp.MustCompile(`(?i)(?:authorization\s*:|proxy-authorization\s*:|set-cookie\s*:|cookie\s*:|bearer\s+[a-z0-9._~+/=-]{8,}|x-api-key\s*:|x-auth-token\s*:|(?:client[_-]?secret|refresh[_-]?token|access[_-]?token|api[_-]?key|signature)\s*[=:]\s*[^\s,;]{4,}|gh[pousr]_[a-z0-9]{16,}|github_pat_[a-z0-9_]{20,}|gl(?:pat|ptt|ft|rt|cbt|imt|soat|oas|ffct|agent|dt)-[a-z0-9_-]{10,}|(?:akia|asia)[a-z0-9]{16}|sk-(?:proj-)?[a-z0-9_-]{16,}|sk_(?:live|test)_[a-z0-9]{16,}|xox[baprs]-[a-z0-9-]{10,}|npm_[a-z0-9]{16,}|[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})`)
+	encodedSecretHintPattern = regexp.MustCompile(`(?i)(?:https?|bearer|authorization|token|secret|api[_-]?key|signature)(?:%[0-9a-f]{2})`)
+	opaqueCredentialPattern  = regexp.MustCompile(`\b[A-Za-z0-9_-]{32,}\b`)
 )
 
 const (
@@ -59,6 +59,37 @@ func EnforceOutbound(raw string) (OutboundDecision, error) {
 		return OutboundDecision{State: OutboundUnknown}, coded("SENSITIVE_RESPONSE_UNKNOWN", "outbound secret boundary could not safely classify material")
 	}
 }
+
+// EnforceAdapterOutbound is EnforceOutbound for adapter metadata only: CSS
+// selector values that start with '[' are scanned as text (see
+// scanOutboundText), because a selector such as [data-widget="x"] > div is
+// configuration, not embedded JSON.
+func EnforceAdapterOutbound(raw string) (OutboundDecision, error) {
+	decision := scanOutboundText(raw, 0, true, false)
+	switch decision.State {
+	case OutboundClean, OutboundRedacted:
+		return decision, nil
+	case OutboundRefused:
+		return OutboundDecision{State: OutboundRefused}, coded("SENSITIVE_RESPONSE_REFUSED", "outbound secret boundary refused sensitive material")
+	default:
+		return OutboundDecision{State: OutboundUnknown}, coded("SENSITIVE_RESPONSE_UNKNOWN", "outbound secret boundary could not safely classify material")
+	}
+}
+
+// adapterSelectorPattern is a deliberately small CSS selector grammar: type,
+// class, id, attribute and simple pseudo-class parts joined by descendant,
+// child or sibling combinators. Attribute values are limited to
+// [A-Za-z0-9 _.:/#-] (no '=', quotes, commas or braces inside), so a selector
+// cannot carry an assignment or a quoted credential pair.
+var adapterSelectorPattern = func() *regexp.Regexp {
+	ident := `[A-Za-z_-][A-Za-z0-9_-]{0,63}`
+	value := `(?:"[A-Za-z0-9 _.:/#-]{0,64}"|'[A-Za-z0-9 _.:/#-]{0,64}'|[A-Za-z0-9_-]{1,64})`
+	attr := `\[` + ident + `(?:[~|^$*]?=` + value + `)?\]`
+	part := `(?:\.` + ident + `|#` + ident + `|` + attr + `|:` + `[a-z-]{1,32}(?:\([a-z0-9+ -]{0,16}\))?)`
+	compound := `(?:(?:[A-Za-z][A-Za-z0-9-]{0,31}|\*)` + part + `*|` + part + `+)`
+	combinator := `(?:\s*[>+~]\s*|\s+)`
+	return regexp.MustCompile(`^` + compound + `(?:` + combinator + compound + `){0,15}$`)
+}()
 
 // WriteOutbound buffers must already be complete. It guarantees that a
 // renderer cannot partially write before the central boundary has decided.
@@ -83,6 +114,16 @@ func enforceOutboundValue(value any) error {
 }
 
 func scanOutbound(raw string, depth int) OutboundDecision {
+	return scanOutboundText(raw, depth, false, false)
+}
+
+// scanOutboundText classifies one piece of text. adapter is set only while
+// DecodeAdapter scans adapter metadata; nested marks a string value decoded
+// from a parsed JSON document. In that case alone a value that starts with
+// '[' and fully matches the conservative CSS selector grammar is scanned as
+// text instead of as embedded JSON. Every other text keeps the strict rule:
+// anything that starts with '[' or '{' must parse as JSON.
+func scanOutboundText(raw string, depth int, adapter, nested bool) OutboundDecision {
 	if depth > maximumNormalizationDepth || len(raw) > maximumOutboundBytes || !utf8.ValidString(raw) || hasAmbiguousControl(raw) {
 		return OutboundDecision{State: OutboundUnknown}
 	}
@@ -93,13 +134,13 @@ func scanOutbound(raw string, depth int) OutboundDecision {
 	if urlState == OutboundRefused || urlState == OutboundUnknown {
 		return OutboundDecision{State: urlState}
 	}
-	jsonShaped := isJSONObjectOrArray(redacted)
+	jsonShaped := isJSONObjectOrArray(redacted) && !(adapter && nested && adapterSelectorPattern.MatchString(strings.TrimSpace(redacted)))
 	if jsonShaped {
-		if state := inspectJSONShape(redacted, depth); state == OutboundRefused || state == OutboundUnknown {
+		if state := inspectJSONShape(redacted, depth, adapter); state == OutboundRefused || state == OutboundUnknown {
 			return OutboundDecision{State: state}
 		}
 		if urlState == OutboundRedacted {
-			rescanned := scanOutbound(redacted, depth+1)
+			rescanned := scanOutboundText(redacted, depth+1, adapter, nested)
 			if rescanned.State != OutboundClean {
 				return OutboundDecision{State: OutboundUnknown}
 			}
@@ -120,7 +161,7 @@ func scanOutbound(raw string, depth int) OutboundDecision {
 		return OutboundDecision{State: state}
 	}
 	if urlState == OutboundRedacted {
-		rescanned := scanOutbound(redacted, depth+1)
+		rescanned := scanOutboundText(redacted, depth+1, adapter, nested)
 		if rescanned.State == OutboundRefused || rescanned.State == OutboundUnknown {
 			return OutboundDecision{State: rescanned.State}
 		}
@@ -341,7 +382,7 @@ func inspectNormalizedVariants(raw string, depth int) OutboundState {
 			if looksLikeOpaqueCredential(remainder) {
 				return OutboundUnknown
 			}
-			if state := inspectJSONShape(safe, current.depth+1); state == OutboundRefused || state == OutboundUnknown {
+			if state := inspectJSONShape(safe, current.depth+1, false); state == OutboundRefused || state == OutboundUnknown {
 				return state
 			}
 			queue = append(queue, normalizationVariant{value: variant, depth: current.depth + 1})
@@ -435,13 +476,13 @@ func hasSecretHint(raw string) bool {
 	return false
 }
 
-func inspectJSONShape(raw string, depth int) OutboundState {
+func inspectJSONShape(raw string, depth int, adapter bool) OutboundState {
 	trimmed := strings.TrimSpace(raw)
 	if !isJSONObjectOrArray(trimmed) {
 		return OutboundClean
 	}
 	decoder := json.NewDecoder(strings.NewReader(trimmed))
-	state, err := inspectJSONValue(decoder, depth)
+	state, err := inspectJSONValue(decoder, depth, adapter)
 	if err != nil {
 		return OutboundUnknown
 	}
@@ -460,7 +501,7 @@ func isJSONObjectOrArray(raw string) bool {
 	return trimmed != "" && (trimmed[0] == '{' || trimmed[0] == '[')
 }
 
-func inspectJSONValue(decoder *json.Decoder, depth int) (OutboundState, error) {
+func inspectJSONValue(decoder *json.Decoder, depth int, adapter bool) (OutboundState, error) {
 	token, err := decoder.Token()
 	if err != nil {
 		return OutboundUnknown, err
@@ -468,7 +509,7 @@ func inspectJSONValue(decoder *json.Decoder, depth int) (OutboundState, error) {
 	delimiter, ok := token.(json.Delim)
 	if !ok {
 		if value, isString := token.(string); isString {
-			decision := scanOutbound(value, depth+1)
+			decision := scanOutboundText(value, depth+1, adapter, true)
 			if decision.State == OutboundRedacted {
 				return OutboundRefused, nil
 			}
@@ -500,7 +541,7 @@ func inspectJSONValue(decoder *json.Decoder, depth int) (OutboundState, error) {
 			if outboundNameState(key) == OutboundRefused {
 				state = OutboundRefused
 			}
-			child, err := inspectJSONValue(decoder, depth)
+			child, err := inspectJSONValue(decoder, depth, adapter)
 			if err != nil {
 				return OutboundUnknown, err
 			}
@@ -514,7 +555,7 @@ func inspectJSONValue(decoder *json.Decoder, depth int) (OutboundState, error) {
 	case '[':
 		state := OutboundClean
 		for decoder.More() {
-			child, err := inspectJSONValue(decoder, depth)
+			child, err := inspectJSONValue(decoder, depth, adapter)
 			if err != nil {
 				return OutboundUnknown, err
 			}
@@ -595,11 +636,107 @@ func safePublicField(name string) bool {
 	return outboundNameState(name) == OutboundClean
 }
 
+// asciiFold returns the ASCII letter, digit or name punctuation that r is
+// equal to under Unicode simple case folding (K U+212A -> k, ſ U+017F -> s),
+// as the former (?i) assignment regex matched them.
+func asciiFold(r rune) (byte, bool) {
+	isASCIIName := func(c rune) bool {
+		return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == ' ' || c == '-'
+	}
+	for f := r; ; {
+		if f < utf8.RuneSelf && isASCIIName(f) {
+			return byte(f), true
+		}
+		if f = unicode.SimpleFold(f); f == r {
+			return 0, false
+		}
+	}
+}
+
+// assignmentNamePattern is the name part of the former assignment regex,
+// anchored at the end of the window that inspectSensitiveAssignments passes.
+var assignmentNamePattern = regexp.MustCompile(`(?i)\b([a-z][a-z0-9_. -]{0,63})["']?$`)
+
+// inspectSensitiveAssignments checks the name before every '=' or ':' that is
+// followed by a value character, so overlapping and nested pairs
+// ('title=cookie=…', 'title': 'cookie=…') are each seen with their complete
+// name. For each separator the name is chosen by the former (?i) assignment
+// regex on a window bounded by the preceding run of at most 64 folding name
+// runes, so names, word boundaries and Unicode folding match the old
+// behaviour exactly; the whole folded run is checked as well, which can only
+// add refusals. Names are folded to ASCII before classification.
+// Windows are bounded, so the scan stays linear.
 func inspectSensitiveAssignments(raw string) OutboundState {
-	for _, match := range outboundAssignmentPattern.FindAllStringSubmatch(raw, -1) {
-		if len(match) > 1 {
-			state := outboundNameState(match[1])
-			if state != OutboundClean {
+	const maxName = 64
+	isSpace := func(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' } // regexp \s
+	lastNonSpace := -1
+	var name strings.Builder
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c != '=' && c != ':' {
+			if !isSpace(c) {
+				lastNonSpace = i
+			}
+			continue
+		}
+		before := lastNonSpace
+		lastNonSpace = i
+		k := i + 1
+		for k < len(raw) && isSpace(raw[k]) {
+			k++
+		}
+		if k >= len(raw) || raw[k] == ',' || raw[k] == ';' {
+			continue
+		}
+		end := before + 1 // exclusive end of the name candidate
+		if end > 0 && (raw[end-1] == '"' || raw[end-1] == '\'') {
+			end--
+		}
+		// Walk back over the run of folding name runes (at most 64).
+		pos, runes := end, 0
+		for pos > 0 && runes < maxName {
+			r, size := utf8.DecodeLastRuneInString(raw[:pos])
+			if _, ok := asciiFold(r); !ok {
+				break
+			}
+			pos -= size
+			runes++
+		}
+		if runes == 0 {
+			continue
+		}
+		// Select the name with the former regex itself, anchored at the end of
+		// a bounded window: the folding-name run plus one raw character before
+		// it, so \b judges both raw neighbours exactly as before (K U+212A and
+		// ſ U+017F are non-word characters there).
+		windowStart := pos
+		if windowStart > 0 {
+			_, size := utf8.DecodeLastRuneInString(raw[:windowStart])
+			windowStart -= size
+		}
+		if match := assignmentNamePattern.FindStringSubmatch(raw[windowStart : before+1]); match != nil {
+			name.Reset()
+			for _, r := range match[1] {
+				b, _ := asciiFold(r)
+				name.WriteByte(b)
+			}
+			if state := outboundNameState(strings.TrimSpace(name.String())); state != OutboundClean {
+				return state
+			}
+		}
+		// Also check the whole folded run from its first letter, so a name the
+		// regex boundary splits (ſession_state -> ession_state) is still seen.
+		// This can only add refusals.
+		name.Reset()
+		for _, r := range raw[pos:end] {
+			b, _ := asciiFold(r)
+			if name.Len() == 0 && !(b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z') {
+				continue
+			}
+			name.WriteByte(b)
+		}
+		if name.Len() > 0 {
+			if state := outboundNameState(strings.TrimSpace(name.String())); state != OutboundClean {
 				return state
 			}
 		}
@@ -608,11 +745,10 @@ func inspectSensitiveAssignments(raw string) OutboundState {
 }
 
 func looksLikeOpaqueCredential(raw string) bool {
+	// No length cap and no substring exemption: a credential longer than 256
+	// characters, or one prefixed with "redacted_", is still a candidate. The
+	// canonical redaction "[redacted]" is too short to be one.
 	for _, candidate := range opaqueCredentialPattern.FindAllString(raw, -1) {
-		lower := strings.ToLower(candidate)
-		if strings.Contains(lower, "redacted") {
-			continue
-		}
 		hasLetter, hasDigit := false, false
 		for _, char := range candidate {
 			hasLetter = hasLetter || char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z'

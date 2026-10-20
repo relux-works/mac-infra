@@ -3,6 +3,7 @@ package browserfacade
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCentralOutboundBoundaryNormalizesCleanRedactedRefusedAndUnknown(t *testing.T) {
@@ -217,4 +218,201 @@ func codeOrInternal(code string) string {
 		return "INTERNAL_ERROR"
 	}
 	return code
+}
+
+// Bug (2026-10-21): in adapter metadata only, a nested string that starts with
+// '[' and fully matches the CSS selector grammar is scanned as text, so an
+// attribute selector no longer refuses the adapter. The general boundary keeps
+// the strict rule for every nested bracket string. Secret-bearing selectors are
+// refused; JSON-ish, single-quoted pairs (review F5) and brace values stay
+// UNKNOWN in both modes.
+func TestAdapterSelectorException(t *testing.T) {
+	for raw, want := range map[string][2]OutboundState{ // {general, adapter}
+		`{"s":"[data-widget=\"searchResults\"] > div"}`:     {OutboundUnknown, OutboundClean},
+		`{"s":"[data-widget=searchResults] > div"}`:         {OutboundUnknown, OutboundClean},
+		`{"s":"div.card > [data-testid='item'] a"}`:         {OutboundClean, OutboundClean},
+		`{"s":"[data-token=\"abcdefgh12345\"] > div"}`:      {OutboundUnknown, OutboundRefused},
+		`{"s":"[token=abcdefgh12345]"}`:                     {OutboundUnknown, OutboundRefused},
+		`{"s":"[x=\"a1b2c3d4e5f6g7h8a1b2c3d4e5f6g7h8\"]"}`:  {OutboundUnknown, OutboundUnknown},
+		`{"s":"['access_token','abcdefgh12345']"}`:          {OutboundUnknown, OutboundUnknown},
+		`{"s":"['cookie','sid=abcdefgh12345']"}`:            {OutboundUnknown, OutboundUnknown},
+		`{"s":"{'data':{'access_token':'abcdefgh12345'}}"}`: {OutboundUnknown, OutboundUnknown},
+		`{"s":"[1, 2"}`:                       {OutboundUnknown, OutboundUnknown},
+		`[data-widget="searchResults"] > div`: {OutboundUnknown, OutboundUnknown},
+	} {
+		general, _ := EnforceOutbound(raw)
+		adapter, _ := EnforceAdapterOutbound(raw)
+		if general.State != want[0] || adapter.State != want[1] {
+			t.Errorf("%s: general=%s adapter=%s, want %s/%s", raw, general.State, adapter.State, want[0], want[1])
+		}
+	}
+}
+
+// Review F1/F2 (PR #29): opaque-credential detection has no length cap and no
+// "redacted" substring exemption. Tokens of 32, 256, 257 and 300 characters
+// and redacted_-prefixed or -suffixed credentials are UNKNOWN in text and in
+// adapter selectors; "[redacted]" and short identifiers stay clean (controls).
+func TestOpaqueCredentialLengthAndRedactedPrefix(t *testing.T) {
+	token := func(n int) string {
+		const unit = "a1b2c3d4e5f6g7h8"
+		return strings.Repeat(unit, n/len(unit)+1)[:n]
+	}
+	t32 := token(32)
+	for _, raw := range []string{"value " + token(32), "value " + token(256), "value " + token(257), "value " + token(300), "value redacted_" + t32, "value " + t32 + "_redacted"} {
+		if d, _ := EnforceOutbound(raw); d.State != OutboundUnknown {
+			t.Errorf("text %.40q -> %s, want unknown", raw, d.State)
+		}
+	}
+	for _, sel := range []string{"[" + token(32) + "]", "[redacted_" + t32 + "]", "[x='" + t32 + "']"} {
+		if d, _ := EnforceAdapterOutbound(`{"s":"` + sel + `"}`); d.State != OutboundUnknown {
+			t.Errorf("adapter %.40q -> %s, want unknown", sel, d.State)
+		}
+	}
+	for _, raw := range []string{"note [redacted] kept", "item a1b2 lamp"} {
+		if d, err := EnforceOutbound(raw); err != nil || d.State != OutboundClean {
+			t.Errorf("control %q -> %s", raw, d.State)
+		}
+	}
+	if d, err := EnforceAdapterOutbound(`{"s":"[redacted]"}`); err != nil || d.State != OutboundClean {
+		t.Errorf("adapter control [redacted] -> %s", d.State)
+	}
+}
+
+// Review F3/F4 (PR #29): sensitive assignments are found with a quoted key
+// ('access_token':'…') and when nested inside the value of a harmless one
+// ('title': 'cookie=…'). WriteOutbound emits nothing for them; harmless
+// quoted keys stay clean (controls).
+func TestQuotedAndNestedSensitiveAssignments(t *testing.T) {
+	for _, raw := range []string{
+		`note 'access_token': 'abcdefgh12345'`,
+		`note "cookie"= abcdefgh12345`,
+		`note 'title': 'cookie=abcdefgh12345'`,
+		`note 'title': 'session_state=abcdefgh12345'`,
+		`note data: {access_token: abcdefgh12345}`,
+	} {
+		if d, err := EnforceOutbound(raw); err == nil || d.State == OutboundClean {
+			t.Errorf("%q admitted: %s", raw, d.State)
+		}
+		var out strings.Builder
+		if werr := WriteOutbound(&out, raw); werr == nil || out.Len() != 0 {
+			t.Errorf("%q written: %q (err=%v)", raw, out.String(), werr)
+		}
+	}
+	for _, raw := range []string{`note 'color': red`, `size = large lamp`, `note 'title': lamp`} {
+		if d, err := EnforceOutbound(raw); err != nil || d.State != OutboundClean {
+			t.Errorf("control %q -> %s (err=%v)", raw, d.State, err)
+		}
+	}
+}
+
+// Review F6 (PR #29): the assignment scan is linear. 1 MiB of dense
+// "a=a=…" assignments classifies within a generous bound (a quadratic scan
+// takes minutes); F4 nested pairs are still found in the same single pass.
+func TestDenseAssignmentsAreLinear(t *testing.T) {
+	raw := strings.Repeat("a=", 1<<19) + "z"
+	done := make(chan OutboundState, 1)
+	go func() { done <- inspectSensitiveAssignments(raw) }()
+	select {
+	case state := <-done:
+		if state != OutboundClean {
+			t.Fatalf("dense harmless assignments -> %s", state)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dense assignment scan exceeded 5s (not linear)")
+	}
+	for _, prefix := range []int{1 << 16, 1<<16 + 1} { // even and odd prefixes
+		if inspectSensitiveAssignments(strings.Repeat("a=", prefix)+"cookie=abcdefgh12345") != OutboundRefused {
+			t.Fatalf("sensitive assignment after a %d-pair dense prefix missed", prefix)
+		}
+	}
+}
+
+// Review F7 (PR #29): every separator's complete name is checked, so an
+// overlapping pair (title=cookie=…) is refused whatever precedes it (odd or
+// even dense prefixes), with zero WriteOutbound output; a name separated from
+// '=' by long whitespace is still found. Hyphenated harmless names
+// (data-state, data-key, x-state) are not cut into a sensitive suffix.
+func TestOverlappingAssignmentNames(t *testing.T) {
+	refused := []string{
+		"title=cookie=abcdefgh12345",
+		"title=session_state=abcdefgh12345",
+		"title=password=abcdefgh12345",
+		"a=cookie=abcdefgh12345",
+		"a=a=cookie=abcdefgh12345",
+		"a=a=a=cookie=abcdefgh12345",
+		"cookie" + strings.Repeat(" ", 100) + "= abcdefgh12345",
+	}
+	for _, raw := range refused {
+		if d, err := EnforceOutbound(raw); err == nil || d.State == OutboundClean {
+			t.Errorf("%.50q admitted: %s", raw, d.State)
+		}
+		var out strings.Builder
+		if werr := WriteOutbound(&out, raw); werr == nil || out.Len() != 0 {
+			t.Errorf("%.50q written: %q", raw, out.String())
+		}
+	}
+	for _, raw := range []string{"selector=data-state=active", "attribute=data-key=Escape", "filter=x-state=active", "color: red; size: large"} {
+		if d, err := EnforceOutbound(raw); err != nil || d.State != OutboundClean {
+			t.Errorf("control %q -> %s (err=%v)", raw, d.State, err)
+		}
+	}
+}
+
+// Review F8 (PR #29): names whose runes case-fold to ASCII (Kelvin sign
+// U+212A to k, long s U+017F to s) are folded before classification, as the
+// former (?i) regex matched them. They are refused in both boundary modes with
+// zero WriteOutbound output. Runs without a letter are not names, and
+// non-folding letters only end a name (controls stay clean).
+func TestCaseFoldedAssignmentNames(t *testing.T) {
+	kelvin, longS := "\u212a", "\u017f"
+	for _, raw := range []string{
+		"coo" + kelvin + "ie=abcdefgh12345",
+		"to" + kelvin + "en=abcdefgh12345",
+		"private_" + kelvin + "ey=abcdefgh12345",
+		longS + "ession_state=abcdefgh12345",
+		"'coo" + kelvin + "ie': 'abcdefgh12345'",
+		"\"to" + kelvin + "en\" = abcdefgh12345",
+	} {
+		if d, err := EnforceOutbound(raw); err == nil || d.State == OutboundClean {
+			t.Errorf("%q admitted: %s", raw, d.State)
+		}
+		if d, err := EnforceAdapterOutbound(raw); err == nil || d.State == OutboundClean {
+			t.Errorf("adapter mode %q admitted: %s", raw, d.State)
+		}
+		var out strings.Builder
+		if werr := WriteOutbound(&out, raw); werr == nil || out.Len() != 0 {
+			t.Errorf("%q written: %q", raw, out.String())
+		}
+	}
+	for _, raw := range []string{"--:--", "___:blue", "gr\u00f6\u00dfe=klein", "Kelvin=5" + kelvin} {
+		if d, err := EnforceOutbound(raw); err != nil || d.State != OutboundClean {
+			t.Errorf("control %q -> %s (err=%v)", raw, d.State, err)
+		}
+	}
+}
+
+// Review F9 (PR #29): word boundaries are judged on raw characters before
+// folding, as \b in the former regex did (K U+212A and ſ U+017F are non-word
+// characters). Kstate, ſkey and 0Key therefore expose their sensitive names
+// (state, key, Key) and are refused in both modes with zero output.
+func TestFoldedNamesKeepRawWordBoundaries(t *testing.T) {
+	kelvin, longS := "\u212a", "\u017f"
+	for _, raw := range []string{
+		kelvin + "state=abcdefgh12345",
+		longS + "key=abcdefgh12345",
+		"0" + kelvin + "ey=abcdefgh12345",
+		"'" + kelvin + "state': 'abcdefgh12345'",
+		"\"0" + kelvin + "ey\" = abcdefgh12345",
+	} {
+		if d, err := EnforceOutbound(raw); err == nil || d.State == OutboundClean {
+			t.Errorf("%q admitted: %s", raw, d.State)
+		}
+		if d, err := EnforceAdapterOutbound(raw); err == nil || d.State == OutboundClean {
+			t.Errorf("adapter mode %q admitted: %s", raw, d.State)
+		}
+		var out strings.Builder
+		if werr := WriteOutbound(&out, raw); werr == nil || out.Len() != 0 {
+			t.Errorf("%q written: %q", raw, out.String())
+		}
+	}
 }

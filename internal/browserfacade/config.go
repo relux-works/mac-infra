@@ -46,7 +46,7 @@ type Mutation struct {
 }
 
 func DecodeAdapter(data []byte) (Adapter, error) {
-	decision, boundaryErr := EnforceOutbound(string(data))
+	decision, boundaryErr := EnforceAdapterOutbound(string(data))
 	if boundaryErr != nil {
 		return Adapter{}, boundaryErr
 	}
@@ -103,7 +103,7 @@ func (a Adapter) Validate() error {
 	}
 	for name, mutation := range a.Mutations {
 		if !safeNamePattern.MatchString(name) {
-			return coded("ADAPTER_INVALID", "mutation name %q is invalid", name)
+			return coded("ADAPTER_INVALID", "mutation name %q is invalid; names must match %s (for example open-cart)", name, safeNamePattern)
 		}
 		if strings.TrimSpace(mutation.Description) == "" || len(mutation.Description) > 240 {
 			return coded("ADAPTER_INVALID", "mutation %q description must contain 1..240 characters", name)

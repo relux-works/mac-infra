@@ -130,7 +130,8 @@ successful `list` call.
 
 ## Guarded Mutations (`m`)
 
-Mutation names and selectors must be declared in the adapter. Preview first:
+Mutation names and selectors must be declared in the adapter. Adapter and mutation names are lowercase kebab-case
+(`^[a-z][a-z0-9-]{0,47}$`, for example `open-cart`). Preview first:
 
 ```bash
 mac-browser-site m --adapter .temp/browser/marketplace.json --format compact \
