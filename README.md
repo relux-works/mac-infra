@@ -28,19 +28,33 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
 | Apple clang / cgo | Build the native macOS extended ACL checks used by the privileged installer and daemon | `CGO_ENABLED=1 go build -o .temp/mac-infra-core ./cmd/mac-infra-core` (requires Xcode or Command Line Tools) | `.temp/mac-infra-core`; `scripts/setup.sh` builds its normal `bin/mac-infra-core` artifact with the configured Go cgo setting |
 | `scripts/setup.sh` | Refuses worktree, dirty or unprovable builds unless `--allow-unprovable` is set for a developer checkout. Build the CLIs (and, with `--rebuild-keyvault`, the Swift Secure Enclave helper `bin/mac-keyvault-enclave` via `swiftc`) and install global skill symlinks. An existing `bin/mac-keyvault` is kept, because keyvault keys trust exactly that binary; `--rebuild-keyvault` (planned owner sitting only) rebuilds it and refuses while lsof shows a process using it, while any `mac-keyvault` process runs, while a `works.relux.mac-keyvault.*` LaunchAgent is loaded, or when those tools cannot answer (`scripts/keyvault-build-guard.sh`); an existing `~/.local/bin/mac-keyvault` link to another checkout is kept | `./scripts/setup.sh [--rebuild-keyvault] [--allow-unprovable]` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-firewall`, `bin/mac-keyvault`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
-| `scripts/provenance-guard.sh` | Offline source and Go buildinfo admission (refusal exit 3) | `./scripts/provenance-guard.sh preflight ROOT`, `./scripts/provenance-guard.sh verify ROOT BIN...` | diagnostics on stderr; no files written |
+| `scripts/provenance-guard.sh` | Offline source and structured Go buildinfo admission, then staged publication (refusal exit 3) | `./scripts/provenance-guard.sh preflight ROOT`, `./scripts/provenance-guard.sh verify ROOT BIN...`, `./scripts/provenance-guard.sh publish ROOT STAGE_DIR DEST_DIR [--allow-unprovable] NAME...` | diagnostics on stderr; publish atomically moves verified files into DEST_DIR |
+| `python3` | Parse one structured Go buildinfo object and check publication filesystem identity | invoked by `scripts/provenance-guard.sh` with `python3 -I -c` | diagnostics on stderr; no files written |
 | `scripts/deinit.sh` | Remove user-level installation without stranding managed jobs | `./scripts/deinit.sh` | stops all `works.relux.mac-infra-browser-heartbeat.*` LaunchAgents and removes the stable launcher plus legacy pinned copies before removing binary symlinks and the runtime skill copy |
-| `/usr/bin/codesign` | Give the shared heartbeat launcher a complete stable designated identity so macOS Automation consent can retain it across rebuilds | invoked by `scripts/setup.sh`; verify with `codesign --verify --strict "$HOME/Library/Application Support/mac-infra/browser-session/bin/mac-browser-heartbeat-launcher"` | signs `bin/mac-chrome-session`; setup atomically installs those signed bytes at the single managed launcher path |
+| `/usr/bin/codesign` | Give the shared heartbeat launcher a complete stable designated identity so macOS Automation consent can retain it across rebuilds | invoked by `scripts/setup.sh`; verify with `codesign --verify --strict "$HOME/Library/Application Support/mac-infra/browser-session/bin/mac-browser-heartbeat-launcher"` | signs the staged `mac-chrome-session`; setup atomically installs those signed bytes at the single managed launcher path |
 
 ## Setup
 
 Run `./scripts/setup.sh` from a clean standalone clone. Setup refuses worktree,
-dirty or unprovable Go builds before installing them; `--allow-unprovable` skips
-both provenance checks with warnings for a developer's own checkout.
+dirty or unprovable Go builds. It builds and signs in a fresh `bin/.staging.*`
+directory and verifies every Go output before anything in `bin/` is replaced,
+including targets already exposed through installed symlinks. Only after all
+outputs pass does it atomically move each file into `bin/`, install the heartbeat
+launcher and link the tools. Staging is removed on exit. Source preflight runs
+at the start, after tests, and after builds. Git repository/index overrides are
+refused. `--allow-unprovable` skips provenance preflights and buildinfo verification
+with warnings for a developer's own checkout; publication still uses staging.
+
 For a release or owner-facing binary, use a standalone clone at the landed sha:
 `git clone <origin> DIR && git -C DIR checkout --detach <sha>`, then run setup
-there and check `go version -m BIN | grep vcs` for that full revision and
-`vcs.modified=false`. A kept `mac-keyvault` is not rebuilt or reverified.
+there and check `go version -m -json BIN` for that full revision and
+`vcs.modified=false`. Clean buildinfo attests the source tree revision only,
+not dependency provenance or an ambient `go.work`; setup tests and builds use
+`GOWORK=off`. Inspection requires Python 3 (`python3 -I`) and the installed Go
+toolchain (`GOTOOLCHAIN=local`); it does not download a toolchain. A kept
+`mac-keyvault` is never staged, reverified or moved. A rebuilt one follows the
+same staged publication as the other Go binaries. The Swift enclave helper
+has no Go buildinfo and is installed after Go publication.
 
 ## Network-Denied JVM Tests
 

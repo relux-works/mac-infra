@@ -140,18 +140,18 @@ func TestSetupBuildsAndInstallsChromeSessionCLI(t *testing.T) {
 	}
 	source := string(data)
 	for _, want := range []string{
-		`-o "$BUILD_DIR/mac-safari-session" ./cmd/mac-safari-session`,
+		`-o "$STAGE_DIR/mac-safari-session" ./cmd/mac-safari-session`,
 		`SAFARI_DESIGNATED_REQUIREMENT='designated => identifier "works.relux.mac-infra.safari-session"'`,
-		`/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.safari-session --requirements "=$SAFARI_DESIGNATED_REQUIREMENT" "$BUILD_DIR/mac-safari-session"`,
-		`/usr/bin/codesign --verify --strict "$BUILD_DIR/mac-safari-session"`,
-		`/usr/bin/codesign -d -r- "$BUILD_DIR/mac-safari-session"`,
+		`/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.safari-session --requirements "=$SAFARI_DESIGNATED_REQUIREMENT" "$STAGE_DIR/mac-safari-session"`,
+		`/usr/bin/codesign --verify --strict "$STAGE_DIR/mac-safari-session"`,
+		`/usr/bin/codesign -d -r- "$STAGE_DIR/mac-safari-session"`,
 		`if [[ "$SAFARI_OBSERVED_REQUIREMENT" != *"$SAFARI_DESIGNATED_REQUIREMENT"* ]]`,
 		`ln -sf "$BUILD_DIR/mac-safari-session" "$BIN_DIR/mac-safari-session"`,
-		`-o "$BUILD_DIR/mac-chrome-session" ./cmd/mac-chrome-session`,
+		`-o "$STAGE_DIR/mac-chrome-session" ./cmd/mac-chrome-session`,
 		`CHROME_DESIGNATED_REQUIREMENT='designated => identifier "works.relux.mac-infra.browser-session"'`,
-		`/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.browser-session --requirements "=$CHROME_DESIGNATED_REQUIREMENT" "$BUILD_DIR/mac-chrome-session"`,
-		`/usr/bin/codesign --verify --strict "$BUILD_DIR/mac-chrome-session"`,
-		`/usr/bin/codesign -d -r- "$BUILD_DIR/mac-chrome-session"`,
+		`/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.browser-session --requirements "=$CHROME_DESIGNATED_REQUIREMENT" "$STAGE_DIR/mac-chrome-session"`,
+		`/usr/bin/codesign --verify --strict "$STAGE_DIR/mac-chrome-session"`,
+		`/usr/bin/codesign -d -r- "$STAGE_DIR/mac-chrome-session"`,
 		`if [[ "$CHROME_OBSERVED_REQUIREMENT" != *"$CHROME_DESIGNATED_REQUIREMENT"* ]]`,
 		`HEARTBEAT_LAUNCHER="$HEARTBEAT_LAUNCHER_DIR/mac-browser-heartbeat-launcher"`,
 		`HEARTBEAT_LAUNCHER_TMP="$(mktemp "$HEARTBEAT_LAUNCHER_DIR/.mac-browser-heartbeat-launcher.XXXXXX")"`,
@@ -161,7 +161,7 @@ func TestSetupBuildsAndInstallsChromeSessionCLI(t *testing.T) {
 		`if [[ "$HEARTBEAT_OBSERVED_REQUIREMENT" != *"$CHROME_DESIGNATED_REQUIREMENT"* ]]`,
 		`ln -sf "$BUILD_DIR/mac-chrome-session" "$BIN_DIR/mac-chrome-session"`,
 		`$BIN_DIR/mac-chrome-session -> $BUILD_DIR/mac-chrome-session`,
-		`-o "$BUILD_DIR/mac-browser-site" ./cmd/mac-browser-site`,
+		`-o "$STAGE_DIR/mac-browser-site" ./cmd/mac-browser-site`,
 		`ln -sf "$BUILD_DIR/mac-browser-site" "$BIN_DIR/mac-browser-site"`,
 		`$BIN_DIR/mac-browser-site -> $BUILD_DIR/mac-browser-site`,
 	} {
@@ -179,7 +179,7 @@ func TestSetupInstallsAndDeinitRemovesNetnone(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-netnone" ./cmd/mac-netnone`,
+		`go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-netnone" ./cmd/mac-netnone`,
 		`ln -sf "$BUILD_DIR/mac-netnone" "$BIN_DIR/mac-netnone"`,
 		`echo "  $BIN_DIR/mac-netnone -> $BUILD_DIR/mac-netnone"`,
 	} {

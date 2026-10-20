@@ -107,95 +107,115 @@ LDFLAGS="-X main.Version=$BUILD_VERSION -X main.Commit=$BUILD_COMMIT -X main.Bui
 
 echo "=== mac-infra setup ==="
 echo "Testing Go packages..."
+# Release builds must not select dependencies through an ambient go.work.
+export GOWORK=off
 go -C "$PROJECT_ROOT" test ./...
+if [[ "$ALLOW_UNPROVABLE" != 1 ]]; then
+  "$SCRIPT_DIR/provenance-guard.sh" preflight "$PROJECT_ROOT"
+fi
 
 mkdir -p "$BUILD_DIR" "$BIN_DIR"
+STAGE_DIR="$(mktemp -d "$BUILD_DIR/.staging.XXXXXX")"
+trap 'rm -rf "$STAGE_DIR"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 echo "Building mac-audio-reset..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-audio-reset" ./cmd/mac-audio-reset
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-audio-reset" ./cmd/mac-audio-reset
 echo "Building mac-audio-sweep..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-audio-sweep" ./cmd/mac-audio-sweep
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-audio-sweep" ./cmd/mac-audio-sweep
 echo "Building mac-load-profile..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-load-profile" ./cmd/mac-load-profile
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-load-profile" ./cmd/mac-load-profile
 echo "Building mac-video-profile..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-video-profile" ./cmd/mac-video-profile
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-video-profile" ./cmd/mac-video-profile
 echo "Building mac-disk-profile..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-disk-profile" ./cmd/mac-disk-profile
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-disk-profile" ./cmd/mac-disk-profile
 echo "Building mac-cleanup..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-cleanup" ./cmd/mac-cleanup
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-cleanup" ./cmd/mac-cleanup
 echo "Building mac-safari-session..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-safari-session" ./cmd/mac-safari-session
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-safari-session" ./cmd/mac-safari-session
 echo "Signing mac-safari-session for an actionable Automation identity..."
 SAFARI_DESIGNATED_REQUIREMENT='designated => identifier "works.relux.mac-infra.safari-session"'
-/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.safari-session --requirements "=$SAFARI_DESIGNATED_REQUIREMENT" "$BUILD_DIR/mac-safari-session"
-/usr/bin/codesign --verify --strict "$BUILD_DIR/mac-safari-session"
-SAFARI_OBSERVED_REQUIREMENT=$(/usr/bin/codesign -d -r- "$BUILD_DIR/mac-safari-session" 2>&1)
+/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.safari-session --requirements "=$SAFARI_DESIGNATED_REQUIREMENT" "$STAGE_DIR/mac-safari-session"
+/usr/bin/codesign --verify --strict "$STAGE_DIR/mac-safari-session"
+SAFARI_OBSERVED_REQUIREMENT=$(/usr/bin/codesign -d -r- "$STAGE_DIR/mac-safari-session" 2>&1)
 if [[ "$SAFARI_OBSERVED_REQUIREMENT" != *"$SAFARI_DESIGNATED_REQUIREMENT"* ]]; then
   echo "mac-safari-session signing did not produce the stable designated requirement" >&2
   exit 1
 fi
 echo "Building mac-chrome-session..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-chrome-session" ./cmd/mac-chrome-session
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-chrome-session" ./cmd/mac-chrome-session
 echo "Signing mac-chrome-session for an actionable Automation identity..."
 CHROME_DESIGNATED_REQUIREMENT='designated => identifier "works.relux.mac-infra.browser-session"'
-/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.browser-session --requirements "=$CHROME_DESIGNATED_REQUIREMENT" "$BUILD_DIR/mac-chrome-session"
-/usr/bin/codesign --verify --strict "$BUILD_DIR/mac-chrome-session"
-CHROME_OBSERVED_REQUIREMENT=$(/usr/bin/codesign -d -r- "$BUILD_DIR/mac-chrome-session" 2>&1)
+/usr/bin/codesign --force --sign - --identifier works.relux.mac-infra.browser-session --requirements "=$CHROME_DESIGNATED_REQUIREMENT" "$STAGE_DIR/mac-chrome-session"
+/usr/bin/codesign --verify --strict "$STAGE_DIR/mac-chrome-session"
+CHROME_OBSERVED_REQUIREMENT=$(/usr/bin/codesign -d -r- "$STAGE_DIR/mac-chrome-session" 2>&1)
 if [[ "$CHROME_OBSERVED_REQUIREMENT" != *"$CHROME_DESIGNATED_REQUIREMENT"* ]]; then
   echo "mac-chrome-session signing did not produce the stable designated requirement" >&2
   exit 1
 fi
 echo "Building mac-browser-site..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-browser-site" ./cmd/mac-browser-site
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-browser-site" ./cmd/mac-browser-site
 echo "Building mac-document-sanitize..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-document-sanitize" ./cmd/mac-document-sanitize
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-document-sanitize" ./cmd/mac-document-sanitize
 echo "Building mac-infra-core..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-infra-core" ./cmd/mac-infra-core
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-infra-core" ./cmd/mac-infra-core
 echo "Building mac-security..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-security" ./cmd/mac-security
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-security" ./cmd/mac-security
 echo "Building mac-netnone..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-netnone" ./cmd/mac-netnone
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-netnone" ./cmd/mac-netnone
 echo "Building mac-firewall..."
-go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-firewall" ./cmd/mac-firewall
+go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-firewall" ./cmd/mac-firewall
 if [[ "$KEYVAULT_DECISION" == build ]]; then
   KEYVAULT_DECISION="$("$SCRIPT_DIR/keyvault-build-guard.sh" "$BUILD_DIR/mac-keyvault" "$REBUILD_KEYVAULT")"
 fi
 if [[ "$KEYVAULT_DECISION" == build ]]; then
   echo "Building mac-keyvault..."
-  go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$BUILD_DIR/mac-keyvault" ./cmd/mac-keyvault
+  go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-keyvault" ./cmd/mac-keyvault
   # The Secure Enclave helper sits next to mac-keyvault, which runs it by that
   # path only. Its blobs are bound to this Mac, not to the helper binary, so
   # rebuilding it never strands a key.
   if command -v swiftc >/dev/null 2>&1; then
     echo "Building mac-keyvault-enclave..."
-    swiftc -O -o "$BUILD_DIR/mac-keyvault-enclave" "$PROJECT_ROOT/cmd/mac-keyvault-enclave/main.swift"
+    swiftc -O -o "$STAGE_DIR/mac-keyvault-enclave" "$PROJECT_ROOT/cmd/mac-keyvault-enclave/main.swift"
   else
     echo "swiftc not found: mac-keyvault-enclave not built; --enclave keys are refused as unsupported_primitive" >&2
   fi
 else
   echo "Keeping the existing bin/mac-keyvault (keyvault keys trust exactly this binary; see --rebuild-keyvault)"
 fi
-
-if [[ "$ALLOW_UNPROVABLE" != 1 ]]; then
-  BUILT_BINARIES=(
-    "$BUILD_DIR/mac-audio-reset"
-    "$BUILD_DIR/mac-audio-sweep"
-    "$BUILD_DIR/mac-load-profile"
-    "$BUILD_DIR/mac-video-profile"
-    "$BUILD_DIR/mac-disk-profile"
-    "$BUILD_DIR/mac-cleanup"
-    "$BUILD_DIR/mac-safari-session"
-    "$BUILD_DIR/mac-chrome-session"
-    "$BUILD_DIR/mac-browser-site"
-    "$BUILD_DIR/mac-document-sanitize"
-    "$BUILD_DIR/mac-infra-core"
-    "$BUILD_DIR/mac-security"
-    "$BUILD_DIR/mac-netnone"
-    "$BUILD_DIR/mac-firewall"
-  )
-  if [[ "$KEYVAULT_DECISION" == build ]]; then
-    BUILT_BINARIES+=("$BUILD_DIR/mac-keyvault")
+BUILT_BINARIES=(
+  "mac-audio-reset"
+  "mac-audio-sweep"
+  "mac-load-profile"
+  "mac-video-profile"
+  "mac-disk-profile"
+  "mac-cleanup"
+  "mac-safari-session"
+  "mac-chrome-session"
+  "mac-browser-site"
+  "mac-document-sanitize"
+  "mac-infra-core"
+  "mac-security"
+  "mac-netnone"
+  "mac-firewall"
+)
+if [[ "$KEYVAULT_DECISION" == build ]]; then
+  BUILT_BINARIES+=("mac-keyvault")
+fi
+if [[ "$ALLOW_UNPROVABLE" == 1 ]]; then
+  "$SCRIPT_DIR/provenance-guard.sh" publish "$PROJECT_ROOT" "$STAGE_DIR" "$BUILD_DIR" --allow-unprovable "${BUILT_BINARIES[@]}"
+else
+  "$SCRIPT_DIR/provenance-guard.sh" preflight "$PROJECT_ROOT"
+  "$SCRIPT_DIR/provenance-guard.sh" publish "$PROJECT_ROOT" "$STAGE_DIR" "$BUILD_DIR" "${BUILT_BINARIES[@]}"
+fi
+# The Swift helper has no Go buildinfo; install it only after Go publication.
+if [[ -f "$STAGE_DIR/mac-keyvault-enclave" ]]; then
+  if [[ -d "$BUILD_DIR/mac-keyvault-enclave" ]]; then
+    echo "mac-keyvault-enclave destination is a directory" >&2
+    exit 3
   fi
-  "$SCRIPT_DIR/provenance-guard.sh" verify "$PROJECT_ROOT" "${BUILT_BINARIES[@]}"
+  mv -f "$STAGE_DIR/mac-keyvault-enclave" "$BUILD_DIR/mac-keyvault-enclave"
 fi
 
 echo "Installing stable Chrome/Safari heartbeat launcher identity..."
