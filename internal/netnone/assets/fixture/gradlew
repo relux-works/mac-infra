@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+: "${GRADLE_USER_HOME:?GRADLE_USER_HOME must be set}"
+dist="$GRADLE_USER_HOME/netnone-dist"
+gradle="$dist/gradle-8.10.2/bin/gradle"
+if [ ! -f "$gradle" ]; then
+    case " $* " in *' --offline '*) echo 'Gradle distribution not warmed; run prep first' >&2; exit 1;; esac
+    mkdir -p "$dist"
+    java /work/Download.java /work/gradle/wrapper/gradle-wrapper.properties "$dist/gradle.zip"
+    # Download.java verifies the digest before anything is extracted.
+    (cd "$dist" && jar xf gradle.zip)
+    rm "$dist/gradle.zip"
+fi
+# jar extraction need not restore Unix executable permission bits.
+exec sh "$gradle" "$@"

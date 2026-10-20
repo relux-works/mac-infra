@@ -19,6 +19,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-infra-core` | Privileged LaunchDaemon helper plus user-scoped controls for allowlisted macOS maintenance actions | `mac-infra-core install-digest`, `mac-infra-core install [--expect-sha256 HEX] [--owner-key FILE --expect-owner-key-sha256 HEX]`, `mac-infra-core request-permissions sudo`, `mac-infra-core status`, `mac-infra-core sleep-prevention enable\|disable\|status`, `mac-infra-core display-sleep-prevention enable\|disable\|status`, `mac-infra-core idle-lock-prevention enable\|disable\|status`, `mac-infra-core anyconnect-cleanup`, `mac-infra-core fseventsd-restart [--force]`, `mac-infra-core fseventsd-watchdog enable\|disable\|status`, `mac-infra-core uninstall` | root-owned executable and socket under `/Library/PrivilegedHelperTools/works.relux.mac-infra/`, plist under `/Library/LaunchDaemons/`; display and fseventsd-watchdog LaunchAgents under `~/Library/LaunchAgents/`; idle-lock restore snapshot and fseventsd-watchdog state under `~/Library/Application Support/mac-infra/` |
 | `mac-firewall` | Declarative macOS application firewall management through the `mac-infra-core` root helper: keep it on, manage app exceptions, disable allowlisted listening services; no sudo per change | `mac-firewall status`, `mac-firewall init-config`, `mac-firewall plan`, `mac-firewall apply --apply` | config `~/.config/mac-infra/firewall.json` (`0600`); root-owned audit `/Library/PrivilegedHelperTools/works.relux.mac-infra/firewall/audit.jsonl`; see [the firewall reference](agents/skills/mac-infra/references/firewall.md) |
 | `mac-firewall watch` | Foreground shadow observer: ALF decisions, sampled outbound flows, deterministic rules and child-authenticated UNIX-socket embedding kNN; proposals only | `mac-firewall watch run --config PATH`, `watch digest --config PATH --since 24h [--json]`, `watch status --config PATH [--json]`, `watch classify --config PATH --fixtures FILE [--json]` | explicit private state dir: `state.json`, daily sanitized `events-YYYY-MM-DD.jsonl`, `new-events.flag`, `llm.sock`; synthetic self-labelled fixture tests and opt-in model test in [the watch reference](agents/skills/mac-infra/references/firewall.md#watch-shadow-mode) |
+| `mac-netnone` | Run JVM/Gradle tests with outbound networking denied in a dedicated Colima profile | `mac-netnone prep --repo DIR --task test`, `mac-netnone run --repo DIR --task test --out DIR`, `mac-netnone selftest`, `mac-netnone status`, `mac-netnone stop` | `--out/<UTC timestamp>/` test results/reports; private prep records and fixture evidence under `~/Library/Application Support/mac-infra/netnone/` |
 | `mac-security` | Bounded read-only macOS security evidence, persistence fingerprints and coverage-aware drift | `mac-security scan --json`, `mac-security baseline --file NEW_PATH --json`, `mac-security diff --file BASELINE --json` | JSON stdout + summary stderr; explicit baseline creates a new `0600` file; use `.temp/security/` |
 | `mac-keyvault` | Create, list, describe, export, sign with, verify against, rotate, annotate, and delete non-extractable P-256 key pairs in the login keychain; every item is a schema-2 record addressed as `<service>/<purpose>` (+ `--kind`, `--version`) under the derived label `works.relux.mac-keyvault.<kind>.<service>.<purpose>.v<N>`; `--enclave` keeps a device-bound Secure Enclave key (CryptoKit blob via the Swift helper `mac-keyvault-enclave`, no entitlement), and `--enclave --user-presence` needs Touch ID or the login password for every signature | `mac-keyvault [--json] init --service S --purpose P [--title T] [--usages sign,verify] [--extraction none\|human\|agent] [--meta k=v]`, `list [--service S] [--kind K]`, `describe S/P [--version N]`, `pub S/P [--out FILE] [--format spki-der\|spki-pem\|jwk]`, `sign S/P --digest HEX\|@FILE \| --data-file F \| --stdin [--raw] [--out FILE]`, `verify S/P \| --spki FILE --digest ... --sig HEX\|@FILE [--raw] [--allow-high-s]`, `rotate S/P`, `meta get\|set\|unset S/P ...`, `delete S/P --confirm [--version N]`, `signer serve --address S/P [--kind K] [--version N]` (JSON lines on stdin/stdout, contract 1, for kvctl; Go client `internal/keyvault/signerclient`) | keychain items only; `signer serve` writes one hello line then one response line per request and exits 0 on EOF; `pub --out` writes a `0600` file; `~/Library/Application Support/mac-infra/keyvault/init.lock` serialises creates |
 | `mac-keyvault ssh-agent` | Serve explicitly pinned P-256 vault keys through the OpenSSH agent protocol, optionally with per-signature or unlock confirmation, an expiring unlock, git-namespace-only signing and a per-request audit log | `mac-keyvault ssh-agent --socket /absolute/private/agent.sock --key new-service/auth@1 --key new-service/signing@1 [--confirm-exec ~/.local/bin/mac-keyvault --confirm-arg confirm-dialog] [--confirm-when sign\|unlock\|both] [--unlock-for 8h] [--sign-namespace git] [--audit-log /absolute/audit.jsonl]`; public output: `mac-keyvault pub new-service/auth --version 1 --format ssh` | `0600` socket in an owned `0700` directory; [new-key onboarding and manual LaunchAgent guide](agents/skills/mac-infra/references/keyvault-ssh-new-keys.md); existing SSH keys stay unchanged; only new keys use keyvault |
@@ -29,6 +30,103 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `scripts/setup.sh` | Build the CLIs (and, with `--rebuild-keyvault`, the Swift Secure Enclave helper `bin/mac-keyvault-enclave` via `swiftc`) and install global skill symlinks. An existing `bin/mac-keyvault` is kept, because keyvault keys trust exactly that binary; `--rebuild-keyvault` (planned owner sitting only) rebuilds it and refuses while lsof shows a process using it, while any `mac-keyvault` process runs, while a `works.relux.mac-keyvault.*` LaunchAgent is loaded, or when those tools cannot answer (`scripts/keyvault-build-guard.sh`); an existing `~/.local/bin/mac-keyvault` link to another checkout is kept | `./scripts/setup.sh [--rebuild-keyvault]` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-firewall`, `bin/mac-keyvault`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
 | `scripts/deinit.sh` | Remove user-level installation without stranding managed jobs | `./scripts/deinit.sh` | stops all `works.relux.mac-infra-browser-heartbeat.*` LaunchAgents and removes the stable launcher plus legacy pinned copies before removing binary symlinks and the runtime skill copy |
 | `/usr/bin/codesign` | Give the shared heartbeat launcher a complete stable designated identity so macOS Automation consent can retain it across rebuilds | invoked by `scripts/setup.sh`; verify with `codesign --verify --strict "$HOME/Library/Application Support/mac-infra/browser-session/bin/mac-browser-heartbeat-launcher"` | signs `bin/mac-chrome-session`; setup atomically installs those signed bytes at the single managed launcher path |
+
+## Network-Denied JVM Tests
+
+`mac-netnone` is installed by `./scripts/setup.sh`. Colima and Docker CLIs
+must be installed separately.
+Source and output paths must be absolute existing directories, without `:` or
+`,`; symlinks are resolved. Source files must be readable by container UID 10001.
+
+```bash
+mac-netnone prep --repo /absolute/repo --task test
+mac-netnone run --repo /absolute/repo --task test --out /absolute/results
+mac-netnone selftest
+mac-netnone status
+mac-netnone stop
+```
+
+Prep builds the digest-pinned Java 17 image and warms the dedicated Gradle cache
+with `--refresh-dependencies TASK --dry-run`, then the task itself on the default
+container bridge network. A warm test failure is reported without failing prep;
+bootstrap or dependency warm-up failures still fail. Run requires a prep record
+matching the canonical repo and current toolchain Dockerfile hash. It executes
+the recorded immutable image with `--network none` and `./gradlew --offline TASK`.
+Gradle daemon IPC on loopback stays available inside the container.
+
+Each invocation uses the `netnone` Colima profile (VZ, Docker runtime, 4 CPUs,
+8 GiB memory, 40 GiB disk; override with `--cpus`, `--memory`, `--disk`). It mounts
+only the source read-only and the output writable, disables profile activation,
+SSH config generation and port forwarding, and refuses an already running profile.
+An invocation that starts the VM stops it even on errors or cancellation. An
+explicit `stop` also stops an already running profile. Stop failure is a failure.
+
+The test container drops all capabilities, uses `no-new-privileges`, UID/GID
+10001, a read-only root filesystem and bounded tmpfs mounts. Both prep and run
+use a HOME tmpfs owned by 10001:10001 with mode 0700 and a 64 MiB limit.
+`netnone-gradle-home` mounts at `/gradle`, also set as `GRADLE_USER_HOME`.
+The test container has no network interface except loopback, no Docker socket
+and no database sidecar. It copies
+the repo into a fresh work volume. It excludes `.gradle` directories at every
+depth and `build` directories only when their parent contains `build.gradle`,
+`build.gradle.kts`, `settings.gradle` or `settings.gradle.kts`. Source packages,
+resources and files named `build` are preserved. It always attempts to copy all `build/test-results` and
+`build/reports` trees to `--out/<UTC timestamp>/`, retaining relative paths.
+The new timestamp directory is writable by the container UID; permissions of the
+existing output root are preserved. Keep the output root private if reports are
+sensitive. Nonzero test exits produce CLI exit 1; usage errors are 2 and refusals
+are 3.
+
+For additional build tools, pass `--toolchain-dockerfile /absolute/Dockerfile`
+to both prep and run. Its first FROM, after ordinary comments/blank lines/ARGs,
+must use this exact base:
+
+```dockerfile
+FROM eclipse-temurin:17-jdk@sha256:fe947d993c32dd9cf651a4353a6ed723c2370b3a9d034ea4cab4775404ea531a
+```
+
+Every FROM must use that exact base or reference an earlier stage declared as
+`FROM <pinned-base> AS <name>`. Only pinned-base declarations may use AS;
+flags such as `--platform`, numeric/forward/unknown stage references, and parser
+directives (`# syntax=`, `# check=`, `# escape=`, ignoring case and optional
+spaces) before the first instruction are refused. Backslash line continuations
+are supported. `COPY --from=<external image>` and `RUN --mount=from=<image>`
+can pull content that this tool does not pin. Pinning those images, like
+`sdkmanager` packages and other toolchain downloads, is the caller's responsibility.
+
+The file must create or keep user `netnone` with UID/GID 10001 and keep
+`/work` and `/gradle` owned by 10001:10001. Docker copies the image mountpoint
+ownership into empty named volumes; no root chown container is run. The embedded
+base is always built first as `netnone-base:local`; the caller Dockerfile is then
+built unchanged from its own directory with no injected build arguments. Its
+FROM instructions retain the checked pinned bases or stage references. Prep
+uses UID/GID 10001 with all capabilities dropped and `no-new-privileges`, on the
+default network. It needs network access for builds and
+dependency downloads. A changed Dockerfile or missing image requires prep again.
+
+For Robolectric, fetch the required `android-all` artifacts during prep. Configure
+the Gradle test JVM with `-Drobolectric.offline=true` and
+`-Drobolectric.dependency.dir=...`, pointing inside the Gradle cache or the copied
+repo. In-process databases (SQLite/Room under Robolectric, H2) need no special
+setup and start empty in the fresh work volume. There is no `--db-image` option.
+
+Before any profile operation, prep/run/selftest refuse when the host's 5-minute
+load exceeds `--max-load` (default: host CPU count). Equality is allowed. A
+nonblocking flock prevents overlapping invocations. The private `0700` state
+root is `~/Library/Application Support/mac-infra/netnone/`, containing `run.lock`,
+`docker-config/` and atomically written `prep-records.json`. Docker and Colima use
+the dedicated socket and private Docker config; shared contexts/configs stay
+unchanged. `status` reads profile status, records, state path and lock ownership.
+
+Selftest retains its fixture/results under the state root. It checks networked
+DNS/TCP probes, denied probes, an offline test pass beside a network-exception
+test failure, and read-only before/after snapshots of shared Docker contexts,
+config hashes, socket identity and other Colima profiles. Its verdict table
+requires every row to pass. A concurrent status change to another Colima
+profile makes the snapshot row red; rerun selftest after that change settles.
+The fixture includes a JUnit test that must compile and use a source package
+named `build`, guarding source-copy exclusions. Unit checks use only a fake runner:
+`go test -race ./internal/netnone/ ./cmd/mac-netnone/`.
 
 ## Privacy-Safe Document Intake
 

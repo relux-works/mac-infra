@@ -175,6 +175,12 @@ triggers:
 Use this skill for macOS local maintenance workflows backed by the `mac-infra`
 Go tools.
 
+## Network-Denied JVM Tests
+
+Use `mac-netnone prep`, then `run`, for JVM/Gradle tests in a dedicated
+network-denied Colima profile. Read the [workflow reference](references/netnone.md)
+for toolchain pinning, offline caches, qualification, load limits and state paths.
+
 ## Security Evidence Workflow
 
 For read-only host security checks, private persistence baselines, and drift,
