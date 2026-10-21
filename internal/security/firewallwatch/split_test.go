@@ -3,6 +3,7 @@ package firewallwatch
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -293,7 +294,7 @@ func TestFeedLinesReportsEndBeforeConsumption(t *testing.T) {
 	queued, closedFirst := 0, false
 	done := make(chan error, 1)
 	go func() {
-		done <- feedLines(context.Background(), r, lines, func(at time.Time) {
+		done <- feedLines(context.Background(), r, lines, observerFuncs{end: func(at time.Time) {
 		drain:
 			for {
 				select {
@@ -308,7 +309,7 @@ func TestFeedLinesReportsEndBeforeConsumption(t *testing.T) {
 				}
 			}
 			ended.Store(at.UnixNano())
-		})
+		}})
 	}()
 	if _, e := w.Write([]byte("{\"a\":1}\n")); e != nil {
 		t.Fatal(e)
@@ -329,4 +330,200 @@ func TestFeedLinesReportsEndBeforeConsumption(t *testing.T) {
 	if _, ok := <-lines; ok {
 		t.Fatal("lines not closed after the end")
 	}
+}
+
+type observerFuncs struct{ stall, resume, end func(time.Time) }
+
+func (o observerFuncs) StallCoverage(at time.Time) {
+	if o.stall != nil {
+		o.stall(at)
+	}
+}
+func (o observerFuncs) ResumeCoverage(at time.Time) {
+	if o.resume != nil {
+		o.resume(at)
+	}
+}
+func (o observerFuncs) EndCoverage(at time.Time) {
+	if o.end != nil {
+		o.end(at)
+	}
+}
+
+// A stall (full line queue) is not coverage: a save during an open stall ends
+// the span at the stall's start, the resume opens a new span, and the stall
+// stays a gap after reload. Saves that see no stall extend the span (control).
+func TestCoverageStallIsGap(t *testing.T) {
+	c := testConfig(t)
+	t0 := time.Now().Truncate(time.Second).Add(-time.Hour)
+	at := func(m int) time.Time { return t0.Add(time.Duration(m) * time.Minute) }
+	s, e := OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	s.BeginCoverage(at(0))
+	if e = s.Save(at(1)); e != nil || !s.State.Coverage[0].End.Equal(at(1)) {
+		t.Fatalf("live save: %v %+v", e, s.State.Coverage)
+	}
+	s.StallCoverage(at(2))
+	s.StallCoverage(at(3))
+	if e = s.Save(at(5)); e != nil || !s.State.Coverage[0].End.Equal(at(2)) {
+		t.Fatalf("save during stall: %v %+v", e, s.State.Coverage)
+	}
+	s.ResumeCoverage(at(6))
+	if e = s.Save(at(7)); e != nil {
+		t.Fatal(e)
+	}
+	loaded, e := OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	got := loaded.State.Coverage
+	if len(got) != 2 || !got[0].End.Equal(at(2)) || !got[1].Start.Equal(at(6)) || !got[1].End.Equal(at(7)) {
+		t.Fatalf("coverage: %+v", got)
+	}
+	if w := loaded.Split(at(0), at(7)).Window; !w.Truncated || len(w.CoverageGaps) != 1 || !w.CoverageGaps[0].From.Equal(at(2)) || !w.CoverageGaps[0].To.Equal(at(6)) {
+		t.Fatalf("stall gap: %+v", w)
+	}
+}
+
+// Backpressure end to end: with more than 64 queued lines, consumption
+// blocked longer than the grace, and the collector gone, the feeder reports a
+// stall and only reaches EOF after the loop drains; delayed saves and reload
+// keep the blocked period as a gap. An unblocked live stream adds no gap, and
+// a live stream that stalls and catches up regains coverage.
+func TestFeedLinesBackpressureGap(t *testing.T) {
+	c := testConfig(t)
+	c.NettopInterval, c.SaveInterval = "1ms", "1ms"
+	s, e := OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	start := time.Now()
+	s.BeginCoverage(start)
+	stalled := make(chan time.Time, 1)
+	observer := observerFuncs{
+		stall: func(at time.Time) {
+			s.StallCoverage(at)
+			select {
+			case stalled <- at:
+			default:
+			}
+		},
+		resume: s.ResumeCoverage,
+		end:    s.EndCoverage,
+	}
+	r, w := io.Pipe()
+	lines := make(chan []byte, 64)
+	done := make(chan error, 1)
+	go func() { done <- feedLines(context.Background(), r, lines, observer) }()
+	go func() {
+		for i := 0; i < 100; i++ {
+			fmt.Fprintf(w, "{\"n\":%d}\n", i)
+		}
+		w.Close()
+	}()
+	var stallAt time.Time
+	select {
+	case stallAt = <-stalled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no stall reported while the queue is full")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if e = s.Save(time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	for range lines {
+	}
+	if e = <-done; e != nil {
+		t.Fatal(e)
+	}
+	asOf := time.Now()
+	if e = s.Save(asOf); e != nil {
+		t.Fatal(e)
+	}
+	loaded, e := OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	w2 := loaded.Split(start, asOf).Window
+	covered := false
+	for _, g := range w2.CoverageGaps {
+		if !g.From.After(stallAt) && g.To.Sub(stallAt) >= 20*time.Millisecond {
+			covered = true
+		}
+	}
+	if !w2.Truncated || !covered {
+		t.Fatalf("blocked period not a gap: stall=%v %+v coverage=%+v", stallAt, w2, loaded.State.Coverage)
+	}
+
+	live, e := OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	live.State.Coverage = nil
+	liveStart := time.Now()
+	live.BeginCoverage(liveStart)
+	lr, lw := io.Pipe()
+	liveLines := make(chan []byte, 64)
+	liveDone := make(chan error, 1)
+	go func() { liveDone <- feedLines(context.Background(), lr, liveLines, live) }()
+	for i := 0; i < 100; i++ {
+		if _, e = fmt.Fprintf(lw, "{\"n\":%d}\n", i); e != nil {
+			t.Fatal(e)
+		}
+		<-liveLines
+	}
+	liveAsOf := time.Now()
+	if e = live.Save(liveAsOf); e != nil {
+		t.Fatal(e)
+	}
+	if w := live.Split(liveStart, liveAsOf).Window; w.Truncated || len(live.State.Coverage) != 1 {
+		t.Fatalf("live stream: %+v coverage=%+v", w, live.State.Coverage)
+	}
+
+	// A stall on a live stream resumes: once the loop catches up, saves extend
+	// a new span to the save time again.
+	resumeStalled := make(chan struct{}, 1)
+	go func() {
+		for i := 0; i < 70; i++ {
+			fmt.Fprintf(lw, "{\"n\":%d}\n", i)
+		}
+	}()
+	go func() {
+		for len(liveLines) < cap(liveLines) {
+			time.Sleep(time.Millisecond)
+		}
+		live.coverageMu.Lock()
+		stalled := !live.stalledAt.IsZero()
+		live.coverageMu.Unlock()
+		for !stalled {
+			time.Sleep(time.Millisecond)
+			live.coverageMu.Lock()
+			stalled = !live.stalledAt.IsZero()
+			live.coverageMu.Unlock()
+		}
+		resumeStalled <- struct{}{}
+	}()
+	select {
+	case <-resumeStalled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("live stream did not stall")
+	}
+	for i := 0; i < 70; i++ {
+		<-liveLines
+	}
+	if _, e = fmt.Fprintf(lw, "{\"n\":70}\n"); e != nil {
+		t.Fatal(e)
+	}
+	<-liveLines
+	resumedAt := time.Now()
+	if e = live.Save(resumedAt); e != nil {
+		t.Fatal(e)
+	}
+	if spans := live.State.Coverage; len(spans) < 2 || !spans[len(spans)-1].End.Equal(resumedAt) {
+		t.Fatalf("coverage did not resume after the stall: %+v", spans)
+	}
+	lw.Close()
+	<-liveDone
 }

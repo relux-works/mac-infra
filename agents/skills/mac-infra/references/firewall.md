@@ -214,7 +214,9 @@ are not denies appear in no bucket. The output also carries `health` (the
 count, `coverage_gaps`, `evicted_through` and `truncated`. `run` records
 coverage spans in state: a span opens when collection starts and ends at its
 last save, or when the ALF log stream ended if that came first, so a stop,
-crash, collector exit or restart leaves a gap. `coverage_gaps` lists the parts
+crash, collector exit or restart leaves a gap. A full ALF line queue (the
+run loop is behind, so the collector may block or drop lines) also ends the
+span; it reopens once the queue accepts lines again. `coverage_gaps` lists the parts
 of [since, as_of] no span covers. When a span reaches the window, its end may
 trail as_of by up to `nettop_interval` + `save_interval`, the expected save
 cadence of a live watcher, without a tail gap; a watcher that died within that

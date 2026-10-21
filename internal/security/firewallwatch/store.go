@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -58,11 +58,15 @@ type CoverageSpan struct {
 	End   time.Time `json:"end"`
 }
 type Store struct {
-	Config        Config
-	State         State
-	dirty         bool
-	covering      bool
-	collectionEnd atomic.Int64
+	Config   Config
+	State    State
+	dirty    bool
+	covering bool
+	// Collector observations from the feeder goroutine, applied by Save.
+	coverageMu    sync.Mutex
+	stalls        []CoverageSpan
+	stalledAt     time.Time
+	endedAt       time.Time
 	lastSave      time.Time
 	dayHashes     map[string][32]byte
 	atomicWrite   func(string, []byte) error
@@ -397,27 +401,75 @@ func (s *Store) BeginCoverage(now time.Time) {
 	s.covering = true
 }
 
+// StallCoverage records that the collector's line queue is full from at: the
+// run loop is behind and the collector may block or drop lines, so the stall
+// is not coverage. Called from the feeder goroutine; the first open stall wins.
+func (s *Store) StallCoverage(at time.Time) {
+	s.coverageMu.Lock()
+	defer s.coverageMu.Unlock()
+	if s.stalledAt.IsZero() {
+		s.stalledAt = at
+	}
+}
+
+// ResumeCoverage closes an open stall; the next Save ends the span at the
+// stall's start and opens a new span at at.
+func (s *Store) ResumeCoverage(at time.Time) {
+	s.coverageMu.Lock()
+	defer s.coverageMu.Unlock()
+	if !s.stalledAt.IsZero() {
+		s.stalls = append(s.stalls, CoverageSpan{Start: s.stalledAt, End: at})
+		s.stalledAt = time.Time{}
+	}
+}
+
 // EndCoverage records when collection stopped. It may be called from the
-// collector goroutine while the run loop is still busy; the next Save caps
-// the span there and no later Save extends it. The first call wins.
+// feeder goroutine while the run loop is still busy; the next Save caps the
+// span there and no later Save extends it. The first call wins.
 func (s *Store) EndCoverage(at time.Time) {
-	s.collectionEnd.CompareAndSwap(0, at.UnixNano())
+	s.coverageMu.Lock()
+	defer s.coverageMu.Unlock()
+	if s.endedAt.IsZero() {
+		s.endedAt = at
+	}
+}
+
+// extendCoverage applies collector observations to the open span at a save:
+// each closed stall ends the span at its start and opens a new one at its
+// end; the span then reaches now, but never past an open stall or the
+// collector's end.
+func (s *Store) extendCoverage(now time.Time) {
+	s.coverageMu.Lock()
+	stalls, stalledAt, endedAt := s.stalls, s.stalledAt, s.endedAt
+	s.stalls = nil
+	s.coverageMu.Unlock()
+	extend := func(to time.Time) {
+		if last := &s.State.Coverage[len(s.State.Coverage)-1]; to.After(last.End) {
+			last.End = to
+		}
+	}
+	for _, stall := range stalls {
+		extend(stall.Start)
+		s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: stall.End, End: stall.End})
+	}
+	end := now
+	if !stalledAt.IsZero() && stalledAt.Before(end) {
+		end = stalledAt
+	}
+	if !endedAt.IsZero() {
+		if endedAt.Before(end) {
+			end = endedAt
+		}
+		s.covering = false
+	}
+	extend(end)
 }
 func (s *Store) Save(now time.Time) error {
 	if e := safeDir(s.Config.StateDir); e != nil {
 		return e
 	}
-	if n := len(s.State.Coverage); s.covering && n > 0 {
-		end := now
-		if ended := s.collectionEnd.Load(); ended != 0 {
-			if at := time.Unix(0, ended); at.Before(end) {
-				end = at
-			}
-			s.covering = false
-		}
-		if end.After(s.State.Coverage[n-1].End) {
-			s.State.Coverage[n-1].End = end
-		}
+	if s.covering && len(s.State.Coverage) > 0 {
+		s.extendCoverage(now)
 	}
 	s.prune(now)
 	s.State.Updated = now

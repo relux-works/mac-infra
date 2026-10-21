@@ -133,21 +133,35 @@ func (s *Store) signer(ctx context.Context, path string) string {
 
 // scanLines bounds line storage even when the source emits an unterminated
 // oversized line, and resumes at the next newline rather than losing the stream.
-// feedLines queues collector lines for the run loop and reports the moment
-// the collector stream ended (EOF, error or cancellation) through ended,
-// before closing lines, so a run loop blocked in classification cannot
-// stretch coverage past the collector's end.
-func feedLines(ctx context.Context, r io.Reader, lines chan<- []byte, ended func(time.Time)) error {
+// collectionObserver receives collector liveness from the feeder goroutine.
+type collectionObserver interface {
+	StallCoverage(time.Time)
+	ResumeCoverage(time.Time)
+	EndCoverage(time.Time)
+}
+
+// feedLines queues collector lines for the run loop. A full queue is reported
+// as a stall until the line is accepted, because the feeder cannot observe the
+// collector meanwhile; the end of the stream (EOF, error or cancellation) is
+// reported before lines is closed, so the run loop's final save sees it.
+func feedLines(ctx context.Context, r io.Reader, lines chan<- []byte, observer collectionObserver) error {
 	e := scanLines(ctx, r, func(line []byte) error {
 		copyLine := append([]byte(nil), line...)
 		select {
 		case lines <- copyLine:
 			return nil
+		default:
+		}
+		observer.StallCoverage(time.Now())
+		select {
+		case lines <- copyLine:
+			observer.ResumeCoverage(time.Now())
+			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	})
-	ended(time.Now())
+	observer.EndCoverage(time.Now())
 	close(lines)
 	return e
 }
@@ -214,7 +228,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 	// A bounded queue provides backpressure while classification is slow.
 	lines := make(chan []byte, 64)
 	scanDone := make(chan error, 1)
-	go func() { scanDone <- feedLines(childCtx, pipe, lines, s.EndCoverage) }()
+	go func() { scanDone <- feedLines(childCtx, pipe, lines, s) }()
 	defer func() { cancel(); pipe.Close(); _ = cmd.Wait(); <-scanDone }()
 	classify := func(it Item) Decision { return cl.Classify(ctx, it) }
 	collect := func(it Item) bool {
