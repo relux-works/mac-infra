@@ -1,8 +1,11 @@
 package firewallwatch
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -73,7 +76,10 @@ func TestSplitBuckets(t *testing.T) {
 // retained event does not prove a stopped watcher covered the window. Each
 // gap in [since, as_of] is reported: a stop, a restart, a late start, a tail
 // beyond nettop_interval + save_interval (15s here), or no coverage at all
-// (state written before coverage existed). Unsorted overlapping spans merge.
+// (state written before coverage existed). The tail grace applies only after
+// a span reached the window: a window shorter than or equal to the grace with
+// no span, or with spans only before since, is one full gap. Unsorted
+// overlapping spans merge.
 func TestSplitCoverageTruncation(t *testing.T) {
 	now := time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
 	since := now.Add(-24 * time.Hour)
@@ -82,18 +88,27 @@ func TestSplitCoverageTruncation(t *testing.T) {
 	gap := func(from, to time.Time) SplitGap { return SplitGap{From: from, To: to} }
 	for _, tc := range []struct {
 		name  string
+		since time.Duration
 		spans []CoverageSpan
 		gaps  []SplitGap
 	}{
-		{"covered", []CoverageSpan{span(-25*time.Hour, -10*time.Second)}, nil},
-		{"tail at grace", []CoverageSpan{span(-25*time.Hour, -15*time.Second)}, nil},
-		{"merged overlap", []CoverageSpan{span(-10*time.Hour, 0), span(-25*time.Hour, -9*time.Hour)}, nil},
-		{"stopped watcher", []CoverageSpan{span(-30*time.Hour, -12*time.Hour)}, []SplitGap{gap(at(-12*time.Hour), now)}},
-		{"restart", []CoverageSpan{span(-25*time.Hour, -6*time.Hour), span(-6*time.Hour+5*time.Second, 0)}, []SplitGap{gap(at(-6*time.Hour), at(-6*time.Hour+5*time.Second))}},
-		{"late start", []CoverageSpan{span(-20*time.Hour, 0)}, []SplitGap{gap(since, at(-20*time.Hour))}},
-		{"tail past grace", []CoverageSpan{span(-25*time.Hour, -16*time.Second)}, []SplitGap{gap(at(-16*time.Second), now)}},
-		{"no coverage", nil, []SplitGap{gap(since, now)}},
+		{name: "covered", spans: []CoverageSpan{span(-25*time.Hour, -10*time.Second)}, gaps: nil},
+		{name: "tail at grace", spans: []CoverageSpan{span(-25*time.Hour, -15*time.Second)}, gaps: nil},
+		{name: "merged overlap", spans: []CoverageSpan{span(-10*time.Hour, 0), span(-25*time.Hour, -9*time.Hour)}, gaps: nil},
+		{name: "stopped watcher", spans: []CoverageSpan{span(-30*time.Hour, -12*time.Hour)}, gaps: []SplitGap{gap(at(-12*time.Hour), now)}},
+		{name: "restart", spans: []CoverageSpan{span(-25*time.Hour, -6*time.Hour), span(-6*time.Hour+5*time.Second, 0)}, gaps: []SplitGap{gap(at(-6*time.Hour), at(-6*time.Hour+5*time.Second))}},
+		{name: "late start", spans: []CoverageSpan{span(-20*time.Hour, 0)}, gaps: []SplitGap{gap(since, at(-20*time.Hour))}},
+		{name: "tail past grace", spans: []CoverageSpan{span(-25*time.Hour, -16*time.Second)}, gaps: []SplitGap{gap(at(-16*time.Second), now)}},
+		{name: "no coverage", spans: nil, gaps: []SplitGap{gap(since, now)}},
+		{name: "short window covered", spans: []CoverageSpan{span(-time.Hour, -time.Second)}, gaps: nil, since: -10 * time.Second},
+		{name: "short window no coverage", spans: nil, gaps: []SplitGap{gap(at(-10*time.Second), now)}, since: -10 * time.Second},
+		{name: "grace-long window no coverage", spans: nil, gaps: []SplitGap{gap(at(-15*time.Second), now)}, since: -15 * time.Second},
+		{name: "short window spans before since", spans: []CoverageSpan{span(-5*time.Hour, -4*time.Hour)}, gaps: []SplitGap{gap(at(-10*time.Second), now)}, since: -10 * time.Second},
 	} {
+		since := since
+		if tc.since != 0 {
+			since = at(tc.since)
+		}
 		s := &Store{Config: testConfig(t), State: State{Coverage: tc.spans, Events: []Event{{TS: at(-25 * time.Hour), Source: "nettop", Label: "noise"}}}}
 		w := s.Split(since, now).Window
 		if len(w.CoverageGaps) != len(tc.gaps) || w.Truncated != (len(tc.gaps) > 0) {
@@ -230,5 +245,88 @@ func TestCoverageSpans(t *testing.T) {
 		if e = loaded.Save(at(11)); e == nil {
 			t.Fatalf("invalid span saved: %+v", bad)
 		}
+	}
+}
+
+// EndCoverage caps the open span at the collector's end even when the run
+// loop saves later (blocked classification); the first end wins, later saves
+// never extend the span, and the capped span reloads with a gap after it.
+func TestCoverageEndsAtCollectorEnd(t *testing.T) {
+	c := testConfig(t)
+	t0 := time.Now().Truncate(time.Second).Add(-time.Hour)
+	at := func(m int) time.Time { return t0.Add(time.Duration(m) * time.Minute) }
+	s, e := OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	s.BeginCoverage(at(0))
+	if e = s.Save(at(1)); e != nil {
+		t.Fatal(e)
+	}
+	s.EndCoverage(at(2))
+	s.EndCoverage(at(3))
+	for _, m := range []int{5, 9} {
+		if e = s.Save(at(m)); e != nil {
+			t.Fatal(e)
+		}
+		if end := s.State.Coverage[0].End; !end.Equal(at(2)) {
+			t.Fatalf("save at %d extended coverage to %v", m, end)
+		}
+	}
+	loaded, e := OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if w := loaded.Split(at(0), at(9)).Window; !w.Truncated || len(w.CoverageGaps) != 1 || !w.CoverageGaps[0].From.Equal(at(2)) {
+		t.Fatalf("collector end: %+v", w)
+	}
+}
+
+// feedLines reports the collector's end as soon as its stream ends, while
+// queued lines are still unconsumed (the run loop is blocked) and before
+// lines is closed, so the loop's final save sees the end; it does not report
+// an end while the stream is open.
+func TestFeedLinesReportsEndBeforeConsumption(t *testing.T) {
+	r, w := io.Pipe()
+	lines := make(chan []byte, 64)
+	var ended atomic.Int64
+	queued, closedFirst := 0, false
+	done := make(chan error, 1)
+	go func() {
+		done <- feedLines(context.Background(), r, lines, func(at time.Time) {
+		drain:
+			for {
+				select {
+				case _, ok := <-lines:
+					if !ok {
+						closedFirst = true
+						break drain
+					}
+					queued++
+				default:
+					break drain
+				}
+			}
+			ended.Store(at.UnixNano())
+		})
+	}()
+	if _, e := w.Write([]byte("{\"a\":1}\n")); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := w.Write([]byte("{\"b\":2}\n")); e != nil {
+		t.Fatal(e)
+	}
+	if ended.Load() != 0 {
+		t.Fatal("end reported while the stream is open")
+	}
+	w.Close()
+	if e := <-done; e != nil {
+		t.Fatal(e)
+	}
+	if ended.Load() == 0 || queued != 2 || closedFirst {
+		t.Fatalf("end not reported before consumption and close: ended=%d queued=%d closed=%t", ended.Load(), queued, closedFirst)
+	}
+	if _, ok := <-lines; ok {
+		t.Fatal("lines not closed after the end")
 	}
 }

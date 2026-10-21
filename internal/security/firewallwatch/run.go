@@ -133,6 +133,24 @@ func (s *Store) signer(ctx context.Context, path string) string {
 
 // scanLines bounds line storage even when the source emits an unterminated
 // oversized line, and resumes at the next newline rather than losing the stream.
+// feedLines queues collector lines for the run loop and reports the moment
+// the collector stream ended (EOF, error or cancellation) through ended,
+// before closing lines, so a run loop blocked in classification cannot
+// stretch coverage past the collector's end.
+func feedLines(ctx context.Context, r io.Reader, lines chan<- []byte, ended func(time.Time)) error {
+	e := scanLines(ctx, r, func(line []byte) error {
+		copyLine := append([]byte(nil), line...)
+		select {
+		case lines <- copyLine:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	ended(time.Now())
+	close(lines)
+	return e
+}
 func scanLines(ctx context.Context, r io.Reader, consume func([]byte) error) error {
 	br := bufio.NewReaderSize(r, LineLimit)
 	var line []byte
@@ -196,18 +214,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 	// A bounded queue provides backpressure while classification is slow.
 	lines := make(chan []byte, 64)
 	scanDone := make(chan error, 1)
-	go func() {
-		scanDone <- scanLines(childCtx, pipe, func(line []byte) error {
-			copyLine := append([]byte(nil), line...)
-			select {
-			case lines <- copyLine:
-				return nil
-			case <-childCtx.Done():
-				return childCtx.Err()
-			}
-		})
-		close(lines)
-	}()
+	go func() { scanDone <- feedLines(childCtx, pipe, lines, s.EndCoverage) }()
 	defer func() { cancel(); pipe.Close(); _ = cmd.Wait(); <-scanDone }()
 	classify := func(it Item) Decision { return cl.Classify(ctx, it) }
 	collect := func(it Item) bool {

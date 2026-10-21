@@ -213,11 +213,15 @@ are not denies appear in no bucket. The output also carries `health` (the
 `status` report) and `window`: since, as_of, first/last event time, event
 count, `coverage_gaps`, `evicted_through` and `truncated`. `run` records
 coverage spans in state: a span opens when collection starts and ends at its
-last save, so a stop, crash or restart leaves a gap. `coverage_gaps` lists
-the parts of [since, as_of] no span covers; the last span may end up to
-`nettop_interval` + `save_interval` before as_of (a running watcher saves at
-least once per nettop interval). State written before coverage existed has no
-spans, so its whole window is one gap. `evicted_through` is the newest
+last save, or when the ALF log stream ended if that came first, so a stop,
+crash, collector exit or restart leaves a gap. `coverage_gaps` lists the parts
+of [since, as_of] no span covers. When a span reaches the window, its end may
+trail as_of by up to `nettop_interval` + `save_interval`, the expected save
+cadence of a live watcher, without a tail gap; a watcher that died within that
+last interval is not detected, and a save delayed longer (slow classification)
+only adds a spurious gap. With no span reaching the window, the whole window
+is one gap whatever its length; state written before coverage existed has no
+spans. `evicted_through` is the newest
 timestamp of any event pruned by `retention_days` or `max_entries`.
 `truncated` is set when there is a coverage gap or `evicted_through` is at or
 after since: part of the window may be missing.

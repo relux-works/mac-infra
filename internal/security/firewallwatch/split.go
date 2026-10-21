@@ -132,14 +132,17 @@ func (s *Store) Split(since, asOf time.Time) DigestSplit {
 }
 
 // coverageGaps lists the parts of [since, asOf] covered by no recorded watcher
-// span. A running watcher saves at least once per nettop interval, so its last
-// span may end up to nettop_interval + save_interval before asOf without a
-// tail gap; gaps between spans count whatever their length.
+// span. When a span reaches the window, the time after the last covered point
+// is a gap only if longer than nettop_interval + save_interval, the expected
+// save cadence of a live watcher (a save delayed longer only adds a spurious
+// gap). Without such a span the whole window is a gap whatever its length;
+// gaps between spans count whatever their length.
 func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 	gaps := []SplitGap{}
 	spans := append([]CoverageSpan(nil), s.State.Coverage...)
 	sort.SliceStable(spans, func(i, j int) bool { return spans[i].Start.Before(spans[j].Start) })
 	cursor := since
+	touched := false
 	for _, span := range spans {
 		if !cursor.Before(asOf) {
 			break
@@ -147,6 +150,7 @@ func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 		if span.End.Before(cursor) {
 			continue
 		}
+		touched = true
 		if span.Start.After(cursor) {
 			to := span.Start
 			if to.After(asOf) {
@@ -159,7 +163,7 @@ func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 		}
 	}
 	grace := duration(s.Config.NettopInterval) + duration(s.Config.SaveInterval)
-	if asOf.Sub(cursor) > grace {
+	if cursor.Before(asOf) && (!touched || asOf.Sub(cursor) > grace) {
 		gaps = append(gaps, SplitGap{From: cursor, To: asOf})
 	}
 	return gaps

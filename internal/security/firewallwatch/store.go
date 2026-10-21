@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -61,6 +62,7 @@ type Store struct {
 	State         State
 	dirty         bool
 	covering      bool
+	collectionEnd atomic.Int64
 	lastSave      time.Time
 	dayHashes     map[string][32]byte
 	atomicWrite   func(string, []byte) error
@@ -389,17 +391,33 @@ func (s *Store) Flush(now time.Time, emitted, force bool) error {
 }
 
 // BeginCoverage opens a coverage span for a running watcher; every later Save
-// extends it to the save time.
+// extends it to the save time until EndCoverage.
 func (s *Store) BeginCoverage(now time.Time) {
 	s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: now, End: now})
 	s.covering = true
+}
+
+// EndCoverage records when collection stopped. It may be called from the
+// collector goroutine while the run loop is still busy; the next Save caps
+// the span there and no later Save extends it. The first call wins.
+func (s *Store) EndCoverage(at time.Time) {
+	s.collectionEnd.CompareAndSwap(0, at.UnixNano())
 }
 func (s *Store) Save(now time.Time) error {
 	if e := safeDir(s.Config.StateDir); e != nil {
 		return e
 	}
-	if n := len(s.State.Coverage); s.covering && n > 0 && now.After(s.State.Coverage[n-1].End) {
-		s.State.Coverage[n-1].End = now
+	if n := len(s.State.Coverage); s.covering && n > 0 {
+		end := now
+		if ended := s.collectionEnd.Load(); ended != 0 {
+			if at := time.Unix(0, ended); at.Before(end) {
+				end = at
+			}
+			s.covering = false
+		}
+		if end.After(s.State.Coverage[n-1].End) {
+			s.State.Coverage[n-1].End = end
+		}
 	}
 	s.prune(now)
 	s.State.Updated = now
