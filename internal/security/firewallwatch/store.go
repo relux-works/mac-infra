@@ -44,11 +44,23 @@ type State struct {
 	BackendHealthy     bool                   `json:"backend_healthy"`
 	Updated            time.Time              `json:"updated"`
 	NettopError        string                 `json:"nettop_error,omitempty"`
+	// Coverage records when a watcher was running: a span opens at run start
+	// and its end advances on every save, so a stop or crash leaves a gap.
+	Coverage []CoverageSpan `json:"coverage"`
+	// EvictedThrough is the newest timestamp of any event pruned from Events.
+	EvictedThrough time.Time `json:"evicted_through"`
+}
+
+// CoverageSpan is one interval in which a watcher ran and saved state.
+type CoverageSpan struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
 }
 type Store struct {
 	Config        Config
 	State         State
 	dirty         bool
+	covering      bool
 	lastSave      time.Time
 	dayHashes     map[string][32]byte
 	atomicWrite   func(string, []byte) error
@@ -123,7 +135,7 @@ func OpenStore(c Config) (*Store, error) {
 func (s *Store) validateState() error {
 	st := s.State
 	bad := func() error { return errors.New("invalid structure, count or field") }
-	if st.Entries == nil || st.Signers == nil || len(st.Entries) > s.Config.MaxEntries || len(st.Events) > s.Config.MaxEntries || len(st.Signers) > s.Config.MaxEntries || len(st.Parser.Samples) > SampleLimit {
+	if st.Entries == nil || st.Signers == nil || len(st.Entries) > s.Config.MaxEntries || len(st.Events) > s.Config.MaxEntries || len(st.Signers) > s.Config.MaxEntries || len(st.Coverage) > s.Config.MaxEntries || len(st.Parser.Samples) > SampleLimit {
 		return bad()
 	}
 	for k, v := range st.Entries {
@@ -150,6 +162,11 @@ func (s *Store) validateState() error {
 	}
 	if len(st.NettopError) > 1024 {
 		return bad()
+	}
+	for _, v := range st.Coverage {
+		if v.Start.IsZero() || v.End.Before(v.Start) {
+			return bad()
+		}
 	}
 	for _, v := range st.Events {
 		if v.TS.IsZero() || !validLabel(v.Label) || v.Mode != "shadow" || (v.Source != "alf" && v.Source != "nettop") || !persistedText(v.App, 1024) || !persistedText(v.Signer, 1024) || len(v.Verdict) > 128 || len(v.RemoteClass) > 128 || len(v.Bucket) > 128 || v.Counts == 0 || v.Counts > math.MaxInt64 || (v.Port != nil && (*v.Port < 1 || *v.Port > 65535)) {
@@ -302,17 +319,38 @@ func (s *Store) prune(now time.Time) {
 			delete(s.State.Entries, k)
 		}
 	}
+	evicted := func(e Event) {
+		if e.TS.After(s.State.EvictedThrough) {
+			s.State.EvictedThrough = e.TS
+		}
+	}
 	events := s.State.Events[:0]
 	for _, e := range s.State.Events {
 		if !e.TS.Before(cutoff) {
 			events = append(events, e)
+		} else {
+			evicted(e)
 		}
 	}
 	sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
 	if len(events) > s.Config.MaxEntries {
+		for _, e := range events[:len(events)-s.Config.MaxEntries] {
+			evicted(e)
+		}
 		events = events[len(events)-s.Config.MaxEntries:]
 	}
 	s.State.Events = append([]Event(nil), events...)
+	// Dropping old coverage only widens reported gaps, never hides one.
+	spans := s.State.Coverage[:0]
+	for _, v := range s.State.Coverage {
+		if !v.End.Before(cutoff) {
+			spans = append(spans, v)
+		}
+	}
+	if len(spans) > s.Config.MaxEntries {
+		spans = spans[len(spans)-s.Config.MaxEntries:]
+	}
+	s.State.Coverage = append([]CoverageSpan(nil), spans...)
 	// Keep executable signature cache bounded as well; evicted paths may be inspected again.
 	if len(s.State.Signers) > s.Config.MaxEntries {
 		keys := make([]string, 0, len(s.State.Signers))
@@ -349,9 +387,19 @@ func (s *Store) Flush(now time.Time, emitted, force bool) error {
 	}
 	return s.Save(now)
 }
+
+// BeginCoverage opens a coverage span for a running watcher; every later Save
+// extends it to the save time.
+func (s *Store) BeginCoverage(now time.Time) {
+	s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: now, End: now})
+	s.covering = true
+}
 func (s *Store) Save(now time.Time) error {
 	if e := safeDir(s.Config.StateDir); e != nil {
 		return e
+	}
+	if n := len(s.State.Coverage); s.covering && n > 0 && now.After(s.State.Coverage[n-1].End) {
+		s.State.Coverage[n-1].End = now
 	}
 	s.prune(now)
 	s.State.Updated = now

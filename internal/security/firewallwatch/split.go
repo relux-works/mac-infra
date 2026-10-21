@@ -35,14 +35,23 @@ type SplitGroup struct {
 	Rows  []SplitRow `json:"rows"`
 }
 
-// SplitWindow describes the events actually covered. Truncated is set when the
-// oldest retained event is newer than the requested start, so the retention
-// cap (or a stopped watcher) hid part of the window.
+// SplitGap is part of the window in which no watcher was recorded running.
+type SplitGap struct {
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+}
+
+// SplitWindow describes the events actually covered. Truncated is set when
+// part of [since, as_of] may be missing: a coverage gap (watcher stopped,
+// crashed, restarted or never recorded) or a pruned event at or after since.
 type SplitWindow struct {
 	Since          time.Time  `json:"since"`
+	AsOf           time.Time  `json:"as_of"`
 	FirstTS        *time.Time `json:"first_ts"`
 	LastTS         *time.Time `json:"last_ts"`
 	EventsInWindow int        `json:"events_in_window"`
+	CoverageGaps   []SplitGap `json:"coverage_gaps"`
+	EvictedThrough *time.Time `json:"evicted_through"`
 	Truncated      bool       `json:"truncated"`
 }
 
@@ -65,9 +74,10 @@ type DigestSplit struct {
 //   - needs_review: every other decide event.
 //
 // Events labelled noise or digest that are not denies appear in no bucket.
-func (s *Store) Split(since time.Time) DigestSplit {
+// Events after asOf are outside the window.
+func (s *Store) Split(since, asOf time.Time) DigestSplit {
 	split := DigestSplit{
-		Window:      SplitWindow{Since: since},
+		Window:      SplitWindow{Since: since, AsOf: asOf, CoverageGaps: s.coverageGaps(since, asOf)},
 		Health:      s.Status(),
 		RealDeny:    []SplitRow{},
 		KnownFP:     map[string]SplitGroup{},
@@ -76,14 +86,9 @@ func (s *Store) Split(since time.Time) DigestSplit {
 	for _, group := range []string{KnownFPNettopRawIP, KnownFPALFUnknownOrAllow, KnownFPLoopbackSSHKNN} {
 		split.KnownFP[group] = SplitGroup{Rows: []SplitRow{}}
 	}
-	var oldest *time.Time
 	for i := range s.State.Events {
 		e := s.State.Events[i]
-		if oldest == nil || e.TS.Before(*oldest) {
-			ts := e.TS
-			oldest = &ts
-		}
-		if e.TS.Before(since) {
+		if e.TS.Before(since) || e.TS.After(asOf) {
 			continue
 		}
 		split.Window.EventsInWindow++
@@ -110,7 +115,10 @@ func (s *Store) Split(since time.Time) DigestSplit {
 			split.NeedsReview = append(split.NeedsReview, row)
 		}
 	}
-	split.Window.Truncated = oldest == nil || oldest.After(since)
+	if evicted := s.State.EvictedThrough; !evicted.IsZero() {
+		split.Window.EvictedThrough = &evicted
+	}
+	split.Window.Truncated = len(split.Window.CoverageGaps) > 0 || (split.Window.EvictedThrough != nil && !split.Window.EvictedThrough.Before(since))
 	sortRows := func(rows []SplitRow) {
 		sort.SliceStable(rows, func(i, j int) bool { return rows[i].TS.Before(rows[j].TS) })
 	}
@@ -121,6 +129,40 @@ func (s *Store) Split(since time.Time) DigestSplit {
 		split.KnownFP[name] = group
 	}
 	return split
+}
+
+// coverageGaps lists the parts of [since, asOf] covered by no recorded watcher
+// span. A running watcher saves at least once per nettop interval, so its last
+// span may end up to nettop_interval + save_interval before asOf without a
+// tail gap; gaps between spans count whatever their length.
+func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
+	gaps := []SplitGap{}
+	spans := append([]CoverageSpan(nil), s.State.Coverage...)
+	sort.SliceStable(spans, func(i, j int) bool { return spans[i].Start.Before(spans[j].Start) })
+	cursor := since
+	for _, span := range spans {
+		if !cursor.Before(asOf) {
+			break
+		}
+		if span.End.Before(cursor) {
+			continue
+		}
+		if span.Start.After(cursor) {
+			to := span.Start
+			if to.After(asOf) {
+				to = asOf
+			}
+			gaps = append(gaps, SplitGap{From: cursor, To: to})
+		}
+		if span.End.After(cursor) {
+			cursor = span.End
+		}
+	}
+	grace := duration(s.Config.NettopInterval) + duration(s.Config.SaveInterval)
+	if asOf.Sub(cursor) > grace {
+		gaps = append(gaps, SplitGap{From: cursor, To: asOf})
+	}
+	return gaps
 }
 
 func (d *DigestSplit) addKnownFP(group string, row SplitRow) {

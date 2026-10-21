@@ -90,7 +90,8 @@ func runWatch(args []string, out, errOut io.Writer) int {
 			return 0
 		}
 		if split {
-			return printJSON(s.Split(time.Now().Add(-period)))
+			now := time.Now()
+			return printJSON(s.Split(now.Add(-period), now))
 		}
 		groups := s.Digest(time.Now().Add(-period))
 		if asJSON {

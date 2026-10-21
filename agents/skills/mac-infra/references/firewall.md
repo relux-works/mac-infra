@@ -210,10 +210,17 @@ events of three known false-positive causes (`nettop_policy_raw_ip`,
 loopback rows of ssh or limactl), each with a count and its rows;
 `needs_review` holds every other `decide` event. Noise and digest events that
 are not denies appear in no bucket. The output also carries `health` (the
-`status` report) and `window` (since, first/last event time, event count, and
-`truncated`, set when the oldest retained event is newer than `--since` or
-nothing is retained, so the retention cap or a stopped watcher hid part of
-the window).
+`status` report) and `window`: since, as_of, first/last event time, event
+count, `coverage_gaps`, `evicted_through` and `truncated`. `run` records
+coverage spans in state: a span opens when collection starts and ends at its
+last save, so a stop, crash or restart leaves a gap. `coverage_gaps` lists
+the parts of [since, as_of] no span covers; the last span may end up to
+`nettop_interval` + `save_interval` before as_of (a running watcher saves at
+least once per nettop interval). State written before coverage existed has no
+spans, so its whole window is one gap. `evicted_through` is the newest
+timestamp of any event pruned by `retention_days` or `max_entries`.
+`truncated` is set when there is a coverage gap or `evicted_through` is at or
+after since: part of the window may be missing.
 Ordinary repeats update counters/last_seen silently. Rules run again on each
 repeat's latest bytes and current signer; each newly triggered `decide` rule ID
 emits one escalation per key, recorded in state across restarts. A further repeat

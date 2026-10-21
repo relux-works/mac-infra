@@ -218,6 +218,8 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 		it.Signer = s.signer(ctx, path)
 		return len(s.Observe(it, time.Now(), classify)) > 0
 	}
+	// Collection is live from here; a stop or crash ends the span at the last save.
+	s.BeginCoverage(time.Now())
 	// Startup metadata is dirty, but only an emitted event may flush it early.
 	s.dirty = true
 	s.lastSave = time.Now()
