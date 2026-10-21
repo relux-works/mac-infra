@@ -16,7 +16,7 @@ import (
 )
 
 const watchUsage = `mac-firewall watch run --config PATH
-mac-firewall watch digest --config PATH --since DURATION [--json]
+mac-firewall watch digest --config PATH --since DURATION [--json [--split]]
 mac-firewall watch status --config PATH [--json]
 mac-firewall watch classify --config PATH --fixtures FILE [--json]
 Shadow mode only. No blocking or firewall changes. Exit 0 success, 1 failure, 2 usage.`
@@ -40,18 +40,19 @@ func runWatch(args []string, out, errOut io.Writer) int {
 	f := flag.NewFlagSet("watch "+command, flag.ContinueOnError)
 	f.SetOutput(errOut)
 	config := f.String("config", "", "required private watch config")
-	var asJSON bool
+	var asJSON, split bool
 	var since, fixtures string
 	if command != "run" {
 		f.BoolVar(&asJSON, "json", false, "print JSON")
 	}
 	if command == "digest" {
 		f.StringVar(&since, "since", "", "required positive Go duration")
+		f.BoolVar(&split, "split", false, "with --json: deterministic real_deny / known_fp / needs_review split")
 	}
 	if command == "classify" {
 		f.StringVar(&fixtures, "fixtures", "", "labelled synthetic JSONL")
 	}
-	if f.Parse(args[1:]) != nil || f.NArg() != 0 || *config == "" || (command == "classify" && fixtures == "") {
+	if f.Parse(args[1:]) != nil || f.NArg() != 0 || *config == "" || (command == "classify" && fixtures == "") || (split && !asJSON) {
 		fmt.Fprintln(errOut, watchUsage)
 		return 2
 	}
@@ -87,6 +88,9 @@ func runWatch(args []string, out, errOut io.Writer) int {
 			}
 			fmt.Fprintf(out, "shadow: %s; backend healthy=%t (as of %s); unrecognized=%d; invalid_json=%d; last event=%s\n", s, s.State.BackendHealthy, s.State.Updated.Format(time.RFC3339), s.State.Parser.Unrecognized+s.State.NettopUnrecognized, s.State.Parser.Invalid, s.State.LastEvent.Format(time.RFC3339))
 			return 0
+		}
+		if split {
+			return printJSON(s.Split(time.Now().Add(-period)))
 		}
 		groups := s.Digest(time.Now().Add(-period))
 		if asJSON {

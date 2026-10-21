@@ -191,6 +191,7 @@ pathname fallback.
 mac-firewall watch run --config /ABSOLUTE/firewall-watch.json
 mac-firewall watch digest --config /ABSOLUTE/firewall-watch.json --since 24h
 mac-firewall watch digest --config /ABSOLUTE/firewall-watch.json --since 24h --json
+mac-firewall watch digest --config /ABSOLUTE/firewall-watch.json --since 24h --json --split
 mac-firewall watch status --config /ABSOLUTE/firewall-watch.json --json
 mac-firewall watch classify --config /ABSOLUTE/firewall-watch.json --fixtures /ABSOLUTE/fixtures-v2-heldout.jsonl --json
 ```
@@ -200,6 +201,19 @@ llama-server child. Exit codes are 0 success, 1 refused/failed, 2 bad usage.
 `status` reports last persisted backend health with its observation time, not
 a live health probe; a stale timestamp may mean the watcher has stopped.
 `digest` reads retained new-item events grouped by proposed label and app.
+`digest --json --split` (`--split` requires `--json`) instead puts each event
+in the window into at most one bucket, precedence first:
+`real_deny` holds every non-nettop event whose verdict is deny, denied, block,
+blocked or drop (any case), whatever its label; `known_fp` holds `decide`
+events of three known false-positive causes (`nettop_policy_raw_ip`,
+`alf_unknown_or_allow_decide`, and `loopback_ssh_limactl_knn` for kNN-decided
+loopback rows of ssh or limactl), each with a count and its rows;
+`needs_review` holds every other `decide` event. Noise and digest events that
+are not denies appear in no bucket. The output also carries `health` (the
+`status` report) and `window` (since, first/last event time, event count, and
+`truncated`, set when the oldest retained event is newer than `--since` or
+nothing is retained, so the retention cap or a stopped watcher hid part of
+the window).
 Ordinary repeats update counters/last_seen silently. Rules run again on each
 repeat's latest bytes and current signer; each newly triggered `decide` rule ID
 emits one escalation per key, recorded in state across restarts. A further repeat

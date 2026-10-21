@@ -79,7 +79,7 @@ func TestWatchClassifyFake(t *testing.T) {
 // Command-specific flags and missing required operands fail as usage errors;
 // absent/unsafe configurations fail as operational errors.
 func TestWatchUsage(t *testing.T) {
-	for _, args := range [][]string{{"watch"}, {"watch", "wat"}, {"watch", "run"}, {"watch", "run", "--json", "--config", "x"}, {"watch", "classify", "--config", "x"}, {"watch", "status", "--config", "x", "--since", "1h"}, {"watch", "digest", "--config", "x", "--since", "-1h"}} {
+	for _, args := range [][]string{{"watch"}, {"watch", "wat"}, {"watch", "run"}, {"watch", "run", "--json", "--config", "x"}, {"watch", "classify", "--config", "x"}, {"watch", "status", "--config", "x", "--since", "1h"}, {"watch", "digest", "--config", "x", "--since", "-1h"}, {"watch", "digest", "--config", "x", "--since", "1h", "--split"}, {"watch", "status", "--config", "x", "--json", "--split"}} {
 		var o, e bytes.Buffer
 		if code := run(args, &o, &e); code != 2 {
 			t.Fatal(args, code, e.String())
@@ -129,5 +129,35 @@ func TestWatchStatusDigest(t *testing.T) {
 	}
 	if calls.status != 0 || calls.plan != 0 || calls.apply != 0 {
 		t.Fatal("watch called privileged helper", calls)
+	}
+}
+
+// digest --json --split reads the saved store through the real CLI path and
+// emits the split document (window, health, buckets); --split alone is a
+// usage error (TestWatchUsage).
+func TestWatchDigestSplit(t *testing.T) {
+	stubHelper(t, maccore.Response{}, nil)
+	config, c := watchConfig(t, 41236)
+	store, e := firewallwatch.OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	now := time.Now()
+	store.Observe(firewallwatch.Item{App: "sample app", Source: "nettop", Verdict: "observed", Remote: "internet-raw-ip"}, now, func(firewallwatch.Item) firewallwatch.Decision {
+		return firewallwatch.Decision{Label: "decide", Reason: "policy_raw_ip"}
+	})
+	if e = store.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	var o, errOut bytes.Buffer
+	if code := run([]string{"watch", "digest", "--config", config, "--json", "--since", "1h", "--split"}, &o, &errOut); code != 0 {
+		t.Fatal(code, errOut.String())
+	}
+	var split firewallwatch.DigestSplit
+	if e = json.Unmarshal(o.Bytes(), &split); e != nil {
+		t.Fatal(e, o.String())
+	}
+	if g := split.KnownFP[firewallwatch.KnownFPNettopRawIP]; g.Count != 1 || g.Rows[0].App != "sample app" || split.Window.EventsInWindow != 1 {
+		t.Fatalf("split: %s", o.String())
 	}
 }
