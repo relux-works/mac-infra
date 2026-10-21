@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -413,21 +414,40 @@ func TestFeedLinesBackpressureGap(t *testing.T) {
 		resume: s.ResumeCoverage,
 		end:    s.EndCoverage,
 	}
-	r, w := io.Pipe()
+	// A kernel pipe buffers all 100 lines, so the collector side closes while
+	// the feeder is still stalled on the full queue.
+	r, w, e := os.Pipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer r.Close()
 	lines := make(chan []byte, 64)
 	done := make(chan error, 1)
 	go func() { done <- feedLines(context.Background(), r, lines, observer) }()
+	collectorGone := make(chan error, 1)
 	go func() {
 		for i := 0; i < 100; i++ {
-			fmt.Fprintf(w, "{\"n\":%d}\n", i)
+			if _, e := fmt.Fprintf(w, "{\"n\":%d}\n", i); e != nil {
+				collectorGone <- e
+				return
+			}
 		}
-		w.Close()
+		collectorGone <- w.Close()
 	}()
+	if e = <-collectorGone; e != nil {
+		t.Fatal(e)
+	}
 	var stallAt time.Time
 	select {
 	case stallAt = <-stalled:
 	case <-time.After(10 * time.Second):
 		t.Fatal("no stall reported while the queue is full")
+	}
+	s.coverageMu.Lock()
+	endSeen := !s.endedAt.IsZero()
+	s.coverageMu.Unlock()
+	if endSeen {
+		t.Fatal("feeder saw the collector's end through a full queue")
 	}
 	time.Sleep(20 * time.Millisecond)
 	if e = s.Save(time.Now()); e != nil {
