@@ -1,0 +1,49 @@
+name: NetFilterProto
+options:
+  bundleIdPrefix: works.relux.mac-infra
+  deploymentTarget:
+    macOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: "$(inherited)"
+    ENABLE_HARDENED_RUNTIME: YES
+targets:
+  NetFilterProto:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: works.relux.mac-infra.netfilter
+        PRODUCT_NAME: NetFilterProto
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/NetFilterProto.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - target: NetFilterExtension
+        embed: true
+        codeSign: true
+  NetFilterExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - Extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: works.relux.mac-infra.netfilter.extension
+        PRODUCT_NAME: works.relux.mac-infra.netfilter.extension
+        INFOPLIST_FILE: Extension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Extension/NetFilterExtension.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS: "-lbsm"
+        PRODUCT_MODULE_NAME: NetFilterExtension
+schemes:
+  NetFilterProto:
+    build:
+      targets:
+        NetFilterProto: all
