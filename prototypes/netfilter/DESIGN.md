@@ -66,6 +66,22 @@ outside system paths and `/Applications` (Homebrew sing-box, the Codex CLI),
 while the same calls succeed unsandboxed. The extension therefore carries a
 read-only sandbox file exception for `/`, so it can read signatures.
 
+Why `/` and not a list of directories: the program behind a flow can live
+anywhere: Homebrew prefixes, `~/.local/bin`, npm `node_modules`, SDK
+folders, build outputs in project directories. Run 02 attributed flows
+from all of these. A narrower list would turn every new location back into
+an unattributed flow. The exception is limited as follows:
+
+- It is read-only (`files.absolute-path.read-only`). The extension gets no
+  file write, network client/server or other sandbox right beyond its
+  defaults.
+- Only the Security framework reads files through it, to validate the code
+  signature of the flow's program. The extension never opens files itself
+  and writes nothing but unified-log lines.
+- It is a development-signing exception for this prototype. A Developer ID
+  or App Store build would have to revisit it, for example by moving the
+  signature lookup into a separate helper process.
+
 `remote_hostname` is preferred over the IP. Under multi-tun's fake-ip DNS,
 `remote_host` is often a 198.18.0.0/15 placeholder. The real name is only
 there when the app connected by name through Network.framework or CFNetwork.
