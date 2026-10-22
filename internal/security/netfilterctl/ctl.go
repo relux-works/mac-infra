@@ -154,6 +154,10 @@ func (r Request) Validate() error {
 		return errors.New("--actor is required")
 	}
 	switch r.Op {
+	case "alarm", "warning":
+		if r.FlowID != "" || r.Duration != 0 || r.RuleID != "" {
+			return errors.New(r.Op + " takes only --reason and an optional target")
+		}
 	case "kill":
 		if (r.FlowID == "") == (r.Target == Target{}) {
 			return errors.New("kill needs exactly one of --flow or a target (--app/--host/--port)")
@@ -209,8 +213,18 @@ func (r Request) appArgs() []string {
 // blocks a report_pending entry plus the incident text. The app is never run
 // unless the intent was journaled.
 func Execute(ctx context.Context, r Request, protect ProtectList, j *journal.Journal, run Runner, now func() time.Time) Result {
+	// The extension lowercases hosts; journal them the same way so the
+	// watcher's reconciliation matches intent and action.
+	r.Target.Host = strings.ToLower(r.Target.Host)
 	if err := r.Validate(); err != nil {
 		return Result{Error: err.Error()}
+	}
+	if r.Op == "alarm" || r.Op == "warning" {
+		e, err := j.Append(journal.Entry{TS: now().UTC(), Kind: r.Op, Source: r.Reason, Actor: r.Actor, Target: r.Target.String(), Action: r.Op})
+		if err != nil {
+			return Result{Error: "journal write failed: " + err.Error()}
+		}
+		return Result{OK: true, Outcome: &e}
 	}
 	if r.Op != "unblock" {
 		if why := protect.Protects(r.Target); why != "" {

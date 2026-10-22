@@ -27,7 +27,7 @@ func watchConfig(t *testing.T, port int) (string, firewallwatch.Config) {
 		t.Fatal(e)
 	}
 	netfilterSource := false
-	c := firewallwatch.Config{Schema: "mac-infra.firewall-watch/v1", StateDir: filepath.Join(root, "state"), MaxEntries: 200, RetentionDays: 7, NettopInterval: "10s", DenySpikeCount: 3, DenySpikeWindow: "1m", K: 3, NoveltySimilarity: &threshold, ClassifierTimeout: "120s", LlamaServer: "/opt/homebrew/bin/llama-server", Model: "/Users/alexis/src/relux-works/swarm/local-models/models/qwen3-embedding-0.6b/gguf/Qwen3-Embedding-0.6B-Q8_0.gguf", ModelSHA256: "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439", LabelledPool: pool, SaveInterval: "10s", SignerFailureTTL: "1s", MaxStateBytes: 32 << 20, MaxModelBytes: 2 << 30, NetfilterSource: &netfilterSource}
+	c := firewallwatch.Config{Schema: "mac-infra.firewall-watch/v1", StateDir: filepath.Join(root, "state"), MaxEntries: 200, RetentionDays: 7, NettopInterval: "10s", DenySpikeCount: 3, DenySpikeWindow: "1m", K: 3, NoveltySimilarity: &threshold, ClassifierTimeout: "120s", LlamaServer: "/opt/homebrew/bin/llama-server", Model: "/Users/alexis/src/relux-works/swarm/local-models/models/qwen3-embedding-0.6b/gguf/Qwen3-Embedding-0.6B-Q8_0.gguf", ModelSHA256: "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439", LabelledPool: pool, SaveInterval: "10s", SignerFailureTTL: "1s", MaxStateBytes: 32 << 20, MaxModelBytes: 2 << 30, NetfilterSource: &netfilterSource, NetfilterJournalDir: "/private/tmp/netfilter-journal-unused"}
 	path := filepath.Join(root, "config.json")
 	raw, _ := json.Marshal(c)
 	if e = os.WriteFile(path, raw, 0600); e != nil {

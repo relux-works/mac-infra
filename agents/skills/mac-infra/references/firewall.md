@@ -264,7 +264,8 @@ refused. The former `port` field is removed and refused as unknown.
   "model": "/ABSOLUTE/Qwen3-Embedding-0.6B-Q8_0.gguf",
   "model_sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
   "labelled_pool": "/ABSOLUTE/fixtures-v1.jsonl",
-  "netfilter_source": false
+  "netfilter_source": false,
+  "netfilter_journal_dir": "/ABSOLUTE/netfilter-journal"
 }
 ```
 
@@ -291,6 +292,12 @@ the per-flow log of the netfilter content-filter system extension
 - Coverage: the stream has its own coverage spans (`source: "netfilter"`).
   Its end does not stop the watcher; `status` then shows `netfilter_error`.
   The digest window's gaps still come from the ALF spans only.
+- Reconciliation: the stream also carries the extension's enforcement
+  actions (category `action`, same sender check). Every kill, block or
+  unblock the extension applied must follow a journaled intent in
+  `netfilter_journal_dir` (required absolute path) from the same actor and
+  target, at most two minutes earlier. Otherwise the watcher journals a
+  `reconcile_mismatch` alarm. Refused actions never alarm.
 - Capacity: netfilter events share `max_entries` and `max_state_bytes` with
   ALF and nettop events. Every new destination of an app is a new item, so
   raise both before enabling the source. When the shared cap evicts ALF
@@ -469,6 +476,8 @@ mac-firewall netfilter kill    --journal-dir DIR --protect-list FILE --app-binar
 mac-firewall netfilter block   ... --actor A --reason R [--app P] [--host H] [--port N] --for 30m
 mac-firewall netfilter unblock ... --actor A --rule ID
 mac-firewall netfilter reported --journal-dir DIR --actor A --ref SEQ --event EVENT_ID
+mac-firewall netfilter alarm   --journal-dir DIR --actor A --reason R [--app P] [--host H] [--port N]
+mac-firewall netfilter warning --journal-dir DIR --actor A --reason R [--app P] [--host H] [--port N]
 mac-firewall netfilter list    --app-binary PATH --actor A
 mac-firewall netfilter status  --journal-dir DIR --app-binary PATH
 ```
@@ -488,6 +497,9 @@ mac-firewall netfilter status  --journal-dir DIR --app-binary PATH
      operator posts it with its own identity and then runs `reported`,
      which journals `report_done`. If the post fails, the kill stands and
      the report stays pending.
+- `alarm` and `warning` only journal the operator's detections (D7: "the
+  alarm must fall into the journal"). They act on nothing.
+- Hosts are journaled lowercased, as the extension reports them.
 - Blocks drop new matching flows until the expiry (at most 24 h, in memory
   only: an extension restart clears them). `unblock` removes one early.
 - Journal (`internal/security/journal`): a ring of 10,000 entries of at most

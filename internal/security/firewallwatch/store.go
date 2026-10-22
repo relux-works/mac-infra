@@ -178,7 +178,7 @@ func (s *Store) validateState() error {
 			return bad()
 		}
 	}
-	if len(st.NettopError) > 1024 {
+	if len(st.NettopError) > 1024 || len(st.NetfilterError) > 1024 {
 		return bad()
 	}
 	for _, v := range st.Coverage {

@@ -6,14 +6,15 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // SourceNetfilter names items, events and coverage spans that come from the
 // netfilter content-filter system extension (apps/netfilter).
 const SourceNetfilter = "netfilter"
 
-// NetfilterPredicate selects the extension's per-flow log lines.
-const NetfilterPredicate = `subsystem == "works.relux.mac-infra.netfilter" AND category == "flow"`
+// NetfilterPredicate selects the extension's per-flow and action log lines.
+const NetfilterPredicate = `subsystem == "works.relux.mac-infra.netfilter" AND (category == "flow" OR category == "action")`
 
 // netfilterSender is the only process image allowed to produce flow lines:
 // the installed system extension. Any local process can log under any
@@ -61,34 +62,66 @@ type netfilterEvent struct {
 func boundedText(p *string, limit int) bool { return p == nil || persistedText(*p, limit) }
 func validPort(p *int) bool                 { return p == nil || (*p >= 1 && *p <= 65535) }
 
+// NetfilterAction is one enforcement action the extension logged (category
+// "action"): what it applied or refused, for reconciliation with the journal.
+type NetfilterAction struct {
+	TS     time.Time `json:"ts"`
+	Op     string    `json:"op"`
+	Actor  string    `json:"actor"`
+	OK     bool      `json:"ok"`
+	Killed int       `json:"killed"`
+	RuleID string    `json:"rule_id"`
+	FlowID string    `json:"flow_id"`
+	Target *struct {
+		App  string `json:"app"`
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	} `json:"target"`
+}
+
 // Parse returns the Item for one ndjson record, or nil when the record is not
 // a flow line of the installed extension or fails validation.
 func (p *NetfilterParser) Parse(line []byte) *Item {
+	it, _ := p.ParseRecord(line)
+	return it
+}
+
+// ParseRecord returns a flow Item or an action of the installed extension.
+// Both categories pass the same sender check.
+func (p *NetfilterParser) ParseRecord(line []byte) (*Item, *NetfilterAction) {
 	var r netfilterRecord
 	if len(line) > LineLimit || json.Unmarshal(line, &r) != nil {
 		p.Invalid++
-		return nil
+		return nil, nil
 	}
-	if r.Subsystem != "works.relux.mac-infra.netfilter" || r.Category != "flow" {
-		return nil
+	if r.Subsystem != "works.relux.mac-infra.netfilter" || (r.Category != "flow" && r.Category != "action") {
+		return nil, nil
 	}
 	if !netfilterSender.MatchString(r.ProcessImagePath) || r.SenderImagePath != r.ProcessImagePath || r.UserID == nil || *r.UserID != 0 {
 		p.RejectedSender++
-		return nil
+		return nil, nil
+	}
+	if r.Category == "action" {
+		var a NetfilterAction
+		if json.Unmarshal([]byte(r.EventMessage), &a) != nil || a.Op == "" || a.TS.IsZero() || len(a.Actor) > 128 || len(a.RuleID) > 64 || len(a.FlowID) > 64 {
+			p.Invalid++
+			return nil, nil
+		}
+		return nil, &a
 	}
 	var e netfilterEvent
 	d := json.NewDecoder(bytes.NewReader([]byte(r.EventMessage)))
 	d.DisallowUnknownFields()
 	if d.Decode(&e) != nil || d.More() {
 		p.Invalid++
-		return nil
+		return nil, nil
 	}
 	it, ok := netfilterItem(e)
 	if !ok {
 		p.Invalid++
-		return nil
+		return nil, nil
 	}
-	return &it
+	return &it, nil
 }
 
 func netfilterItem(e netfilterEvent) (Item, bool) {

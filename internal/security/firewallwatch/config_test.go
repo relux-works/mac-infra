@@ -18,7 +18,7 @@ func testConfig(t *testing.T) Config {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	netfilterSource := false
-	return Config{Schema: "mac-infra.firewall-watch/v1", StateDir: filepath.Join(dir, "state"), MaxEntries: 20, RetentionDays: 7, NettopInterval: "5s", DenySpikeCount: 3, DenySpikeWindow: "1m", K: 1, NoveltySimilarity: &threshold, ClassifierTimeout: "1s", LlamaServer: "/not/a/real/llama-server", Model: filepath.Join(dir, "model"), ModelSHA256: strings.Repeat("0", 64), LabelledPool: filepath.Join(dir, "pool.jsonl"), SaveInterval: "10s", SignerFailureTTL: "1s", MaxStateBytes: 16 << 20, MaxModelBytes: 2 << 30, NetfilterSource: &netfilterSource}
+	return Config{Schema: "mac-infra.firewall-watch/v1", StateDir: filepath.Join(dir, "state"), MaxEntries: 20, RetentionDays: 7, NettopInterval: "5s", DenySpikeCount: 3, DenySpikeWindow: "1m", K: 1, NoveltySimilarity: &threshold, ClassifierTimeout: "1s", LlamaServer: "/not/a/real/llama-server", Model: filepath.Join(dir, "model"), ModelSHA256: strings.Repeat("0", 64), LabelledPool: filepath.Join(dir, "pool.jsonl"), SaveInterval: "10s", SignerFailureTTL: "1s", MaxStateBytes: 16 << 20, MaxModelBytes: 2 << 30, NetfilterSource: &netfilterSource, NetfilterJournalDir: "/private/tmp/netfilter-journal-unused"}
 }
 
 // Valid explicit configuration is admitted; each missing/unknown/unsafe value

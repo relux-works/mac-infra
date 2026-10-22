@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/relux-works/mac-infra/internal/security/journal"
 	"io"
 	"os"
 	"os/exec"
@@ -236,7 +237,11 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 	// not stop the watcher: ALF and nettop continue, the stream's coverage
 	// ends, and health reports netfilter_error.
 	var netLines chan []byte
+	var netJournal *journal.Journal
 	if *c.NetfilterSource {
+		if netJournal, e = journal.Open(c.NetfilterJournalDir, journal.Capacity); e != nil {
+			return fmt.Errorf("netfilter journal: %w", e)
+		}
 		netCmd := collectorCommand(childCtx, SourceNetfilter)
 		netPipe, e := netCmd.StdoutPipe()
 		if e != nil {
@@ -346,8 +351,14 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 			}
 			s.dirty = true
 			emitted := false
-			if it := s.State.Netfilter.Parse(line); it != nil {
+			it, action := s.State.Netfilter.ParseRecord(line)
+			if it != nil {
 				emitted = collect(*it)
+			}
+			if action != nil {
+				if _, err := ReconcileAction(netJournal, *action, time.Now()); err != nil {
+					s.State.NetfilterError = "reconcile: " + Sanitize(err.Error())
+				}
 			}
 			if e = flush(emitted); e != nil {
 				return e

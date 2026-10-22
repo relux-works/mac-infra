@@ -35,6 +35,9 @@ type Config struct {
 	// NetfilterSource enables the netfilter content-filter stream as a third
 	// collector source. Required: there is no implicit default.
 	NetfilterSource *bool `json:"netfilter_source"`
+	// NetfilterJournalDir is the incident journal the watcher reconciles the
+	// extension's enforcement actions against (internal/security/journal).
+	NetfilterJournalDir string `json:"netfilter_journal_dir"`
 }
 
 func ownedRegular(f *os.File) error {
@@ -79,7 +82,7 @@ func (c Config) Validate() error {
 	if c.Schema != "mac-infra.firewall-watch/v1" || c.MaxStateBytes < 1 || c.MaxStateBytes > 1<<30 || c.MaxModelBytes < 1 || c.MaxModelBytes > 1<<40 || c.MaxEntries < 1 || c.MaxEntries > 100000 || c.RetentionDays > 3650 || c.RetentionDays < 1 || c.DenySpikeCount < 1 || c.K < 1 || c.NoveltySimilarity == nil || math.IsNaN(*c.NoveltySimilarity) || *c.NoveltySimilarity <= 0 || *c.NoveltySimilarity > 1 || c.NetfilterSource == nil {
 		return errors.New("missing or invalid required config field")
 	}
-	for _, p := range []string{c.StateDir, c.LlamaServer, c.Model, c.LabelledPool} {
+	for _, p := range []string{c.StateDir, c.LlamaServer, c.Model, c.LabelledPool, c.NetfilterJournalDir} {
 		if !filepath.IsAbs(p) {
 			return errors.New("all paths must be absolute")
 		}

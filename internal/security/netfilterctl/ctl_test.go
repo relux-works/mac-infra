@@ -230,3 +230,24 @@ func TestReported(t *testing.T) {
 		t.Fatal("second close accepted")
 	}
 }
+
+// alarm and warning are journal-only: no protect-list or app is involved,
+// a reason is required, and they refuse kill-only fields. Hosts are journaled
+// lowercased, as the extension reports them, so reconciliation matches.
+func TestAlarmAndHostCase(t *testing.T) {
+	p, j := setup(t)
+	res := Execute(context.Background(), Request{Op: "alarm", Actor: "sysadmin", Reason: "danger:unsigned-to-new-host", Target: Target{App: "/tmp/evil", Host: "Bad.Example"}}, ProtectList{}, j, nil, fixedNow)
+	if !res.OK || res.Outcome.Kind != "alarm" || res.Outcome.Target != "app=/tmp/evil host=bad.example" {
+		t.Fatalf("alarm: %+v", res)
+	}
+	for _, r := range []Request{{Op: "warning", Actor: "a"}, {Op: "alarm", Actor: "a", Reason: "r", FlowID: "F"}} {
+		if Execute(context.Background(), r, ProtectList{}, j, nil, fixedNow).OK {
+			t.Errorf("accepted %+v", r)
+		}
+	}
+	app := &fakeApp{out: `{"ok":true,"killed":[]}`}
+	k := Execute(context.Background(), Request{Op: "kill", Actor: "a", Reason: "r", Target: Target{Host: "MIXED.Case.example"}}, p, j, app.run, fixedNow)
+	if !k.OK || k.Intent.Target != "host=mixed.case.example" || app.calls[0][4] != "mixed.case.example" {
+		t.Fatalf("host case: %+v %v", k.Intent, app.calls)
+	}
+}

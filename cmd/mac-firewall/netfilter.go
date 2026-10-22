@@ -20,6 +20,7 @@ mac-firewall netfilter kill    --journal-dir DIR --protect-list FILE --app-binar
 mac-firewall netfilter block   --journal-dir DIR --protect-list FILE --app-binary PATH --actor A --reason R [--app P] [--host H] [--port N] --for DUR
 mac-firewall netfilter unblock --journal-dir DIR --protect-list FILE --app-binary PATH --actor A --rule ID
 mac-firewall netfilter reported --journal-dir DIR --actor A --ref SEQ --event EVENT_ID
+mac-firewall netfilter alarm|warning --journal-dir DIR --actor A --reason R [--app P] [--host H] [--port N]
 mac-firewall netfilter list    --app-binary PATH --actor A
 mac-firewall netfilter status  --journal-dir DIR --app-binary PATH
 
@@ -128,6 +129,21 @@ func runNetfilter(args []string, out, errOut io.Writer) int {
 			return printJSON(netfilterctl.Result{Error: "journal: " + err.Error()}, false)
 		}
 		res := netfilterctl.Execute(context.Background(), req, protect, j, netfilterRun(*appBin), time.Now)
+		return printJSON(res, res.OK)
+	case "alarm", "warning":
+		if !need(*journalDir, *actor, *reason) {
+			return 2
+		}
+		req := netfilterctl.Request{Op: op, Actor: *actor, Reason: *reason, FlowID: *flow, Target: netfilterctl.Target{App: *app, Host: *host, Port: *port}, Duration: *dur, RuleID: *rule}
+		if err := req.Validate(); err != nil {
+			fmt.Fprintln(errOut, err)
+			return 2
+		}
+		j, err := openJournal()
+		if err != nil {
+			return printJSON(netfilterctl.Result{Error: "journal: " + err.Error()}, false)
+		}
+		res := netfilterctl.Execute(context.Background(), req, netfilterctl.ProtectList{}, j, nil, time.Now)
 		return printJSON(res, res.OK)
 	case "reported":
 		if !need(*journalDir, *actor, *event) || *ref == 0 {
