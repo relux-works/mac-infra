@@ -77,6 +77,9 @@ user and needs no extra entitlement.
   `NEMachServiceName = $(TeamIdentifierPrefix)works.relux.mac-infra.netfilter.extension`,
   `NEProviderClasses = { com.apple.networkextension.filter-data =
   $(PRODUCT_MODULE_NAME).FilterDataProvider }`.
+- Both `Info.plist` files carry `NSSystemExtensionUsageDescription`. For the
+  network_extension category it is required: without it the first owner
+  activation failed with OSSystemExtensionErrorDomain 9.
 - Development profiles use `content-filter-provider`. A Developer ID build
   would need `content-filter-provider-systemextension`, which is out of
   scope.
