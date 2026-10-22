@@ -263,9 +263,38 @@ refused. The former `port` field is removed and refused as unknown.
   "llama_server": "/opt/homebrew/bin/llama-server",
   "model": "/ABSOLUTE/Qwen3-Embedding-0.6B-Q8_0.gguf",
   "model_sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
-  "labelled_pool": "/ABSOLUTE/fixtures-v1.jsonl"
+  "labelled_pool": "/ABSOLUTE/fixtures-v1.jsonl",
+  "netfilter_source": false
 }
 ```
+
+`netfilter_source` (required boolean) adds a third collector source to `run`:
+the per-flow log of the netfilter content-filter system extension
+(`apps/netfilter`).
+- Input: the watcher reads `log stream --style ndjson --level info` for subsystem
+  `works.relux.mac-infra.netfilter`, category `flow`.
+- Sender check: any process can log under that name, so a line is accepted
+  only when logd records its process and sender image as the installed
+  extension under `/Library/SystemExtensions/<UUID>/` and the sender runs as
+  root. Other lines count as `netfilter_rejected_sender` in `status`.
+- Parsing: event JSON with unknown keys, bad enums, out-of-range ports, invalid
+  hostnames or unbounded text counts as `netfilter_invalid` and is dropped.
+- Item mapping: direction becomes the kind; the app path (else signing id)
+  becomes the app; the signing facts become the signer (`Apple`,
+  `Team: <ID>`, `ad-hoc`, `unsigned`, `unknown`).
+- Destination: a named flow to a public address is `internet`, and its bucket
+  is the registrable name; a bare public IP is `internet-raw-ip`.
+- Dedup: the destination is part of a netfilter item's dedup key, so a new
+  destination for an app is a new item. Events keep `kind` and `host`.
+- Rule: netfilter ad-hoc or unsigned outbound flows to the internet trigger
+  `policy_unsigned_outbound`.
+- Coverage: the stream has its own coverage spans (`source: "netfilter"`).
+  Its end does not stop the watcher; `status` then shows `netfilter_error`.
+  The digest window's gaps still come from the ALF spans only.
+- Capacity: netfilter events share `max_entries` and `max_state_bytes` with
+  ALF and nettop events. Every new destination of an app is a new item, so
+  raise both before enabling the source. When the shared cap evicts ALF
+  events, the digest window reports it (`evicted_through`, `truncated`).
 
 `max_entries` independently caps dedup entries, signature cache entries, and
 retained events in total across all daily files. Dedup/events also expire by

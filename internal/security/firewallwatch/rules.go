@@ -52,6 +52,8 @@ func Rules(it Item) (decision Decision, fired bool) {
 		return Decision{Label: "decide", Reason: "policy_torrent"}, true
 	case it.Kind == "outbound" && it.Signer == "Apple" && has("calculator.app", "textedit.app", "preview.app", "chess.app", "stickies.app"):
 		return Decision{Label: "decide", Reason: "policy_non_network_app"}, true
+	case it.Source == SourceNetfilter && it.Kind == "outbound" && strings.HasPrefix(it.Remote, "internet") && (signer == "unsigned" || signer == "ad-hoc"):
+		return Decision{Label: "decide", Reason: "policy_unsigned_outbound"}, true
 	case it.RemotePort != nil && map[int]bool{4444: true, 6667: true, 1337: true, 31337: true, 9001: true, 9050: true}[*it.RemotePort]:
 		return Decision{Label: "decide", Reason: "policy_unusual_port"}, true
 	case it.Signer == "Apple" && (strings.HasPrefix(app, "/system/") || strings.HasPrefix(app, "/usr/libexec/") || strings.HasPrefix(app, "/usr/sbin/") || strings.HasPrefix(app, "com.apple.")):

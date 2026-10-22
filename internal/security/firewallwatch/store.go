@@ -40,6 +40,8 @@ type State struct {
 	Events             []Event                `json:"events"`
 	Signers            map[string]SignerEntry `json:"signers"`
 	Parser             ALFParser              `json:"alf"`
+	Netfilter          NetfilterParser        `json:"netfilter"`
+	NetfilterError     string                 `json:"netfilter_error,omitempty"`
 	NettopUnrecognized uint64                 `json:"nettop_unrecognized"`
 	LastEvent          time.Time              `json:"last_event"`
 	BackendHealthy     bool                   `json:"backend_healthy"`
@@ -52,21 +54,31 @@ type State struct {
 	EvictedThrough time.Time `json:"evicted_through"`
 }
 
-// CoverageSpan is one interval in which a watcher ran and saved state.
+// CoverageSpan is one interval in which a watcher collected one source and
+// saved state. Source is empty for the ALF log (the original source) and
+// "netfilter" for the content-filter stream.
 type CoverageSpan struct {
-	Start time.Time `json:"start"`
-	End   time.Time `json:"end"`
+	Start  time.Time `json:"start"`
+	End    time.Time `json:"end"`
+	Source string    `json:"source,omitempty"`
 }
+
+// SourceCoverage tracks the open coverage span of one collector source. The
+// feeder goroutine reports stalls and the stream's end; Save applies them.
+type SourceCoverage struct {
+	source    string
+	covering  bool
+	mu        sync.Mutex
+	stalls    []CoverageSpan
+	stalledAt time.Time
+	endedAt   time.Time
+}
+
 type Store struct {
-	Config   Config
-	State    State
-	dirty    bool
-	covering bool
-	// Collector observations from the feeder goroutine, applied by Save.
-	coverageMu    sync.Mutex
-	stalls        []CoverageSpan
-	stalledAt     time.Time
-	endedAt       time.Time
+	Config        Config
+	State         State
+	dirty         bool
+	coverage      map[string]*SourceCoverage
 	lastSave      time.Time
 	dayHashes     map[string][32]byte
 	atomicWrite   func(string, []byte) error
@@ -170,12 +182,12 @@ func (s *Store) validateState() error {
 		return bad()
 	}
 	for _, v := range st.Coverage {
-		if v.Start.IsZero() || v.End.Before(v.Start) {
+		if v.Start.IsZero() || v.End.Before(v.Start) || (v.Source != "" && v.Source != SourceNetfilter) {
 			return bad()
 		}
 	}
 	for _, v := range st.Events {
-		if v.TS.IsZero() || !validLabel(v.Label) || v.Mode != "shadow" || (v.Source != "alf" && v.Source != "nettop") || !persistedText(v.App, 1024) || !persistedText(v.Signer, 1024) || len(v.Verdict) > 128 || len(v.RemoteClass) > 128 || len(v.Bucket) > 128 || v.Counts == 0 || v.Counts > math.MaxInt64 || (v.Port != nil && (*v.Port < 1 || *v.Port > 65535)) {
+		if v.TS.IsZero() || !validLabel(v.Label) || v.Mode != "shadow" || (v.Source != "alf" && v.Source != "nettop" && v.Source != SourceNetfilter) || !persistedText(v.App, 1024) || !persistedText(v.Signer, 1024) || len(v.Verdict) > 128 || len(v.RemoteClass) > 128 || len(v.Bucket) > 128 || len(v.Kind) > 16 || len(v.Host) > 253 || (v.Host != "" && !hostnamePattern.MatchString(v.Host)) || v.Counts == 0 || v.Counts > math.MaxInt64 || (v.Port != nil && (*v.Port < 1 || *v.Port > 65535)) {
 			return bad()
 		}
 		b, e := json.Marshal(v.Reason)
@@ -227,7 +239,13 @@ func key(it Item) string {
 	if port(it) != nil {
 		p = *port(it)
 	}
-	raw, _ := json.Marshal([]any{it.Source, it.App, it.Verdict, p, it.Remote})
+	parts := []any{it.Source, it.App, it.Verdict, p, it.Remote}
+	// A netfilter flow's destination is part of its identity, so a new
+	// destination for an app is a new item (novelty), not a repeat.
+	if it.Source == SourceNetfilter {
+		parts = append(parts, it.Kind, it.Bucket)
+	}
+	raw, _ := json.Marshal(parts)
 	return string(raw)
 }
 func cleanItem(it Item) Item { it.App = Sanitize(it.App); it.Signer = Sanitize(it.Signer); return it }
@@ -271,7 +289,10 @@ func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []
 				entry.Escalated = append(entry.Escalated, d.Reason)
 			}
 		}
-		event := Event{TS: now, Source: it.Source, App: it.App, Signer: it.Signer, Verdict: it.Verdict, Port: port(it), RemoteClass: it.Remote, Bucket: it.Bucket, Counts: entry.Count, Label: d.Label, Reason: d.Reason, Mode: "shadow"}
+		event := Event{TS: now, Source: it.Source, App: it.App, Signer: it.Signer, Verdict: it.Verdict, Port: port(it), RemoteClass: it.Remote, Bucket: it.Bucket, Host: it.Host, Counts: entry.Count, Label: d.Label, Reason: d.Reason, Mode: "shadow"}
+		if it.Source == SourceNetfilter {
+			event.Kind = it.Kind
+		}
 		if d.Reason == "knn" {
 			event.Reason = struct {
 				Kind       string      `json:"kind"`
@@ -394,63 +415,96 @@ func (s *Store) Flush(now time.Time, emitted, force bool) error {
 	return s.Save(now)
 }
 
-// BeginCoverage opens a coverage span for a running watcher; every later Save
+// Coverage returns the coverage tracker of one source ("" is the ALF log).
+func (s *Store) Coverage(source string) *SourceCoverage {
+	if s.coverage == nil {
+		s.coverage = map[string]*SourceCoverage{}
+	}
+	c, ok := s.coverage[source]
+	if !ok {
+		c = &SourceCoverage{source: source}
+		s.coverage[source] = c
+	}
+	return c
+}
+
+// BeginCoverage opens a coverage span for the ALF source; every later Save
 // extends it to the save time until EndCoverage.
-func (s *Store) BeginCoverage(now time.Time) {
-	s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: now, End: now})
-	s.covering = true
+func (s *Store) BeginCoverage(now time.Time) { s.BeginSourceCoverage("", now) }
+
+// StallCoverage, ResumeCoverage and EndCoverage report the ALF collector's
+// state; see the SourceCoverage methods.
+func (s *Store) StallCoverage(at time.Time)  { s.Coverage("").StallCoverage(at) }
+func (s *Store) ResumeCoverage(at time.Time) { s.Coverage("").ResumeCoverage(at) }
+func (s *Store) EndCoverage(at time.Time)    { s.Coverage("").EndCoverage(at) }
+
+// BeginSourceCoverage opens a coverage span for one source.
+func (s *Store) BeginSourceCoverage(source string, now time.Time) {
+	s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: now, End: now, Source: source})
+	s.Coverage(source).covering = true
 }
 
 // StallCoverage records that the collector's line queue is full from at: the
 // run loop is behind and the collector may block or drop lines, so the stall
 // is not coverage. Called from the feeder goroutine; the first open stall wins.
-func (s *Store) StallCoverage(at time.Time) {
-	s.coverageMu.Lock()
-	defer s.coverageMu.Unlock()
-	if s.stalledAt.IsZero() {
-		s.stalledAt = at
+func (c *SourceCoverage) StallCoverage(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stalledAt.IsZero() {
+		c.stalledAt = at
 	}
 }
 
 // ResumeCoverage closes an open stall; the next Save ends the span at the
 // stall's start and opens a new span at at.
-func (s *Store) ResumeCoverage(at time.Time) {
-	s.coverageMu.Lock()
-	defer s.coverageMu.Unlock()
-	if !s.stalledAt.IsZero() {
-		s.stalls = append(s.stalls, CoverageSpan{Start: s.stalledAt, End: at})
-		s.stalledAt = time.Time{}
+func (c *SourceCoverage) ResumeCoverage(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.stalledAt.IsZero() {
+		c.stalls = append(c.stalls, CoverageSpan{Start: c.stalledAt, End: at, Source: c.source})
+		c.stalledAt = time.Time{}
 	}
 }
 
 // EndCoverage records when collection stopped. It may be called from the
 // feeder goroutine while the run loop is still busy; the next Save caps the
 // span there and no later Save extends it. The first call wins.
-func (s *Store) EndCoverage(at time.Time) {
-	s.coverageMu.Lock()
-	defer s.coverageMu.Unlock()
-	if s.endedAt.IsZero() {
-		s.endedAt = at
+func (c *SourceCoverage) EndCoverage(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.endedAt.IsZero() {
+		c.endedAt = at
 	}
 }
 
-// extendCoverage applies collector observations to the open span at a save:
-// each closed stall ends the span at its start and opens a new one at its
-// end; the span then reaches now, but never past an open stall or the
-// collector's end.
-func (s *Store) extendCoverage(now time.Time) {
-	s.coverageMu.Lock()
-	stalls, stalledAt, endedAt := s.stalls, s.stalledAt, s.endedAt
-	s.stalls = nil
-	s.coverageMu.Unlock()
+// extendCoverage applies one source's collector observations to its open span
+// (the source's last span) at a save: each closed stall ends the span at its
+// start and opens a new one at its end; the span then reaches now, but never
+// past an open stall or the collector's end.
+func (s *Store) extendCoverage(c *SourceCoverage, now time.Time) {
+	c.mu.Lock()
+	stalls, stalledAt, endedAt := c.stalls, c.stalledAt, c.endedAt
+	c.stalls = nil
+	c.mu.Unlock()
+	open := -1
+	for i := len(s.State.Coverage) - 1; i >= 0; i-- {
+		if s.State.Coverage[i].Source == c.source {
+			open = i
+			break
+		}
+	}
+	if open < 0 {
+		return
+	}
 	extend := func(to time.Time) {
-		if last := &s.State.Coverage[len(s.State.Coverage)-1]; to.After(last.End) {
+		if last := &s.State.Coverage[open]; to.After(last.End) {
 			last.End = to
 		}
 	}
 	for _, stall := range stalls {
 		extend(stall.Start)
-		s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: stall.End, End: stall.End})
+		s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: stall.End, End: stall.End, Source: c.source})
+		open = len(s.State.Coverage) - 1
 	}
 	end := now
 	if !stalledAt.IsZero() && stalledAt.Before(end) {
@@ -460,7 +514,7 @@ func (s *Store) extendCoverage(now time.Time) {
 		if endedAt.Before(end) {
 			end = endedAt
 		}
-		s.covering = false
+		c.covering = false
 	}
 	extend(end)
 }
@@ -468,8 +522,10 @@ func (s *Store) Save(now time.Time) error {
 	if e := safeDir(s.Config.StateDir); e != nil {
 		return e
 	}
-	if s.covering && len(s.State.Coverage) > 0 {
-		s.extendCoverage(now)
+	for _, source := range sortedCoverageSources(s.coverage) {
+		if c := s.coverage[source]; c.covering {
+			s.extendCoverage(c, now)
+		}
 	}
 	s.prune(now)
 	s.State.Updated = now
@@ -589,8 +645,17 @@ func (s *Store) Digest(since time.Time) map[string]DigestGroup {
 	return result
 }
 func (s *Store) Status() map[string]any {
-	return map[string]any{"entries": len(s.State.Entries), "events": len(s.State.Events), "signer_cache": len(s.State.Signers), "last_event": s.State.LastEvent, "backend_healthy": s.State.BackendHealthy, "health_as_of": s.State.Updated, "unrecognized": s.State.Parser.Unrecognized + s.State.NettopUnrecognized, "invalid_json": s.State.Parser.Invalid, "unrecognized_samples": s.State.Parser.Samples, "nettop_error": s.State.NettopError, "mode": "shadow"}
+	return map[string]any{"entries": len(s.State.Entries), "events": len(s.State.Events), "signer_cache": len(s.State.Signers), "last_event": s.State.LastEvent, "backend_healthy": s.State.BackendHealthy, "health_as_of": s.State.Updated, "unrecognized": s.State.Parser.Unrecognized + s.State.NettopUnrecognized, "invalid_json": s.State.Parser.Invalid, "unrecognized_samples": s.State.Parser.Samples, "nettop_error": s.State.NettopError, "netfilter_invalid": s.State.Netfilter.Invalid, "netfilter_rejected_sender": s.State.Netfilter.RejectedSender, "netfilter_error": s.State.NetfilterError, "mode": "shadow"}
 }
 func (s *Store) String() string {
 	return fmt.Sprintf("%d entries, %d retained events", len(s.State.Entries), len(s.State.Events))
+}
+
+func sortedCoverageSources(m map[string]*SourceCoverage) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

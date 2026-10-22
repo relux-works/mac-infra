@@ -131,15 +131,21 @@ func (s *Store) Split(since, asOf time.Time) DigestSplit {
 	return split
 }
 
-// coverageGaps lists the parts of [since, asOf] covered by no recorded watcher
-// span. When a span reaches the window, the time after the last covered point
-// is a gap only if longer than nettop_interval + save_interval, the expected
+// coverageGaps lists the parts of [since, asOf] covered by no recorded ALF
+// watcher span (Source ""); other sources keep their own spans. When a span
+// reaches the window, the time after the last covered point is a gap only if
+// longer than nettop_interval + save_interval, the expected
 // save cadence of a live watcher (a save delayed longer only adds a spurious
 // gap). Without such a span the whole window is a gap whatever its length;
 // gaps between spans count whatever their length.
 func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 	gaps := []SplitGap{}
-	spans := append([]CoverageSpan(nil), s.State.Coverage...)
+	var spans []CoverageSpan
+	for _, span := range s.State.Coverage {
+		if span.Source == "" {
+			spans = append(spans, span)
+		}
+	}
 	sort.SliceStable(spans, func(i, j int) bool { return spans[i].Start.Before(spans[j].Start) })
 	cursor := since
 	touched := false

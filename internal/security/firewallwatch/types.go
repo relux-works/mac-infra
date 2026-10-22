@@ -23,7 +23,9 @@ type Item struct {
 	Label          string  `json:"label,omitempty"`
 	Source         string  `json:"source,omitempty"`
 	Bucket         string  `json:"bucket,omitempty"`
-	Spike          bool    `json:"-"`
+	// Host is the remote hostname of a netfilter flow (lowercase, no trailing dot).
+	Host  string `json:"host,omitempty"`
+	Spike bool   `json:"-"`
 }
 
 type Neighbour struct {
@@ -44,10 +46,13 @@ type Event struct {
 	Port        *int      `json:"port"`
 	RemoteClass string    `json:"remote_class"`
 	Bucket      string    `json:"bucket"`
-	Counts      uint64    `json:"counts"`
-	Label       string    `json:"proposed_label"`
-	Reason      any       `json:"reason"`
-	Mode        string    `json:"mode"`
+	// Kind (direction) and Host are set for netfilter events only.
+	Kind   string `json:"kind,omitempty"`
+	Host   string `json:"host,omitempty"`
+	Counts uint64 `json:"counts"`
+	Label  string `json:"proposed_label"`
+	Reason any    `json:"reason"`
+	Mode   string `json:"mode"`
 }
 
 const Instruction = "Instruct: Classify a macOS firewall event as routine noise, digest-worthy, or needing an allow/deny decision\nQuery: "
@@ -57,6 +62,9 @@ func Render(it Item) string {
 	it = cleanItem(it)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s flow; app=%q; signer=%q; verdict=%s; remote=%s", it.Kind, it.App, it.Signer, it.Verdict, it.Remote)
+	if it.Host != "" {
+		fmt.Fprintf(&b, "; host=%q", it.Host)
+	}
 	if it.LocalPort != nil {
 		fmt.Fprintf(&b, "; local_port=%d", *it.LocalPort)
 	}

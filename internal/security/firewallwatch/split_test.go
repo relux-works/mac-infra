@@ -230,7 +230,7 @@ func TestCoverageSpans(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	want := []CoverageSpan{{at(0), at(2)}, {at(5), at(6)}}
+	want := []CoverageSpan{{Start: at(0), End: at(2)}, {Start: at(5), End: at(6)}}
 	if len(loaded.State.Coverage) != 2 || !loaded.State.Coverage[0].Start.Equal(want[0].Start) || !loaded.State.Coverage[0].End.Equal(want[0].End) || !loaded.State.Coverage[1].Start.Equal(want[1].Start) || !loaded.State.Coverage[1].End.Equal(want[1].End) {
 		t.Fatalf("coverage: %+v", loaded.State.Coverage)
 	}
@@ -238,11 +238,11 @@ func TestCoverageSpans(t *testing.T) {
 		t.Fatalf("restart gap: %+v", gaps)
 	}
 	cutoff := at(10).Add(-time.Duration(c.RetentionDays) * 24 * time.Hour)
-	loaded.State.Coverage = append([]CoverageSpan{{cutoff.Add(-2 * time.Hour), cutoff.Add(-time.Hour)}}, loaded.State.Coverage...)
+	loaded.State.Coverage = append([]CoverageSpan{{Start: cutoff.Add(-2 * time.Hour), End: cutoff.Add(-time.Hour)}}, loaded.State.Coverage...)
 	if e = loaded.Save(at(10)); e != nil || len(loaded.State.Coverage) != 2 {
 		t.Fatalf("retention prune: %v %+v", e, loaded.State.Coverage)
 	}
-	for _, bad := range []CoverageSpan{{at(3), at(2)}, {time.Time{}, at(2)}} {
+	for _, bad := range []CoverageSpan{{Start: at(3), End: at(2)}, {Start: time.Time{}, End: at(2)}} {
 		loaded.State.Coverage = []CoverageSpan{bad}
 		if e = loaded.Save(at(11)); e == nil {
 			t.Fatalf("invalid span saved: %+v", bad)
@@ -443,9 +443,10 @@ func TestFeedLinesBackpressureGap(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("no stall reported while the queue is full")
 	}
-	s.coverageMu.Lock()
-	endSeen := !s.endedAt.IsZero()
-	s.coverageMu.Unlock()
+	alf := s.Coverage("")
+	alf.mu.Lock()
+	endSeen := !alf.endedAt.IsZero()
+	alf.mu.Unlock()
 	if endSeen {
 		t.Fatal("feeder saw the collector's end through a full queue")
 	}
@@ -514,14 +515,14 @@ func TestFeedLinesBackpressureGap(t *testing.T) {
 		for len(liveLines) < cap(liveLines) {
 			time.Sleep(time.Millisecond)
 		}
-		live.coverageMu.Lock()
-		stalled := !live.stalledAt.IsZero()
-		live.coverageMu.Unlock()
+		live.Coverage("").mu.Lock()
+		stalled := !live.Coverage("").stalledAt.IsZero()
+		live.Coverage("").mu.Unlock()
 		for !stalled {
 			time.Sleep(time.Millisecond)
-			live.coverageMu.Lock()
-			stalled = !live.stalledAt.IsZero()
-			live.coverageMu.Unlock()
+			live.Coverage("").mu.Lock()
+			stalled = !live.Coverage("").stalledAt.IsZero()
+			live.Coverage("").mu.Unlock()
 		}
 		resumeStalled <- struct{}{}
 	}()

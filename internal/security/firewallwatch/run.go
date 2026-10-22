@@ -65,6 +65,8 @@ func collectorCommand(ctx context.Context, name string) *exec.Cmd {
 		cmd = exec.CommandContext(ctx, "/usr/bin/log", "stream", "--style", "ndjson", "--info", "--predicate", `subsystem == "com.apple.ALF.ApplicationFirewall"`)
 	case "nettop":
 		cmd = exec.CommandContext(ctx, "/usr/bin/nettop", "-L", "1", "-n", "-x", "-J", "bytes_out")
+	case SourceNetfilter:
+		cmd = exec.CommandContext(ctx, "/usr/bin/log", "stream", "--style", "ndjson", "--level", "info", "--predicate", NetfilterPredicate)
 	}
 	cmd.Env = append([]string{}, childEnv...)
 	return cmd
@@ -230,13 +232,36 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 	scanDone := make(chan error, 1)
 	go func() { scanDone <- feedLines(childCtx, pipe, lines, s) }()
 	defer func() { cancel(); pipe.Close(); _ = cmd.Wait(); <-scanDone }()
+	// The netfilter stream is optional (config netfilter_source). Its end does
+	// not stop the watcher: ALF and nettop continue, the stream's coverage
+	// ends, and health reports netfilter_error.
+	var netLines chan []byte
+	if *c.NetfilterSource {
+		netCmd := collectorCommand(childCtx, SourceNetfilter)
+		netPipe, e := netCmd.StdoutPipe()
+		if e != nil {
+			return e
+		}
+		if e = netCmd.Start(); e != nil {
+			return e
+		}
+		netLines = make(chan []byte, 64)
+		netDone := make(chan error, 1)
+		go func() { netDone <- feedLines(childCtx, netPipe, netLines, s.Coverage(SourceNetfilter)) }()
+		defer func() { cancel(); netPipe.Close(); _ = netCmd.Wait(); <-netDone }()
+		s.BeginSourceCoverage(SourceNetfilter, time.Now())
+		s.State.NetfilterError = ""
+	}
 	classify := func(it Item) Decision { return cl.Classify(ctx, it) }
 	collect := func(it Item) bool {
 		path := it.InspectionPath
 		if path == "" {
 			path = it.App
 		}
-		it.Signer = s.signer(ctx, path)
+		// Netfilter items carry the extension's verified signing facts.
+		if it.Source != SourceNetfilter {
+			it.Signer = s.signer(ctx, path)
+		}
 		return len(s.Observe(it, time.Now(), classify)) > 0
 	}
 	// Collection is live from here; a stop or crash ends the span at the last save.
@@ -305,6 +330,23 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 			s.dirty = true
 			emitted := false
 			if it := s.State.Parser.Parse(line); it != nil {
+				emitted = collect(*it)
+			}
+			if e = flush(emitted); e != nil {
+				return e
+			}
+		case line, ok := <-netLines:
+			if !ok {
+				netLines = nil
+				s.State.NetfilterError = "netfilter log stream ended"
+				if e = save(); e != nil {
+					return e
+				}
+				continue
+			}
+			s.dirty = true
+			emitted := false
+			if it := s.State.Netfilter.Parse(line); it != nil {
 				emitted = collect(*it)
 			}
 			if e = flush(emitted); e != nil {
