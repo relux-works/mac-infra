@@ -85,8 +85,8 @@ func TestNetfilterSignerAndApp(t *testing.T) {
 	}
 }
 
-// Destination classes: a bare public IP is internet-raw-ip with an address
-// bucket; loopback stays loopback; a multi-tun fake-ip address with a name is
+// Destination classes: a bare public IP, also one given as the "hostname",
+// is internet-raw-ip with an address bucket; loopback stays loopback; a multi-tun fake-ip address with a name is
 // internet bucketed by name; a scoped IPv6 address parses.
 func TestNetfilterRemoteClass(t *testing.T) {
 	for _, tc := range []struct {
@@ -98,6 +98,7 @@ func TestNetfilterRemoteClass(t *testing.T) {
 		{"198.18.0.7", "www.bbc.co.uk", "internet", "bbc.co.uk"},
 		{"fe80::1%en0", nil, "lan", "fe80::/64"},
 		{nil, nil, "internet-raw-ip", "unknown"},
+		{"1.2.3.4", "1.2.3.4", "internet-raw-ip", "1.2.3.0/24"},
 	} {
 		var p NetfilterParser
 		it := p.Parse(nfLine(t, nfEvent(map[string]any{"remote_host": tc.host, "remote_hostname": tc.name}), nil))

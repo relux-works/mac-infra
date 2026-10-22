@@ -112,7 +112,10 @@ func netfilterItem(e netfilterEvent) (Item, bool) {
 	host := ""
 	if e.RemoteHostname != nil {
 		host = strings.ToLower(strings.TrimSuffix(*e.RemoteHostname, "."))
-		if len(host) > 253 || !hostnamePattern.MatchString(host) {
+		if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+			// An app that "connects by name" to an IP literal has no name.
+			host = ""
+		} else if len(host) > 253 || !hostnamePattern.MatchString(host) {
 			return Item{}, false
 		}
 	}
