@@ -3,7 +3,7 @@ import NetworkExtension
 import SystemExtensions
 
 let extensionID = "works.relux.mac-infra.netfilter.extension"
-let usage = "usage: NetFilterProto activate|deactivate|enable|disable|remove|status"
+let usage = "usage: NetFilter activate|deactivate|enable|disable|remove|status"
 
 func finish(_ line: String, code: Int32) -> Never {
     print(line)
@@ -84,7 +84,7 @@ func enableFilter() {
         config.filterPackets = false
         config.filterBrowsers = false
         manager.providerConfiguration = config
-        manager.localizedDescription = "NetFilterProto (observe-only flow logger)"
+        manager.localizedDescription = "mac-infra NetFilter (observe-only flow logger)"
         manager.isEnabled = true
         save(manager, verb: "enable", okLine: "enable: ok (filter configuration saved, isEnabled=true)")
     }

@@ -1,4 +1,4 @@
-name: NetFilterProto
+name: NetFilter
 options:
   bundleIdPrefix: works.relux.mac-infra
   deploymentTarget:
@@ -11,7 +11,7 @@ settings:
     DEVELOPMENT_TEAM: "$(inherited)"
     ENABLE_HARDENED_RUNTIME: YES
 targets:
-  NetFilterProto:
+  NetFilter:
     type: application
     platform: macOS
     sources:
@@ -19,9 +19,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: works.relux.mac-infra.netfilter
-        PRODUCT_NAME: NetFilterProto
+        PRODUCT_NAME: NetFilter
         INFOPLIST_FILE: App/Info.plist
-        CODE_SIGN_ENTITLEMENTS: App/NetFilterProto.entitlements
+        CODE_SIGN_ENTITLEMENTS: App/NetFilter.entitlements
         GENERATE_INFOPLIST_FILE: NO
     dependencies:
       - target: NetFilterExtension
@@ -44,7 +44,7 @@ targets:
         OTHER_LDFLAGS: "-lbsm"
         PRODUCT_MODULE_NAME: NetFilterExtension
 schemes:
-  NetFilterProto:
+  NetFilter:
     build:
       targets:
-        NetFilterProto: all
+        NetFilter: all

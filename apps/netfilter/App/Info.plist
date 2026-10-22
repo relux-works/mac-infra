@@ -23,6 +23,6 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSSystemExtensionUsageDescription</key>
-	<string>NetFilterProto installs an observe-only network content filter that logs outbound connections per app. It never blocks traffic.</string>
+	<string>NetFilter installs an observe-only network content filter that logs outbound connections per app. It never blocks traffic.</string>
 </dict>
 </plist>

@@ -1,16 +1,16 @@
-# netfilter prototype: design note
+# netfilter: design note
 
-Status: **prototype, not a release.** It is an observe-only per-app outbound
-visibility probe ("own Little Snitch"), built at the owner's request on
-2026-10-22. The scope is cut to the smallest thing that proves it: one
-containing app, one content-filter system extension, allow-all, flows logged
-as JSON lines, a build and one manual run.
+Status: **maintained tool** (owner decision 2026-10-23: "доделываем его до
+ума"), observe-only by default. It started on 2026-10-22 as a per-app outbound
+visibility prototype ("own Little Snitch"). The decision specs (owner quotes,
+architecture, kill path, journal, digest contract) are board resources of
+STORY-261023-qbc86k; this note describes what is built.
 
 ## Shape
 
 | Part | What it is |
 | --- | --- |
-| `NetFilterProto.app` | Containing app. It has no UI and runs from a terminal: `Contents/MacOS/NetFilterProto <command>`. It must run from `/Applications`. |
+| `NetFilter.app` | Containing app. It has no UI and runs from a terminal: `Contents/MacOS/NetFilter <command>`. It must run from `/Applications`. |
 | `works.relux.mac-infra.netfilter.extension.systemextension` | Embedded at `Contents/Library/SystemExtensions/`. It is an `NEFilterDataProvider` subclass. |
 | `tail-flows.sh OUT.jsonl` | Turns the extension's unified-log lines into one JSONL file, without sudo. |
 | `project.yml` | xcodegen spec. The generated `.xcodeproj` is not committed. |
@@ -78,7 +78,7 @@ an unattributed flow. The exception is limited as follows:
 - Only the Security framework reads files through it, to validate the code
   signature of the flow's program. The extension never opens files itself
   and writes nothing but unified-log lines.
-- It is a development-signing exception for this prototype. A Developer ID
+- It is a development-signing exception. A Developer ID
   or App Store build would have to revisit it, for example by moving the
   signature lookup into a separate helper process.
 
@@ -122,7 +122,7 @@ user and needs no extra entitlement.
 ## Owner steps (prepared, never triggered unattended)
 
 1. Copy the signed app to `/Applications`.
-2. Run `/Applications/NetFilterProto.app/Contents/MacOS/NetFilterProto activate`,
+2. Run `/Applications/NetFilter.app/Contents/MacOS/NetFilter activate`,
    then approve it in System Settings > General > Login Items & Extensions >
    Network Extensions.
 3. Run `… enable`, then answer "Allow" on the "would like to filter network
