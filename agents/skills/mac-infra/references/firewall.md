@@ -452,3 +452,46 @@ and private stdout/stderr log files before any manual installation. Launchd's
 stdout/stderr logs are separate from bounded event retention and need their
 own operator log rotation. No installation/load/start command is provided or
 executed by the watch CLI.
+
+## Netfilter kill path (operator CLI)
+
+The netfilter extension (`apps/netfilter`) observes by default. The kill path
+is narrow and journal-first; it is off until the owner installs the
+root-owned protect-list
+`/Library/Application Support/works.relux.mac-infra.netfilter/protect.json`
+(schema `mac-infra.netfilter-protect/v1`; each entry has exactly one of
+`app_path`, `app_path_prefix`, `signing_id`, `host_suffix`, plus a `reason`).
+The "danger" policy belongs to the operator (the local-sysadmin keeper). The
+classifier never kills on its own.
+
+```sh
+mac-firewall netfilter kill    --journal-dir DIR --protect-list FILE --app-binary /Applications/NetFilter.app/Contents/MacOS/NetFilter --actor A --reason R (--flow ID | [--app P] [--host H] [--port N])
+mac-firewall netfilter block   ... --actor A --reason R [--app P] [--host H] [--port N] --for 30m
+mac-firewall netfilter unblock ... --actor A --rule ID
+mac-firewall netfilter reported --journal-dir DIR --actor A --ref SEQ --event EVENT_ID
+mac-firewall netfilter list    --app-binary PATH --actor A
+mac-firewall netfilter status  --journal-dir DIR --app-binary PATH
+```
+
+- Every path is an explicit flag. Output is JSON. Exit 0 ok, 1 refused or
+  failed, 2 usage.
+- Order for kill, block and unblock:
+  1. Protect-list check: a missing or invalid list refuses; a protected
+     target refuses with nothing journaled or sent.
+  2. The intent is journaled and fsynced. If that write fails, nothing is
+     sent.
+  3. The signed app forwards the request to the extension over XPC.
+  4. The result is journaled.
+  5. For an applied kill or block, a `report_pending` entry is journaled
+     and `incident_ru` holds the Russian owner post: what, app, where, why,
+     who, undo, and the journal seq/hash as an external anchor. The
+     operator posts it with its own identity and then runs `reported`,
+     which journals `report_done`. If the post fails, the kill stands and
+     the report stays pending.
+- Blocks drop new matching flows until the expiry (at most 24 h, in memory
+  only: an extension restart clears them). `unblock` removes one early.
+- Journal (`internal/security/journal`): a ring of 10,000 entries of at most
+  1 KiB each (warnings, alarms, kills, blocks, undos and report state only,
+  never flows). It has monotonic seq numbers and a SHA-256 chain within the
+  window, an owner-only directory, and atomic compaction. `status` reports
+  `chain_ok`, the last seq/hash and `reports_pending`.

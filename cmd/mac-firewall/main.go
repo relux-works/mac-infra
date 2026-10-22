@@ -38,6 +38,7 @@ mac-firewall plan [--config PATH] [--json]
 mac-firewall apply [--config PATH] [--apply] [--json]
 mac-firewall init-config [--config PATH]
 mac-firewall watch run|digest|status|classify --config PATH (see watch help)
+mac-firewall netfilter kill|block|unblock|reported|list|status ... (see netfilter help)
 mac-firewall version
 
 Config: ~/.config/mac-infra/firewall.json (schema mac-infra.firewall/v1) unless --config is given.
@@ -61,6 +62,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return 0
 	case "watch":
 		return runWatch(args[1:], out, errOut)
+	case "netfilter":
+		return runNetfilter(args[1:], out, errOut)
 	case "status", "plan", "apply", "init-config":
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n%s\n", command, usage)

@@ -23,8 +23,9 @@ import (
 const Capacity = 10000
 
 // MaxEntryBytes bounds one canonical entry, so the journal stays below about
-// Capacity * MaxEntryBytes (5 MB) between compactions.
-const MaxEntryBytes = 512
+// Capacity * MaxEntryBytes (10 MB) between compactions. About 330 bytes of an
+// entry are keys, timestamps and the two hashes.
+const MaxEntryBytes = 1024
 
 // Kinds that may be journaled; anything else is refused.
 var kinds = map[string]bool{
