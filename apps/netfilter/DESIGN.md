@@ -91,7 +91,41 @@ extension runs as root inside an app sandbox, so its file would sit in root's
 container and need sudo to read. The unified log is readable by the admin
 user and needs no extra entitlement.
 
-## Signing
+## Kill path (owner decision D7; spec-kill-path.md)
+
+Observe-only stays the default. The kill path is narrow, journaled at the
+CLI, and off until the owner installs the protect-list.
+
+- **Protect-list**: `/Library/Application Support/works.relux.mac-infra.netfilter/protect.json`,
+  root-owned. Changing it needs sudo, i.e. the owner. Schema
+  `mac-infra.netfilter-protect/v1`; each entry has one matcher (`app_path`,
+  `app_path_prefix`, `signing_id` or `host_suffix`, matched on a label
+  boundary) and a `reason`. The extension rereads it at start and before
+  every kill or block. **Missing or invalid file = enforcement off**: every
+  flow is allowed at once (as in 0.2), and kill and block are refused.
+- **New flows** (`Shared/Enforcement.swift`, `Engine`):
+  - protected flows are allowed at once, never killable and never slowed;
+  - a flow that matches an active block is dropped;
+  - every other flow stays under data filtering. A callback comes after about
+    1 MiB per direction (`passWindow`), no payload is kept, and the flow sits
+    in a bounded table of 4096 entries (oldest evicted). A later kill can
+    then reach it with `update(flow, .drop())`, which only works on flows
+    still under data filtering.
+- **Control**: an XPC service on `NEMachServiceName`, with the code-signing
+  requirement "same team and identifier `works.relux.mac-infra.netfilter`".
+  Requests:
+  - `kill` (flow id, or app/host/port tuple);
+  - `block` (tuple plus duration, at most 24 h, in memory only: an extension
+    restart clears every block);
+  - `unblock`;
+  - `list`.
+  An actor is required. Drops run outside the state lock.
+- **Audit**: every applied or refused action goes to the unified log
+  (category `action`) for the watcher to reconcile with the journal.
+- **Fail-safe**: no protect-list, no control service, or no request means
+  nothing is blocked.
+
+
 
 - Development signing: Apple Development certificate plus development
   provisioning profiles for both bundle IDs, in a paid team the owner names.

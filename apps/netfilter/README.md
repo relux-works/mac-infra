@@ -57,6 +57,13 @@ extension uninstalls the extension.
 
 App commands: `activate`, `deactivate`, `enable`, `disable`, `remove`, `status`.
 
+Kill path (off until the root-owned protect-list exists; see DESIGN.md):
+`kill --actor A (--flow ID | [--app PATH|ID] [--host NAME|IP] [--port N])`,
+`block --actor A [--app …] [--host …] [--port N] --for SECONDS` (at most 24 h),
+`unblock --actor A --rule ID`, `list --actor A`. Each prints the extension's
+JSON answer and exits 0 only when it says ok. Operators use the journaled
+`mac-firewall netfilter` wrapper (in progress), not these commands directly.
+
 ## Output
 
 The extension logs one JSON object per flow to the unified log (subsystem

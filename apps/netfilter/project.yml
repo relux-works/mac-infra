@@ -16,6 +16,7 @@ targets:
     platform: macOS
     sources:
       - App
+      - path: Shared/Enforcement.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: works.relux.mac-infra.netfilter

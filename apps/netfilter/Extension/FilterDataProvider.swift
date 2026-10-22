@@ -25,7 +25,14 @@ private let isoFormatter: ISO8601DateFormatter = {
 
 class FilterDataProvider: NEFilterDataProvider {
 
+    /// Bytes a watched flow passes between two data callbacks: no payload is
+    /// kept, the callback only keeps the flow reachable for a kill.
+    static let passWindow = 1 << 20
+
     override func startFilter(completionHandler: @escaping (Error?) -> Void) {
+        EnforcementState.shared.provider = self
+        EnforcementState.shared.reloadProtectList()
+        ControlService.start()
         let settings = NEFilterSettings(rules: [], defaultAction: .filterData)
         apply(settings) { error in
             completionHandler(error)
@@ -37,13 +44,41 @@ class FilterDataProvider: NEFilterDataProvider {
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
-        if let json = Self.eventJSON(for: flow) {
+        let (json, facts) = Self.event(for: flow)
+        if let json {
             flowLogger.info("\(json, privacy: .public)")
         }
+        guard let socketFlow = flow as? NEFilterSocketFlow else { return .allow() }
+        switch EnforcementState.shared.decide(id: flow.identifier.uuidString, facts: facts, flow: socketFlow) {
+        case .allow:
+            return .allow()
+        case .drop(let rule):
+            EnforcementState.shared.logAction(["op": "blocked_new", "rule_id": rule.id, "flow_id": flow.identifier.uuidString, "app": facts.appPath ?? facts.signingID ?? "unknown", "host": facts.hostname ?? facts.remoteIP ?? "unknown", "ok": true])
+            return .drop()
+        case .watch:
+            return .filterDataVerdict(withFilterInbound: true, peekInboundBytes: 1, filterOutbound: true, peekOutboundBytes: 1)
+        }
+    }
+
+    override func handleInboundData(from flow: NEFilterFlow, readBytesStartOffset offset: Int, readBytes: Data) -> NEFilterDataVerdict {
+        NEFilterDataVerdict(passBytes: readBytes.count + Self.passWindow, peekBytes: 1)
+    }
+
+    override func handleOutboundData(from flow: NEFilterFlow, readBytesStartOffset offset: Int, readBytes: Data) -> NEFilterDataVerdict {
+        NEFilterDataVerdict(passBytes: readBytes.count + Self.passWindow, peekBytes: 1)
+    }
+
+    override func handleInboundDataComplete(for flow: NEFilterFlow) -> NEFilterDataVerdict {
+        EnforcementState.shared.closed(id: flow.identifier.uuidString)
         return .allow()
     }
 
-    private static func eventJSON(for flow: NEFilterFlow) -> String? {
+    override func handleOutboundDataComplete(for flow: NEFilterFlow) -> NEFilterDataVerdict {
+        EnforcementState.shared.closed(id: flow.identifier.uuidString)
+        return .allow()
+    }
+
+    private static func event(for flow: NEFilterFlow) -> (String?, FlowFacts) {
         let null = NSNull()
         let observedAt = Date()
         var event: [String: Any] = [:]
@@ -84,10 +119,14 @@ class FilterDataProvider: NEFilterDataProvider {
             event["via_process_path"] = resolve(auditToken: procToken, observedAt: observedAt).path ?? null
         }
 
+        let remoteHost = event["remote_host"] as? String
+        let isIP = remoteHost.map { IPv4Address($0) != nil || IPv6Address($0) != nil } ?? false
+        let facts = FlowFacts(appPath: app.path, signingID: app.signingID, hostname: event["remote_hostname"] as? String,
+                              remoteIP: isIP ? remoteHost : nil, remotePort: event["remote_port"] as? Int)
         guard JSONSerialization.isValidJSONObject(event),
               let data = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]) else {
-            return nil
+            return (nil, facts)
         }
-        return String(data: data, encoding: .utf8)
+        return (String(data: data, encoding: .utf8), facts)
     }
 }

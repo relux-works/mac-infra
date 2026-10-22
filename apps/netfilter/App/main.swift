@@ -3,7 +3,13 @@ import NetworkExtension
 import SystemExtensions
 
 let extensionID = "works.relux.mac-infra.netfilter.extension"
-let usage = "usage: NetFilter activate|deactivate|enable|disable|remove|status"
+let usage = """
+usage: NetFilter activate|deactivate|enable|disable|remove|status
+       NetFilter kill --actor A (--flow ID | [--app PATH|ID] [--host NAME|IP] [--port N])
+       NetFilter block --actor A [--app PATH|ID] [--host NAME|IP] [--port N] --for SECONDS
+       NetFilter unblock --actor A --rule ID
+       NetFilter list --actor A
+"""
 
 func finish(_ line: String, code: Int32) -> Never {
     print(line)
@@ -116,11 +122,78 @@ func status() {
     }
 }
 
-let args = CommandLine.arguments.dropFirst()
-guard args.count == 1, let command = args.first else {
+@objc protocol NetFilterControlXPC {
+    func handle(_ request: Data, reply: @escaping (Data) -> Void)
+}
+
+func usageExit() -> Never {
     FileHandle.standardError.write(Data((usage + "\n").utf8))
     exit(2)
 }
+
+/// Builds a control request from `--key value` options; any unknown, repeated
+/// or missing option is a usage error.
+func controlRequest(_ op: ControlRequest.Op, _ options: ArraySlice<String>) -> ControlRequest {
+    var values: [String: String] = [:]
+    var it = options.makeIterator()
+    while let key = it.next() {
+        guard ["--actor", "--flow", "--app", "--host", "--port", "--for", "--rule"].contains(key),
+              values[key] == nil, let value = it.next() else { usageExit() }
+        values[key] = value
+    }
+    guard let actor = values["--actor"] else { usageExit() }
+    var port: Int?
+    if let p = values["--port"] {
+        guard let n = Int(p) else { usageExit() }
+        port = n
+    }
+    let target = (values["--app"] != nil || values["--host"] != nil || port != nil)
+        ? Target(app: values["--app"], host: values["--host"], port: port) : nil
+    var duration: Double?
+    if let d = values["--for"] {
+        guard let n = Double(d) else { usageExit() }
+        duration = n
+    }
+    switch op {
+    case .kill: guard (values["--flow"] == nil) != (target == nil), duration == nil, values["--rule"] == nil else { usageExit() }
+    case .block: guard target != nil, duration != nil, values["--flow"] == nil, values["--rule"] == nil else { usageExit() }
+    case .unblock: guard values["--rule"] != nil, target == nil, duration == nil, values["--flow"] == nil else { usageExit() }
+    case .list: guard values.count == 1 else { usageExit() }
+    }
+    return ControlRequest(op: op, flowID: values["--flow"], target: target, durationSeconds: duration, ruleID: values["--rule"], actor: actor)
+}
+
+/// Sends one request to the extension's control service and prints its JSON
+/// answer; exit 0 only when the extension reports ok.
+func control(_ request: ControlRequest) {
+    let extInfo = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/SystemExtensions/\(extensionID).systemextension/Contents/Info.plist")
+    guard let plist = NSDictionary(contentsOf: extInfo) as? [String: Any],
+          let ne = plist["NetworkExtension"] as? [String: Any],
+          let machName = ne["NEMachServiceName"] as? String,
+          let body = try? JSONEncoder().encode(request) else {
+        finish(#"{"ok":false,"error":"embedded extension Info.plist unreadable"}"#, code: 1)
+    }
+    let connection = NSXPCConnection(machServiceName: machName, options: .privileged)
+    connection.remoteObjectInterface = NSXPCInterface(with: NetFilterControlXPC.self)
+    connection.resume()
+    let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+        let ns = error as NSError
+        finish(#"{"ok":false,"error":"control service unreachable: \#(ns.domain) \#(ns.code)"}"#, code: 1)
+    } as? NetFilterControlXPC
+    guard let proxy else { finish(#"{"ok":false,"error":"no control proxy"}"#, code: 1) }
+    proxy.handle(body) { data in
+        let ok = (try? JSONDecoder().decode(ControlResponse.self, from: data))?.ok ?? false
+        finish(String(decoding: data, as: UTF8.self), code: ok ? 0 : 1)
+    }
+}
+
+let args = CommandLine.arguments.dropFirst()
+guard let command = args.first else { usageExit() }
+if let op = ControlRequest.Op(rawValue: command) {
+    control(controlRequest(op, args.dropFirst()))
+    dispatchMain()
+}
+guard args.count == 1 else { usageExit() }
 
 switch command {
 case "activate": submit(activate: true)
