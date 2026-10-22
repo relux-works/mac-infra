@@ -4,6 +4,14 @@ Prototype, not a release: an observe-only per-app outbound flow logger built on
 an `NEFilterDataProvider` system extension. Design, signing and risks are in
 [DESIGN.md](DESIGN.md).
 
+## Tests
+
+The identity resolver (`Shared/`) has a SwiftPM harness. Run it outside the extension:
+
+```sh
+swift test
+```
+
 ## Build
 
 Unsigned (compile check only; the extension cannot be activated while SIP is on):

@@ -7,48 +7,6 @@ import os
 
 private let flowLogger = Logger(subsystem: "works.relux.mac-infra.netfilter", category: "flow")
 
-private struct AppIdentity {
-    var signingID: String?
-    var teamID: String?
-    var path: String?
-    var pid: Int32?
-}
-
-private func auditToken(from data: Data?) -> audit_token_t? {
-    guard let data, data.count == MemoryLayout<audit_token_t>.size else { return nil }
-    var token = audit_token_t()
-    withUnsafeMutableBytes(of: &token) { $0.copyBytes(from: data) }
-    return token
-}
-
-private func identity(of data: Data?) -> AppIdentity {
-    var result = AppIdentity()
-    guard let data, let token = auditToken(from: data) else { return result }
-    result.pid = audit_token_to_pid(token)
-
-    let tokenData = data as CFData
-    var code: SecCode?
-    let attrs = [kSecGuestAttributeAudit: tokenData] as CFDictionary
-    guard SecCodeCopyGuestWithAttributes(nil, attrs, [], &code) == errSecSuccess, let code else {
-        return result
-    }
-    var staticCode: SecStaticCode?
-    guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else {
-        return result
-    }
-    var info: CFDictionary?
-    if SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-       let dict = info as? [String: Any] {
-        result.signingID = dict[kSecCodeInfoIdentifier as String] as? String
-        result.teamID = dict[kSecCodeInfoTeamIdentifier as String] as? String
-    }
-    var url: CFURL?
-    if SecCodeCopyPath(staticCode, [], &url) == errSecSuccess, let url {
-        result.path = (url as URL).path
-    }
-    return result
-}
-
 private func endpointParts(_ endpoint: Network.NWEndpoint?) -> (host: String?, port: Int?) {
     guard let endpoint else { return (nil, nil) }
     switch endpoint {
@@ -87,8 +45,9 @@ class FilterDataProvider: NEFilterDataProvider {
 
     private static func eventJSON(for flow: NEFilterFlow) -> String? {
         let null = NSNull()
+        let observedAt = Date()
         var event: [String: Any] = [:]
-        event["ts"] = isoFormatter.string(from: Date())
+        event["ts"] = isoFormatter.string(from: observedAt)
         event["flow_id"] = flow.identifier.uuidString
         event["direction"] = flow.direction == .inbound ? "inbound" : "outbound"
         event["remote_hostname"] = null
@@ -112,15 +71,17 @@ class FilterDataProvider: NEFilterDataProvider {
         }
 
         let appToken = flow.sourceAppAuditToken
-        let app = identity(of: appToken)
+        let app = resolve(auditToken: appToken, observedAt: observedAt)
         event["app_signing_id"] = app.signingID ?? null
         event["app_team_id"] = app.teamID ?? null
         event["app_path"] = app.path ?? null
         event["app_pid"] = app.pid.map { Int($0) } ?? null
+        event["app_signing_status"] = app.status.rawValue
+        event["app_identity_source"] = app.source.rawValue
 
         event["via_process_path"] = null
         if let procToken = flow.sourceProcessAuditToken, procToken != appToken {
-            event["via_process_path"] = identity(of: procToken).path ?? null
+            event["via_process_path"] = resolve(auditToken: procToken, observedAt: observedAt).path ?? null
         }
 
         guard JSONSerialization.isValidJSONObject(event),

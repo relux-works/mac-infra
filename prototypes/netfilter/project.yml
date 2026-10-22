@@ -32,6 +32,7 @@ targets:
     platform: macOS
     sources:
       - Extension
+      - Shared
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: works.relux.mac-infra.netfilter.extension

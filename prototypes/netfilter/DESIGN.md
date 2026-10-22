@@ -49,7 +49,22 @@ writes each event's message as one line.
 | `remote_host`, `remote_port` | `remoteFlowEndpoint` (macOS 15+) |
 | `local_port` | `localFlowEndpoint` |
 | `app_signing_id`, `app_team_id`, `app_path`, `app_pid` | from `sourceAppAuditToken`: `SecCodeCopyGuestWithAttributes` with the audit token, then `SecCodeCopySigningInformation` and `SecCodeCopyPath`; pid via `audit_token_to_pid` |
+| `app_signing_status` | `signed`, `adhoc` (no certificate, e.g. Homebrew builds), `unsigned`, `unverified` (path known, signature unreadable) or `unresolved` (no path) |
+| `app_identity_source` | `audit_token` (Security framework, which checks the pid version), `pid_path` (fallback, see below) or `none` |
 | `via_process_path` | only when `sourceProcessAuditToken` differs from the app token (a system process acting for the app) |
+
+Identity fallback (`Shared/AppIdentity.swift`): when the audit-token lookup
+fails, the extension reads the token's pid with `proc_pidpath` and classifies
+the file's signature. A pid can be reused, so the fallback reads the process
+start time via `sysctl(KERN_PROC_PID)` before and after the path lookup. It
+reports `unresolved` with no path when the process started after the flow was
+observed, when the two start times differ, or when the pid is gone. It never
+reports a wrong path.
+
+Run 01 showed that in the sandboxed extension the lookup failed for code
+outside system paths and `/Applications` (Homebrew sing-box, the Codex CLI),
+while the same calls succeed unsandboxed. The extension therefore carries a
+read-only sandbox file exception for `/`, so it can read signatures.
 
 `remote_hostname` is preferred over the IP. Under multi-tun's fake-ip DNS,
 `remote_host` is often a 198.18.0.0/15 placeholder. The real name is only
@@ -71,7 +86,9 @@ user and needs no extra entitlement.
   [content-filter-provider]`, `com.apple.developer.system-extension.install =
   true`.
 - Extension entitlements: the same NE entitlement,
-  `com.apple.security.app-sandbox = true`, and
+  `com.apple.security.app-sandbox = true`,
+  `com.apple.security.temporary-exception.files.absolute-path.read-only = [/]`
+  (to read other programs' code signatures), and
   `com.apple.security.application-groups = [$(TeamIdentifierPrefix)works.relux.mac-infra.netfilter]`.
 - Extension `Info.plist` `NetworkExtension` dictionary:
   `NEMachServiceName = $(TeamIdentifierPrefix)works.relux.mac-infra.netfilter.extension`,
