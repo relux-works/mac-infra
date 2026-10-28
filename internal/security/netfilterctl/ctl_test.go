@@ -3,8 +3,10 @@ package netfilterctl
 import (
 	"context"
 	"errors"
+	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -19,13 +21,176 @@ const protectJSON = `{"schema":"mac-infra.netfilter-protect/v1","entries":[
 
 var fixedNow = func() time.Time { return time.Date(2026, 10, 23, 1, 0, 0, 0, time.UTC) }
 
+// The filesystem case table mirrors ProtectListFileTests.swift; no root privileges are needed.
+func TestProtectListFileTrust(t *testing.T) {
+	cases := []struct {
+		name, want string
+	}{
+		// Positive: a valid 0644 file under safe ancestors loads and decodes.
+		{"valid", ""},
+		// Negative: the explicit expected uid applies to the root anchor too.
+		{"wrong_owner", "protect-list directory not owned by root"},
+		// Negative: group-writable files cannot enable enforcement.
+		{"group_writable", "protect-list is group/world writable"},
+		// Negative: world-writable files cannot enable enforcement.
+		{"world_writable", "protect-list is group/world writable"},
+		// Negative: a file symlink cannot enable enforcement.
+		{"symlink", "protect-list path component is a symlink"},
+		// Negative: a second hard link cannot enable enforcement.
+		{"hard_link", "protect-list link count is not 1"},
+		// Negative: a symlink ancestor cannot redirect the read.
+		{"ancestor_symlink", "protect-list path component is a symlink"},
+		// Negative: a group-writable ancestor cannot enable enforcement.
+		{"ancestor_group_writable", "protect-list directory is group/world writable"},
+		// Negative: a world-writable ancestor cannot enable enforcement.
+		{"ancestor_world_writable", "protect-list directory is group/world writable"},
+		// Negative: the root anchor itself must have safe mode bits.
+		{"root_writable", "protect-list directory is group/world writable"},
+		// Negative: a regular file cannot serve as an ancestor directory.
+		{"ancestor_file", "protect-list path component is not a directory"},
+		// Negative: set-uid files cannot enable enforcement.
+		{"setuid", "protect-list has set-uid, set-gid or sticky bit"},
+		// Negative: set-gid files cannot enable enforcement.
+		{"setgid", "protect-list has set-uid, set-gid or sticky bit"},
+		// Negative: sticky files cannot enable enforcement.
+		{"sticky", "protect-list has set-uid, set-gid or sticky bit"},
+		// Negative: a FIFO is refused without blocking on a writer.
+		{"fifo", "protect-list is not a regular file"},
+		// Negative: a directory at the file path cannot enable enforcement.
+		{"directory", "protect-list is not a regular file"},
+		// Negative: a missing file still leaves enforcement off.
+		{"missing", "protect-list missing (enforcement off)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "safe")
+			path := filepath.Join(dir, "protect.json")
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			must(os.Mkdir(dir, 0755))
+			must(os.WriteFile(path, []byte(protectJSON), 0644))
+			must(unix.Chmod(path, 0644))
+			uid := uint32(os.Getuid())
+			switch tc.name {
+			case "wrong_owner":
+				uid++
+			case "group_writable":
+				must(unix.Chmod(path, 0664))
+			case "world_writable":
+				must(unix.Chmod(path, 0646))
+			case "setuid":
+				must(unix.Chmod(path, 04644))
+			case "setgid":
+				must(unix.Chmod(path, 02644))
+			case "sticky":
+				must(unix.Chmod(path, 01644))
+			case "hard_link":
+				must(os.Link(path, filepath.Join(dir, "other.json")))
+			case "symlink":
+				must(os.Rename(path, path+".real"))
+				must(os.Symlink(path+".real", path))
+			case "ancestor_symlink":
+				must(os.Rename(dir, dir+".real"))
+				must(os.Symlink(dir+".real", dir))
+			case "ancestor_group_writable":
+				must(unix.Chmod(dir, 0775))
+			case "ancestor_world_writable":
+				must(unix.Chmod(dir, 0757))
+			case "root_writable":
+				must(unix.Chmod(root, 0775))
+			case "ancestor_file":
+				must(os.Rename(dir, dir+".real"))
+				must(os.WriteFile(dir, nil, 0644))
+			case "fifo", "directory", "missing":
+				must(os.Remove(path))
+				if tc.name == "fifo" {
+					must(unix.Mkfifo(path, 0644))
+				}
+				if tc.name == "directory" {
+					must(os.Mkdir(path, 0755))
+				}
+			}
+			p, err := loadProtectList("/safe/protect.json", uid, root)
+			if tc.want == "" {
+				if err != nil || p.Schema != "mac-infra.netfilter-protect/v1" || len(p.Entries) != 3 || p.Protects(Target{Host: "sync.matrix.relux.works"}) != "Matrix" {
+					t.Fatalf("positive control: %+v, %v", p, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.want || !reflect.DeepEqual(p, ProtectList{}) {
+				t.Fatalf("want no list and %q; got %+v, %v", tc.want, p, err)
+			}
+		})
+	}
+}
+
+// Negative: even if a caller passes a refused list to Execute, no intent or app call occurs.
+func TestRefusedProtectListNeverExecutes(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "protect.json")
+	if err := os.WriteFile(path, []byte(protectJSON), 0664); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Chmod(path, 0664); err != nil {
+		t.Fatal(err)
+	}
+	p, err := loadProtectList("/protect.json", uint32(os.Getuid()), root)
+	if err == nil || err.Error() != "protect-list is group/world writable" {
+		t.Fatalf("refusal: %v", err)
+	}
+	j, err := journal.Open(filepath.Join(t.TempDir(), "journal"), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &fakeApp{out: `{"ok":true}`}
+	for _, op := range []string{"kill", "block", "unblock"} {
+		res := Execute(context.Background(), Request{Op: op, Actor: "a", Reason: "r", Target: Target{App: "/tmp/evil"}, Duration: time.Hour, RuleID: "R1"}, p, j, app.run, fixedNow)
+		if res.OK || res.Error != "protect-list unavailable (enforcement off)" || res.Intent != nil || len(app.calls) != 0 || kinds(t, j) != "" {
+			t.Fatalf("%s with refused list: %+v calls %v", op, res, app.calls)
+		}
+	}
+}
+
+// The trusted-file reader preserves the 64 KiB boundary and still rejects invalid content.
+func TestProtectListFileContent(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		// Positive: trailing JSON whitespace up to exactly 64 KiB is admitted.
+		{"limit", protectJSON + strings.Repeat(" ", 65536-len(protectJSON)), ""},
+		// Negative: one byte beyond the limit returns no list.
+		{"oversize", protectJSON + strings.Repeat(" ", 65537-len(protectJSON)), "protect-list larger than 64 KiB"},
+		// Negative: safe filesystem metadata does not bypass strict decoding.
+		{"invalid", "not JSON", "protect-list invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "protect.json"), []byte(tc.body), 0644); err != nil {
+				t.Fatal(err)
+			}
+			p, err := loadProtectList("/protect.json", uint32(os.Getuid()), root)
+			if tc.want == "" {
+				if err != nil || len(p.Entries) != 3 {
+					t.Fatalf("boundary: %+v %v", p, err)
+				}
+			} else if err == nil || err.Error() != tc.want || !reflect.DeepEqual(p, ProtectList{}) {
+				t.Fatalf("want no list and %q; got %+v %v", tc.want, p, err)
+			}
+		})
+	}
+}
+
 func setup(t *testing.T) (ProtectList, *journal.Journal) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "protect.json")
+	root := t.TempDir()
+	path := filepath.Join(root, "protect.json")
 	if err := os.WriteFile(path, []byte(protectJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
-	p, err := LoadProtectList(path)
+	p, err := loadProtectList("/protect.json", uint32(os.Getuid()), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +299,7 @@ func TestProtectedTargetsRefused(t *testing.T) {
 // off); the CLI never falls back to an empty list.
 func TestProtectListRequired(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := LoadProtectList(filepath.Join(dir, "missing.json")); err == nil {
+	if _, err := loadProtectList("/missing.json", uint32(os.Getuid()), dir); err == nil {
 		t.Fatal("missing list accepted")
 	}
 	for i, body := range []string{`{"schema":"mac-infra.netfilter-protect/v1","entries":[]}`, `{"schema":"x","entries":[{"app_path":"/a","reason":"r"}]}`,
@@ -142,7 +307,7 @@ func TestProtectListRequired(t *testing.T) {
 		`{"schema":"mac-infra.netfilter-protect/v1","entries":[{"app_path":"/a","reason":"r","x":1}]}`} {
 		path := filepath.Join(dir, "p"+string(rune('0'+i)))
 		_ = os.WriteFile(path, []byte(body), 0644)
-		if _, err := LoadProtectList(path); err == nil {
+		if _, err := loadProtectList("/"+filepath.Base(path), uint32(os.Getuid()), dir); err == nil {
 			t.Errorf("invalid list %d accepted", i)
 		}
 	}

@@ -468,6 +468,9 @@ root-owned protect-list
 `/Library/Application Support/works.relux.mac-infra.netfilter/protect.json`
 (schema `mac-infra.netfilter-protect/v1`; each entry has exactly one of
 `app_path`, `app_path_prefix`, `signing_id`, `host_suffix`, plus a `reason`).
+Both loaders verify root ownership and safe modes of the file and every
+ancestor directory, refuse symlinks and multiple hard links, and read only
+the verified file descriptor; a refusal leaves enforcement off.
 The "danger" policy belongs to the operator (the local-sysadmin keeper). The
 classifier never kills on its own.
 

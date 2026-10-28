@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -37,36 +36,41 @@ type ProtectList struct {
 	Entries []ProtectEntry `json:"entries"`
 }
 
-// LoadProtectList reads and strictly validates the root-owned protect-list.
+// LoadProtectList verifies root ownership, safe file/ancestor modes and link
+// constraints before reading and strictly validating the protect-list.
 func LoadProtectList(path string) (ProtectList, error) {
+	return loadProtectList(path, 0, "/")
+}
+
+func loadProtectList(path string, expectedUID uint32, rootDirectory string) (ProtectList, error) {
 	var p ProtectList
-	raw, err := os.ReadFile(path)
+	raw, err := readProtectList(path, expectedUID, rootDirectory)
 	if err != nil {
-		return p, fmt.Errorf("protect-list unavailable (enforcement off): %w", err)
+		return p, err
 	}
 	if len(raw) > 65536 {
-		return p, errors.New("protect-list larger than 64 KiB")
+		return ProtectList{}, errors.New("protect-list larger than 64 KiB")
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if err = d.Decode(&p); err != nil || d.More() {
-		return p, errors.New("protect-list invalid")
+		return ProtectList{}, errors.New("protect-list invalid")
 	}
 	if p.Schema != "mac-infra.netfilter-protect/v1" || len(p.Entries) == 0 {
-		return p, errors.New("protect-list invalid: schema or empty")
+		return ProtectList{}, errors.New("protect-list invalid: schema or empty")
 	}
 	for _, e := range p.Entries {
 		n := 0
 		for _, m := range []*string{e.AppPath, e.AppPathPrefix, e.SigningID, e.HostSuffix} {
 			if m != nil {
 				if *m == "" {
-					return p, errors.New("protect-list invalid: empty matcher")
+					return ProtectList{}, errors.New("protect-list invalid: empty matcher")
 				}
 				n++
 			}
 		}
 		if n != 1 || e.Reason == "" {
-			return p, errors.New("protect-list invalid: each entry needs exactly one matcher and a reason")
+			return ProtectList{}, errors.New("protect-list invalid: each entry needs exactly one matcher and a reason")
 		}
 	}
 	return p, nil
@@ -225,6 +229,10 @@ func Execute(ctx context.Context, r Request, protect ProtectList, j *journal.Jou
 			return Result{Error: "journal write failed: " + err.Error()}
 		}
 		return Result{OK: true, Outcome: &e}
+	}
+	// A refused loader returns no list; never journal an intent or run the app.
+	if protect.Schema != "mac-infra.netfilter-protect/v1" || len(protect.Entries) == 0 {
+		return Result{Error: "protect-list unavailable (enforcement off)"}
 	}
 	if r.Op != "unblock" {
 		if why := protect.Protects(r.Target); why != "" {

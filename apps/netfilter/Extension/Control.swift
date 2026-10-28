@@ -14,14 +14,13 @@ final class EnforcementState: @unchecked Sendable {
     private var engine = Engine<NEFilterSocketFlow>(capacity: 4096, protect: nil)
     weak var provider: NEFilterDataProvider?
 
-    /// Reads the root-owned protect-list. A missing or invalid file disables
-    /// enforcement (fail closed for kills, fail open for traffic).
+    /// Verifies ownership, modes and link constraints of the file and its
+    /// ancestors before decoding. A refused list disables enforcement.
     func reloadProtectList() {
         var protect: ProtectList?
         var status: [String: Any] = ["op": "protect_list", "path": ProtectList.defaultPath]
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: ProtectList.defaultPath))
-            protect = try ProtectList.decode(data)
+            protect = try ProtectList.load(path: ProtectList.defaultPath, expectedOwnerUID: 0, rootDirectory: "/")
             status["ok"] = true
             status["entries"] = protect?.entries.count ?? 0
         } catch {
