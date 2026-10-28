@@ -74,15 +74,9 @@ func (s Session) RunJavaScriptResult(ctx context.Context, windowID, tabID, expec
 	if strings.TrimSpace(windowID) == "" || strings.TrimSpace(tabID) == "" {
 		return browsersession.ExecutionResult{}, errors.New("window id and tab id are required")
 	}
-	wrapped, err := browsersession.WrapJavaScript(source, expectedOrigin)
-	if err != nil {
-		return browsersession.ExecutionResult{}, err
-	}
-	raw, err := s.runAppleScript(ctx, executeAppleScript(), windowID, tabID, wrapped)
-	if err != nil {
-		return browsersession.ExecutionResult{}, err
-	}
-	return browsersession.ParseJavaScriptResult(raw, expectedOrigin)
+	return browsersession.ExecuteJavaScript(source, expectedOrigin, func(wrapped string) (string, error) {
+		return s.runAppleScript(ctx, executeAppleScript(), windowID, tabID, wrapped)
+	})
 }
 
 func (s Session) Focus(ctx context.Context, windowID, tabID, expectedOrigin string) error {

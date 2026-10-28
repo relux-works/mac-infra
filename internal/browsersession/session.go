@@ -19,6 +19,8 @@ var (
 	ErrOriginMismatch      = errors.New("browser target origin changed")
 	ErrTargetMissing       = errors.New("browser target is no longer available")
 	ErrUnreadableResponse  = errors.New("browser response could not be verified")
+	ErrEvalBlocked         = errors.New("page blocks eval")
+	ErrCSPExpression       = errors.New("page blocks eval; under this CSP the source must be a single expression (use an IIFE for statements)")
 )
 
 type Browser string
@@ -100,6 +102,16 @@ func GuardJavaScript(source string) error {
 // evaluation. ParseJavaScriptResult refuses any response that does not carry the
 // matching sentinel, so an empty or malformed automation response cannot pass.
 func WrapJavaScript(source, expectedOrigin string) (string, error) {
+	return wrapJavaScript(source, expectedOrigin, false)
+}
+
+// WrapJavaScriptExpression embeds a single expression without string-to-code
+// evaluation. Statements must be expressed as an IIFE on this CSP-safe route.
+func WrapJavaScriptExpression(source, expectedOrigin string) (string, error) {
+	return wrapJavaScript(source, expectedOrigin, true)
+}
+
+func wrapJavaScript(source, expectedOrigin string, expression bool) (string, error) {
 	if err := GuardJavaScript(source); err != nil {
 		return "", err
 	}
@@ -112,13 +124,24 @@ func WrapJavaScript(source, expectedOrigin string) (string, error) {
 		return "", fmt.Errorf("encode expected origin: %w", err)
 	}
 	sentinelJSON, _ := json.Marshal(guardSentinel)
+	evaluation := fmt.Sprintf(`
+  // Probe separately: a caller-thrown EvalError must never cause a retry.
+  try { eval("void 0"); }
+  catch (__macError) {
+    if (!(__macError instanceof EvalError)) throw __macError;
+    return JSON.stringify({__macBrowserSessionGuard:__macGuard,outcome:"eval-blocked",origin:String(location.origin || ""),readyState:String(document.readyState || ""),value:""});
+  }
+  const __macValue = eval(%s);`, string(sourceJSON))
+	if expression {
+		evaluation = "\n  const __macValue = (\n" + source + "\n  );"
+	}
 	return fmt.Sprintf(`(() => {
   const __macGuard = %s;
   const __macExpectedOrigin = %s;
   if (__macExpectedOrigin && location.origin !== __macExpectedOrigin) {
     return JSON.stringify({__macBrowserSessionGuard:__macGuard,outcome:"origin-mismatch",origin:String(location.origin || "")});
   }
-  const __macValue = eval(%s);
+%s
   let __macText = "";
   if (__macValue !== undefined) {
     if (typeof __macValue === "string") __macText = __macValue;
@@ -134,7 +157,36 @@ func WrapJavaScript(source, expectedOrigin string) (string, error) {
     readyState:String(document.readyState || ""),
     value:__macText
   });
-})()`, string(sentinelJSON), string(originJSON), string(sourceJSON)), nil
+})()`, string(sentinelJSON), string(originJSON), evaluation), nil
+}
+
+// ExecuteJavaScript retries exactly once, only after a verified eval-blocked
+// envelope from a probe that ran no caller code. Each dispatch repeats the guard.
+func ExecuteJavaScript(source, expectedOrigin string, execute func(string) (string, error)) (ExecutionResult, error) {
+	wrapped, err := WrapJavaScript(source, expectedOrigin)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	raw, err := execute(wrapped)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	result, err := ParseJavaScriptResult(raw, expectedOrigin)
+	if !errors.Is(err, ErrEvalBlocked) {
+		return result, err
+	}
+	wrapped, err = WrapJavaScriptExpression(source, expectedOrigin)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	raw, err = execute(wrapped)
+	if err == nil {
+		result, err = ParseJavaScriptResult(raw, expectedOrigin)
+	}
+	if err != nil && !errors.Is(err, ErrOriginMismatch) && !errors.Is(err, ErrTargetMissing) {
+		return ExecutionResult{}, fmt.Errorf("%w: expression execution failed: %w", ErrCSPExpression, err)
+	}
+	return result, err
 }
 
 func ParseJavaScriptResult(raw, expectedOrigin string) (ExecutionResult, error) {
@@ -157,6 +209,11 @@ func ParseJavaScriptResult(raw, expectedOrigin string) (ExecutionResult, error) 
 	switch envelope.Outcome {
 	case "origin-mismatch":
 		return ExecutionResult{}, &OriginMismatchError{Expected: strings.TrimSpace(expectedOrigin), Observed: envelope.Origin}
+	case "eval-blocked":
+		if strings.TrimSpace(expectedOrigin) != "" && envelope.Origin != strings.TrimSpace(expectedOrigin) {
+			return ExecutionResult{}, &OriginMismatchError{Expected: strings.TrimSpace(expectedOrigin), Observed: envelope.Origin}
+		}
+		return ExecutionResult{}, ErrEvalBlocked
 	case "ok":
 		if strings.TrimSpace(expectedOrigin) != "" && envelope.Origin != strings.TrimSpace(expectedOrigin) {
 			return ExecutionResult{}, &OriginMismatchError{Expected: strings.TrimSpace(expectedOrigin), Observed: envelope.Origin}

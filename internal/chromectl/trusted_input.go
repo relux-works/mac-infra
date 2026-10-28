@@ -399,10 +399,28 @@ func trustedCleanupJavaScript(inputSelector, stateKey string) string {
 // Go; target loss is classified from a sentinel-sealed envelope the program
 // returns instead of from untrusted child text.
 func (s Session) runJavaScriptPrivate(ctx context.Context, windowID, tabID, expectedOrigin, source string) (browsersession.ExecutionResult, error) {
-	wrapped, err := browsersession.WrapJavaScript(source, expectedOrigin)
+	result, err := browsersession.ExecuteJavaScript(source, expectedOrigin, func(wrapped string) (string, error) {
+		return s.executeJavaScriptPrivate(ctx, windowID, tabID, wrapped)
+	})
 	if err != nil {
-		return browsersession.ExecutionResult{}, err
+		if errors.Is(err, browsersession.ErrOriginMismatch) {
+			// Discard the child-controlled observed origin at the sealed boundary.
+			return browsersession.ExecutionResult{}, errSealedOriginMismatch
+		}
+		if errors.Is(err, browsersession.ErrCSPExpression) {
+			// The expression diagnostic is fixed; no child detail may leave here.
+			return browsersession.ExecutionResult{}, browsersession.ErrCSPExpression
+		}
+		if errors.Is(err, browsersession.ErrUnreadableResponse) {
+			return browsersession.ExecutionResult{}, fmt.Errorf("%w: sealed Chrome page-context response could not be verified", browsersession.ErrUnreadableResponse)
+		}
 	}
+	return result, err
+}
+
+// executeJavaScriptPrivate unseals one dispatch, retaining only fixed transport
+// diagnostics. The shared executor owns guard verification and the CSP retry.
+func (s Session) executeJavaScriptPrivate(ctx context.Context, windowID, tabID, wrapped string) (string, error) {
 	windowJSON, _ := json.Marshal(windowID)
 	tabJSON, _ := json.Marshal(tabID)
 	sourceJSON, _ := json.Marshal(wrapped)
@@ -424,7 +442,7 @@ func (s Session) runJavaScriptPrivate(ctx context.Context, windowID, tabID, expe
 }`, string(sentinelJSON), string(windowJSON), string(tabJSON), string(sourceJSON))
 	raw, err := s.runJXAStdin(ctx, program)
 	if err != nil {
-		return browsersession.ExecutionResult{}, err
+		return "", err
 	}
 	var envelope struct {
 		Sentinel string `json:"__macChromePrivateTransport"`
@@ -432,35 +450,20 @@ func (s Session) runJavaScriptPrivate(ctx context.Context, windowID, tabID, expe
 		Value    string `json:"value"`
 	}
 	if err := json.Unmarshal([]byte(raw), &envelope); err != nil || envelope.Sentinel != privateTransportSentinel {
-		return browsersession.ExecutionResult{}, &PrivateTransportError{Kind: PrivateTransportUnverifiable}
+		return "", &PrivateTransportError{Kind: PrivateTransportUnverifiable}
 	}
 	switch envelope.Outcome {
 	case "ok":
 	case "window-missing":
-		return browsersession.ExecutionResult{}, &browsersession.TargetMissingError{Browser: browsersession.BrowserChrome, Target: "exact-target", Detail: "exact Chrome window is no longer open"}
+		return "", &browsersession.TargetMissingError{Browser: browsersession.BrowserChrome, Target: "exact-target", Detail: "exact Chrome window is no longer open"}
 	case "tab-missing":
-		return browsersession.ExecutionResult{}, &browsersession.TargetMissingError{Browser: browsersession.BrowserChrome, Target: "exact-target", Detail: "exact Chrome tab is no longer open"}
+		return "", &browsersession.TargetMissingError{Browser: browsersession.BrowserChrome, Target: "exact-target", Detail: "exact Chrome tab is no longer open"}
 	case "execute-failed":
-		return browsersession.ExecutionResult{}, &PrivateTransportError{Kind: PrivateTransportExecuteFailed}
+		return "", &PrivateTransportError{Kind: PrivateTransportExecuteFailed}
 	default:
-		return browsersession.ExecutionResult{}, &PrivateTransportError{Kind: PrivateTransportUnverifiable}
+		return "", &PrivateTransportError{Kind: PrivateTransportUnverifiable}
 	}
-	result, err := browsersession.ParseJavaScriptResult(envelope.Value, expectedOrigin)
-	if err != nil {
-		if errors.Is(err, browsersession.ErrOriginMismatch) {
-			// Keep the classification, drop the observed value. The nested guard
-			// envelope's origin field is child-controlled, and the stdin program
-			// the child receives embeds the protected resource reference, so a
-			// hostile child can mint a well-formed origin-mismatch envelope whose
-			// origin is a copy of that reference. Returning
-			// browsersession.OriginMismatchError here would print it.
-			return browsersession.ExecutionResult{}, errSealedOriginMismatch
-		}
-		// ParseJavaScriptResult formats decoder detail; a sealed call returns a
-		// fixed message so no page-context byte can ride out on that path.
-		return browsersession.ExecutionResult{}, fmt.Errorf("%w: sealed Chrome page-context response could not be verified", browsersession.ErrUnreadableResponse)
-	}
-	return result, nil
+	return envelope.Value, nil
 }
 
 // runJXAStdin runs the sealed program with the source on stdin. Child stdout is

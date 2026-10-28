@@ -71,20 +71,7 @@ func New(artifactDir string) *Session {
 }
 
 func (s Session) CheckJavaScript(ctx context.Context) (string, error) {
-	wrapped, err := browsersession.WrapJavaScript("document.readyState", "")
-	if err != nil {
-		return "", err
-	}
-	jsPath, cleanup, err := s.writeTempJavaScript(wrapped)
-	if err != nil {
-		return "", err
-	}
-	defer cleanup()
-	raw, err := s.runAppleScript(ctx, checkJavaScriptAppleScript(), jsPath)
-	if err != nil {
-		return "", err
-	}
-	result, err := browsersession.ParseJavaScriptResult(raw, "")
+	result, err := s.executeJavaScript(ctx, "document.readyState", "", checkJavaScriptAppleScript())
 	return result.Value, err
 }
 
@@ -127,20 +114,18 @@ func (s Session) RunJavaScriptResult(ctx context.Context, source string) (browse
 	if strings.TrimSpace(s.ExpectedOrigin) == "" {
 		return browsersession.ExecutionResult{}, errors.New("expected origin is required for Safari page-context automation")
 	}
-	wrapped, err := browsersession.WrapJavaScript(source, s.ExpectedOrigin)
-	if err != nil {
-		return browsersession.ExecutionResult{}, err
-	}
-	jsPath, cleanup, err := s.writeTempJavaScript(wrapped)
-	if err != nil {
-		return browsersession.ExecutionResult{}, err
-	}
-	defer cleanup()
-	raw, err := s.runAppleScript(ctx, runJavaScriptAppleScript(), jsPath, strconv.FormatInt(s.TargetWindowID, 10))
-	if err != nil {
-		return browsersession.ExecutionResult{}, err
-	}
-	return browsersession.ParseJavaScriptResult(raw, s.ExpectedOrigin)
+	return s.executeJavaScript(ctx, source, s.ExpectedOrigin, runJavaScriptAppleScript(), strconv.FormatInt(s.TargetWindowID, 10))
+}
+
+func (s Session) executeJavaScript(ctx context.Context, source, expectedOrigin, script string, args ...string) (browsersession.ExecutionResult, error) {
+	return browsersession.ExecuteJavaScript(source, expectedOrigin, func(wrapped string) (string, error) {
+		jsPath, cleanup, err := s.writeTempJavaScript(wrapped)
+		if err != nil {
+			return "", err
+		}
+		defer cleanup()
+		return s.runAppleScript(ctx, script, append([]string{jsPath}, args...)...)
+	})
 }
 
 func (s *Session) CloseTarget(ctx context.Context) error {
@@ -281,7 +266,7 @@ func SnapshotJavaScript(textLimit, linkLimit int) string {
     links,
     capturedAt: new Date().toISOString()
   });
-})();`, textLimit, linkLimit)
+})()`, textLimit, linkLimit)
 }
 
 func StartFetchJavaScript(resourceURL string, chunkSize int) string {
@@ -335,7 +320,7 @@ func StartFetchJavaScript(resourceURL string, chunkSize int) string {
     }
   })();
   return "started";
-})();`, string(resourceJSON), chunkSize)
+})()`, string(resourceJSON), chunkSize)
 }
 
 func PollFetchJavaScript() string {
@@ -345,7 +330,7 @@ func PollFetchJavaScript() string {
   const { chunks, ...meta } = job;
   if (chunks) meta.chunkCount = chunks.length;
   return JSON.stringify(meta);
-})();`
+})()`
 }
 
 func ReadFetchChunkJavaScript(index int, clearAfter bool) string {
@@ -359,7 +344,7 @@ func ReadFetchChunkJavaScript(index int, clearAfter bool) string {
   const chunk = job.chunks[%d] || "";
   if (%s) window.__macSafariSessionFetchJob = null;
   return chunk;
-})();`, index, clear)
+})()`, index, clear)
 }
 
 func FormatAutomationError(err error) string {

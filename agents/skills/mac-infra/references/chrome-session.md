@@ -37,6 +37,22 @@ typed refusal and executes no payload. Never fall back to the active tab or tab
 position. Chrome permits omission of `--origin` only for exceptional bounded
 reads and prints `guard: unguarded`; treat that output as unguarded evidence.
 
+Pages whose Content Security Policy forbids `unsafe-eval` are supported. After
+the origin check, a harmless eval probe runs before the caller source. Only a
+verified `eval-blocked` envelope permits one retry with the source embedded
+directly as a single expression and the origin checked again. The caller source
+runs at most once; ordinary page errors (including a caller's `EvalError`) and
+unverifiable responses never trigger a retry. This also applies to the private
+page-context transport used by trusted input, upload, and sealed fetches, whose
+failure diagnostics remain sanitized.
+
+For the CSP fallback, omit a trailing semicolon and express statements as an
+IIFE, for example `(() => { const state = document.readyState; return state; })()`.
+Pages that allow eval retain statement completion values. A failed fallback
+reports the single-expression requirement and returns nonzero for syntax or
+runtime failures. Exact IDs, sentinel verification, and the secret-token guard
+apply on both routes.
+
 `--file` is equivalent to `--script` and goes through the same guard:
 
 ```bash

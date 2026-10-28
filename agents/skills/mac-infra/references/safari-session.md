@@ -51,6 +51,21 @@ There is no front-document fallback. The origin check and payload share one
 page-context evaluation, so a tab switch or navigation produces a typed refusal
 and dispatches nothing.
 
+Pages whose Content Security Policy forbids `unsafe-eval` are supported. After
+the origin check, a harmless eval probe runs before the caller source. If that
+probe returns a verified `eval-blocked` envelope, the tool retries once with the
+source embedded directly as a single expression, repeating the origin check.
+The caller source runs at most once. Ordinary page errors, including a caller's
+own `EvalError`, and unverifiable responses never trigger a retry.
+
+On this CSP fallback, omit a trailing semicolon and use an IIFE for statements,
+for example `(() => { const state = document.readyState; return state; })()`.
+Statements retain their existing completion-value behavior on pages that allow
+eval. A failed fallback reports that this CSP requires a single expression;
+syntax and runtime failures still return nonzero. `check-js` uses the expression
+`document.readyState` and supports the same fallback. Exact-window targeting,
+the sentinel checks, and the secret-token guard apply to both routes.
+
 Snapshot and authenticated fetch paths enforce the same target/origin contract:
 
 ```bash
