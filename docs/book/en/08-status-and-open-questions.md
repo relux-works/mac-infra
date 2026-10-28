@@ -45,8 +45,8 @@ Go's `LoadProtectList` reads bytes and validates their contents.
 Swift's `reloadProtectList` reads and decodes the file.
 The owner-installed, root-owned requirement is consequently an installation contract, not a verified loader gate.
 Chapter 7 states this limit.
-A fix is tracked, but tracking does not supply enforcement.
-(*source*: `internal/security/netfilterctl/ctl.go`, `LoadProtectList`; `apps/netfilter/Extension/Control.swift`, `EnforcementState.reloadProtectList`; firewall runbook, “Netfilter kill path (operator CLI)”; the fix is tracked on the mac-infra task board, outside this book.)
+Until a code change adds those checks, the requirement depends on correct installation.
+(*source*: `internal/security/netfilterctl/ctl.go`, `LoadProtectList`; `apps/netfilter/Extension/Control.swift`, `EnforcementState.reloadProtectList`; firewall runbook, “Netfilter kill path (operator CLI)”.)
 
 Book production also records its own choices.
 “Renderer” still calls for identifying and reusing the shared PDF workflow.
@@ -94,7 +94,7 @@ No selected owner-activation profile or root-to-component authority chain follow
 
 An adopted distribution or keyring decision would change the book's stated boundaries.
 A code change adding protect-list ownership checks would change its source claims.
-Neither an external assessment nor a tracked fix establishes adoption or enforcement.
+Neither an external assessment nor a planned fix establishes adoption or enforcement.
 If practice diverges, resolve the divergence through a decision or change the book; leaving both untouched is excluded by `docs/book/editorial/style.md`.
 Record the deciding evidence before relying on a broader guarantee.
 
@@ -118,7 +118,7 @@ Paragraphs are numbered in reading order, excluding headings and this table.
 | 3 — Helper replacement | `scripts/setup.sh`: `usage`; runbook: “Privileged Daemon Installation Trust” |
 | 4 — Release signing | `UNRESOLVED_QUESTIONS.md`: “netfilter: release-grade signing (Developer ID, notarization)” |
 | 5 — Sandbox choice | `UNRESOLVED_QUESTIONS.md`: “netfilter: the read-only `/` sandbox exception in a non-development build” |
-| 6 — Loader gap | `internal/security/netfilterctl/ctl.go`: `LoadProtectList`; `apps/netfilter/Extension/Control.swift`: `reloadProtectList`; `agents/skills/mac-infra/references/firewall.md`: kill-path heading; fix tracked on the task board |
+| 6 — Loader gap | `internal/security/netfilterctl/ctl.go`: `LoadProtectList`; `apps/netfilter/Extension/Control.swift`: `reloadProtectList`; `agents/skills/mac-infra/references/firewall.md`: kill-path heading |
 | 7 — Production choices | `docs/book/editorial/decisions-pending.md`: “Renderer”, “Producer” |
 | 8 — Reusable patterns | External assessment: points 1–3; `docs/book/editorial/decisions-pending.md`: “Swarma keyring reuse” |
 | 9 — Encoding adapter | External assessment: point 2 |
