@@ -40,13 +40,11 @@ Whether Apple permits the unsandboxed-extension option is *unknown* in this evid
 The choice belongs with the signing decision.
 (*proposed*: `UNRESOLVED_QUESTIONS.md`, “netfilter: the read-only `/` sandbox exception in a non-development build”.)
 
-The protect-list has a separate source gap: neither loader verifies root ownership or permissions.
-Go's `LoadProtectList` reads bytes and validates their contents.
-Swift's `reloadProtectList` reads and decodes the file.
-The owner-installed, root-owned requirement is consequently an installation contract, not a verified loader gate.
-Chapter 7 states this limit.
-Until a code change adds those checks, the requirement depends on correct installation.
-(*source*: `internal/security/netfilterctl/ctl.go`, `LoadProtectList`; `apps/netfilter/Extension/Control.swift`, `EnforcementState.reloadProtectList`; firewall runbook, “Netfilter kill path (operator CLI)”.)
+The protect-list loaders closed a source gap after this part was first written.
+Both now verify root ownership and safe modes of the list and its ancestors before decoding, as chapter 7 describes.
+That is a source change: whether an installed extension already carries it is a deployment question, like every claim above.
+The CLI's explicit list path and the extension's fixed path remain separate inputs; that is an open question.
+(*source*: `internal/security/netfilterctl/protect_file.go`, `readProtectList`; `apps/netfilter/Shared/ProtectListFile.swift`, `ProtectList.load`; `apps/netfilter/Extension/Control.swift`, `EnforcementState.reloadProtectList`; firewall runbook, “Netfilter kill path (operator CLI)”; *proposed*: `UNRESOLVED_QUESTIONS.md`, “netfilter: the CLI protect-list path versus the extension's fixed path”.)
 
 Book production also records its own choices.
 “Renderer” still calls for identifying and reusing the shared PDF workflow.
@@ -93,12 +91,12 @@ No selected owner-activation profile or root-to-component authority chain follow
 (*source*: `internal/keyvault/signer.go`, `SignerServer.handle`; `internal/keyvault/ssh_agent.go`, `serveSSHPeer`; external assessment, points 2–3.)
 
 An adopted distribution or keyring decision would change the book's stated boundaries.
-A code change adding protect-list ownership checks would change its source claims.
-Neither an external assessment nor a planned fix establishes adoption or enforcement.
+A code change, such as the protect-list checks, changes its source claims and needs a matching book revision.
+Neither an external assessment nor a source change establishes adoption or installed enforcement.
 If practice diverges, resolve the divergence through a decision or change the book; leaving both untouched is excluded by `docs/book/editorial/style.md`.
 Record the deciding evidence before relying on a broader guarantee.
 
-**Status.** Source checked at `77b76d8bbe6aa64156840a185bb0d85a7a19f479` supports only the cited implementation statements.
+**Status.** Source checked at `77b76d8bbe6aa64156840a185bb0d85a7a19f479`, and the protect-list paragraph at `3e49742093a0fc2b0b5bd569a41cbb27f538bb60`, supports only the cited implementation statements.
 No tests were run or cited as proof here.
 Deployment equivalence remains *unknown*.
 Distribution alternatives remain *proposed*.
@@ -118,7 +116,7 @@ Paragraphs are numbered in reading order, excluding headings and this table.
 | 3 — Helper replacement | `scripts/setup.sh`: `usage`; runbook: “Privileged Daemon Installation Trust” |
 | 4 — Release signing | `UNRESOLVED_QUESTIONS.md`: “netfilter: release-grade signing (Developer ID, notarization)” |
 | 5 — Sandbox choice | `UNRESOLVED_QUESTIONS.md`: “netfilter: the read-only `/` sandbox exception in a non-development build” |
-| 6 — Loader gap | `internal/security/netfilterctl/ctl.go`: `LoadProtectList`; `apps/netfilter/Extension/Control.swift`: `reloadProtectList`; `agents/skills/mac-infra/references/firewall.md`: kill-path heading |
+| 6 — Loader checks | `internal/security/netfilterctl/protect_file.go`: `readProtectList`; `apps/netfilter/Shared/ProtectListFile.swift`: `ProtectList.load`; `apps/netfilter/Extension/Control.swift`: `reloadProtectList`; `agents/skills/mac-infra/references/firewall.md`: kill-path heading; `UNRESOLVED_QUESTIONS.md`: CLI path question |
 | 7 — Production choices | `docs/book/editorial/decisions-pending.md`: “Renderer”, “Producer” |
 | 8 — Reusable patterns | External assessment: points 1–3; `docs/book/editorial/decisions-pending.md`: “Swarma keyring reuse” |
 | 9 — Encoding adapter | External assessment: point 2 |

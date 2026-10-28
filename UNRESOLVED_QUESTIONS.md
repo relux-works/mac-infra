@@ -43,3 +43,21 @@ when it is decided, recording where the decision lives.
      outside readable paths. This weakens attribution.
 - **Needs**: a decision together with the signing route above. No change is
   needed while the tool stays development-signed on this Mac.
+
+## netfilter: the CLI protect-list path versus the extension's fixed path
+
+- **Status**: open (raised by BUG-261029-1a1xjl, which added the ownership
+  checks to both loaders but kept this out of scope).
+- **Today**: `mac-firewall netfilter kill|block|unblock` loads the list named
+  by `--protect-list FILE`; the extension always reads
+  `/Library/Application Support/works.relux.mac-infra.netfilter/protect.json`.
+  Both now require a root-owned file under root-owned ancestors, but they can
+  name different files. The CLI could then judge "protected" against a
+  different list from the one the extension enforces.
+- **Options**:
+  1. Drop the flag and make the CLI read the extension's fixed path.
+  2. Keep the flag, and refuse unless it resolves to the fixed path.
+  3. Keep both as they are, and document that the extension's list is
+     authoritative.
+- **Decides**: the mac-infra keeper together with the operator (the
+  local-sysadmin keeper), because it changes the operator CLI contract.

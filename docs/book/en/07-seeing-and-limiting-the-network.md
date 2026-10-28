@@ -91,12 +91,15 @@ Observe-only is the default, not the only implemented behavior.
 (*source*: `apps/netfilter/Shared/AppIdentity.swift`, `resolve`, `signingFacts`; `apps/netfilter/Shared/Enforcement.swift`, `Engine.decideNewFlow`, `handle`; *tested*: Swift `noProtectListMeansNoEnforcement` for the absent-list engine case.)
 
 The operator contract calls for an owner-installed, root-owned protect-list before enforcement.
-Neither the Go loader nor the extension reload checks filesystem ownership or permissions: both read and decode bytes.
-Root ownership is consequently an installation requirement, not a verified gate.
+Both loaders now check that contract before decoding any bytes.
+They walk from `/` one directory descriptor at a time without following symlinks, and require each ancestor to be a root-owned directory without group or world write.
+The file itself must be a regular file with a single link, owned by root, without group or world write or set-ID and sticky bits.
+The bytes are read only from that checked descriptor, and any refusal leaves enforcement off with a specific reason.
+The tests cover each refusal with the current user standing in for root; a file owned by another user cannot be created without root, so the file-owner branch is checked by inspection rather than a dedicated case.
 The CLI also accepts an explicit list path while the extension reads its fixed path.
 These paths need not identify the same bytes.
 Blocks expire within 24 hours and live only in memory, so extension restart clears them.
-(*source*: `agents/skills/mac-infra/references/firewall.md`, “Netfilter kill path”; `internal/security/netfilterctl/ctl.go`, `LoadProtectList`; `apps/netfilter/Extension/Control.swift`, `reloadProtectList`; `apps/netfilter/Shared/Enforcement.swift`, `RuleSet.add`, `Engine`.)
+(*source*: `agents/skills/mac-infra/references/firewall.md`, “Netfilter kill path”; `internal/security/netfilterctl/protect_file.go`, `readProtectList`; `internal/security/netfilterctl/ctl.go`, `LoadProtectList`; `apps/netfilter/Shared/ProtectListFile.swift`, `ProtectList.load`; `apps/netfilter/Extension/Control.swift`, `reloadProtectList`; `apps/netfilter/Shared/Enforcement.swift`, `RuleSet.add`, `Engine`; *tested*: `TestProtectListFileTrust` and Swift `protectListFileTrust`, the same case table.)
 
 The operator CLI checks its list, then journals and syncs an intent before invoking the app; afterward it journals the result.
 A journal failure prevents sending the request in the corrupt-journal fixture.
@@ -117,7 +120,7 @@ Local evidence does not establish absence of compromise.
 Treat missing coverage and rollback drift as unresolved operator work before relying on the resulting report.
 (*source*: `internal/maccore/service_peer_darwin.go`, `requireSocketPeer`; `internal/security/journal/journal.go`, `Verify`; `apps/netfilter/App/main.swift`, `control`, `controlRequest`; `internal/security/security.go`, `Summary`.)
 
-**Status.** *Source* checked at `4394da05a3ee918581f5389d44527370bfeb6fa3`.
+**Status.** *Source* checked at `4394da05a3ee918581f5389d44527370bfeb6fa3`; the protect-list paragraph at `3e49742093a0fc2b0b5bd569a41cbb27f538bb60`, the only code change since.
 *Tested* means assertions read, not fresh execution.
 Live-host netfilter kill behavior is *unknown*: the admitted evidence does not include a live kill-path measurement.
 No installed-state claim is made.
@@ -137,7 +140,7 @@ Installed builds may lag source.
 | Split buckets | `internal/security/firewallwatch/split.go`: `Split` | `internal/security/firewallwatch/split_test.go`: `TestSplitBuckets` |
 | Coverage limits | `internal/security/firewallwatch/{split,store}.go`: `coverageGaps`, `Split`, `Status`; `cmd/mac-firewall/watch.go`: `runWatch` | `internal/security/firewallwatch/split_test.go`: `TestCoverageStallIsGap`, `TestSplitCoverageTruncation`, `TestSplitEvictionTruncation` |
 | Attribution and default | `apps/netfilter/Shared/{AppIdentity,Enforcement}.swift`: `resolve`, `signingFacts`, `Engine` | `apps/netfilter/Tests/NetFilterIdentityTests/EnforcementTests.swift`: `noProtectListMeansNoEnforcement` (pure engine) |
-| Protect-list limit | `agents/skills/mac-infra/references/firewall.md`: kill-path contract; `internal/security/netfilterctl/ctl.go`: `LoadProtectList`; `apps/netfilter/Extension/Control.swift`: `reloadProtectList`; `apps/netfilter/Shared/Enforcement.swift`: `RuleSet`, `Engine` | Source only |
+| Protect-list checks | `agents/skills/mac-infra/references/firewall.md`: kill-path contract; `internal/security/netfilterctl/protect_file.go`: `readProtectList`; `internal/security/netfilterctl/ctl.go`: `LoadProtectList`; `apps/netfilter/Shared/ProtectListFile.swift`: `ProtectList.load`; `apps/netfilter/Extension/Control.swift`: `reloadProtectList`; `apps/netfilter/Shared/Enforcement.swift`: `RuleSet`, `Engine` | `internal/security/netfilterctl/ctl_test.go`: `TestProtectListFileTrust`; `apps/netfilter/Tests/NetFilterIdentityTests/ProtectListFileTests.swift`: `protectListFileTrust` |
 | Journal and reconciliation | `internal/security/netfilterctl/ctl.go`: `Execute`; `internal/security/journal/journal.go`: `Append`; `internal/security/firewallwatch/reconcile.go`: `ReconcileAction` | `internal/security/netfilterctl/ctl_test.go`: `TestNoKillWithoutJournal`; `internal/security/firewallwatch/reconcile_test.go`: `TestReconcileAction` |
 | Protection limits | `internal/maccore/service_peer_darwin.go`: `requireSocketPeer`; `internal/security/journal/journal.go`: `Verify`; `apps/netfilter/App/main.swift`: `control`, `controlRequest`; `internal/security/security.go`: `Summary` | Source and architectural inference |
 | Status | Job pin and admitted evidence boundary | No execution or live-host claim |
