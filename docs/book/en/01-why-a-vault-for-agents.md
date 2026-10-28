@@ -121,10 +121,10 @@ clean host.
 `internal/security/netfilterctl/ctl.go`, `Execute`;
 `agents/skills/mac-infra/references/firewall.md`, “Commands”.)
 
-Chapter 8 is still to come: the outline assigns it installed-versus-source
-status, unresolved decisions and the possible reuse of the swarma keyring.
-Treat that chapter as planned work, with open questions tracked separately.
-(*proposed*: `docs/book/editorial/outline.md`, chapter 8;
+Chapter 8 closes the part with installed-versus-source status, unresolved
+decisions and the open question of swarma keyring reuse.
+Its open questions remain decisions to make, not guarantees.
+(*source*: `docs/book/editorial/outline.md`, chapter 8;
 `docs/book/editorial/decisions-pending.md`; `UNRESOLVED_QUESTIONS.md`.)
 
 ## What this does not protect against
