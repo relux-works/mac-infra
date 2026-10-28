@@ -119,7 +119,8 @@ Treat missing coverage and rollback drift as unresolved operator work before rel
 
 **Status.** *Source* checked at `4394da05a3ee918581f5389d44527370bfeb6fa3`.
 *Tested* means assertions read, not fresh execution.
-Live-host netfilter kill behavior is *unknown*: the kill path is neither installed nor measured in the admitted evidence.
+Live-host netfilter kill behavior is *unknown*: the admitted evidence does not include a live kill-path measurement.
+No installed-state claim is made.
 Installed builds may lag source.
 
 ## Sources
