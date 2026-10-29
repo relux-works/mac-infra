@@ -199,7 +199,8 @@ mac-firewall watch classify --config /ABSOLUTE/firewall-watch.json --fixtures /A
 `run` stays in the foreground. SIGINT/SIGTERM stop collection and reap its
 llama-server child. Exit codes are 0 success, 1 refused/failed, 2 bad usage.
 Once the run context is cancelled or owned-backend teardown starts, rows
-still reached by the run loop (including the rest of a nettop sample) are
+still reached by the run loop (including the rest of a nettop sample and
+repeat escalations of an existing key) are
 retained as `digest` with reason `backend_shutdown`, without new backend or
 signer work. Cancellation during classification uses the same reason. These
 rows do not enter `needs_review`; actual non-nettop denies still enter

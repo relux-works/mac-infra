@@ -233,3 +233,48 @@ func TestShutdownRealDenyPreserved(t *testing.T) {
 		t.Fatalf("real deny lost: %+v", split)
 	}
 }
+
+// PR63 review r1: a repeat escalation (an existing key whose rule now decides) is recorded as backend_shutdown, stays out of needs_review and leaves the escalation unrecorded after cancellation or backend Stop; while running, the same upload spike still reaches needs_review.
+func TestShutdownRepeatEscalationNoReview(t *testing.T) {
+	for _, mode := range []string{"running", "cancelled", "backend_stop"} {
+		t.Run(mode, func(t *testing.T) {
+			cl, _ := fakeClassifier(t, embeddingHandler, 1, .5)
+			s, e := OpenStore(cl.cfg)
+			if e != nil {
+				t.Fatal(e)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			it := Item{Source: "nettop", App: "near", Kind: "outbound", Verdict: "observed", Remote: "lan", Count: 1}
+			s.collect(ctx, cl, it)
+			if len(s.Split(time.Now().Add(-time.Minute), time.Now()).NeedsReview) != 0 {
+				t.Fatal("healthy first observation reached needs_review")
+			}
+			switch mode {
+			case "cancelled":
+				cancel()
+			case "backend_stop":
+				cl.backend.Stop()
+			}
+			it.MBOut = 1000
+			s.collect(ctx, cl, it)
+			split := s.Split(time.Now().Add(-time.Minute), time.Now())
+			if mode == "running" {
+				if len(split.NeedsReview) != 1 || split.NeedsReview[0].Reason != "policy_upload_spike" {
+					t.Fatalf("running control: %+v", split.NeedsReview)
+				}
+				return
+			}
+			if len(split.NeedsReview) != 0 {
+				t.Fatalf("shutdown repeat escalation reached needs_review: %+v", split.NeedsReview)
+			}
+			last := s.State.Events[len(s.State.Events)-1]
+			if last.Label != "digest" || last.Reason != "backend_shutdown" || last.Counts != 2 {
+				t.Fatalf("shutdown repeat row: %+v", last)
+			}
+			if entry := s.State.Entries[key(cleanItem(it))]; len(entry.Escalated) != 0 {
+				t.Fatalf("shutdown recorded an escalation that would suppress the next run's review: %v", entry.Escalated)
+			}
+		})
+	}
+}

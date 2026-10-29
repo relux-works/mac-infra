@@ -236,9 +236,9 @@ func (s *Store) collect(ctx context.Context, cl *Classifier, it Item) bool {
 	if it.Source != SourceNetfilter && !cl.shuttingDown(ctx) {
 		it.Signer = s.signer(ctx, path)
 	}
-	return len(s.Observe(it, time.Now(), func(it Item) Decision {
+	return len(s.observe(it, time.Now(), func(it Item) Decision {
 		return cl.Classify(ctx, it)
-	})) > 0
+	}, func() bool { return cl.shuttingDown(ctx) })) > 0
 }
 
 func Run(ctx context.Context, c Config, cl *Classifier) (err error) {

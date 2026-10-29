@@ -308,6 +308,14 @@ func cleanItem(it Item) Item { it.App = Sanitize(it.App); it.Signer = Sanitize(i
 
 // Observe counts repeats and emits at most one spike per fixed per-key window.
 func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []Event {
+	return s.observe(it, now, classify, nil)
+}
+
+// observe is Observe with the run loop's shutdown predicate. A repeat
+// escalation is decided by the rules alone, without the classifier, so it
+// needs the predicate to record backend_shutdown during shutdown (PR63
+// review r1). nil means never shutting down.
+func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, shuttingDown func() bool) []Event {
 	it = cleanItem(it)
 	s.prune(now)
 	k := key(it)
@@ -369,6 +377,9 @@ func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []
 			}
 		}
 		if !found {
+			if shuttingDown != nil && shuttingDown() {
+				d = Decision{Label: "digest", Reason: "backend_shutdown"}
+			}
 			add(it, d)
 		}
 	}
