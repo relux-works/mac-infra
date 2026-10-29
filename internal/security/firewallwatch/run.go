@@ -241,19 +241,39 @@ func (s *Store) collect(ctx context.Context, cl *Classifier, it Item) bool {
 	}, func() bool { return cl.shuttingDown(ctx) })) > 0
 }
 
-// collectSample observes one nettop sample. The tick saves once after it;
-// emitted rows of a long sample (slow classification) are saved at
-// save_interval meanwhile, not once per row, because every save rewrites the
-// whole state (BUG-261029-do8v1i).
-func collectSample(items []Item, collect func(Item) bool, flush func(emitted bool) error) error {
+// collectSample observes one nettop sample and reports whether it emitted.
+// sampleTick saves it afterwards. During a long sample (slow classification),
+// an emitted row saves only once save_interval has passed since the last save,
+// not every time, because every save rewrites the whole state
+// (BUG-261029-do8v1i). The save timer does not interrupt a classification.
+func collectSample(items []Item, collect func(Item) bool, flush func(emitted bool) error) (bool, error) {
+	emitted := false
 	for _, it := range items {
 		if collect(it) {
+			emitted = true
 			if e := flush(false); e != nil {
-				return e
+				return emitted, e
 			}
 		}
 	}
-	return nil
+	return emitted, nil
+}
+
+// sampleTick runs one nettop tick. Backend maintenance (health check, Init)
+// can block for the backend timeout, so a sample that emitted is saved before
+// it (PR65 review r1); the closing save records the backend's health.
+func sampleTick(sample func() (bool, error), save func() error, maintain func()) error {
+	emitted, e := sample()
+	if e != nil {
+		return e
+	}
+	if emitted {
+		if e = save(); e != nil {
+			return e
+		}
+	}
+	maintain()
+	return save()
 }
 
 func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
@@ -353,7 +373,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		}
 		return e
 	}
-	sample := func() error {
+	sample := func() (bool, error) {
 		sampleCtx, stop := context.WithTimeout(ctx, duration(c.NettopInterval))
 		defer stop()
 		nettop := collectorCommand(sampleCtx, "nettop")
@@ -361,7 +381,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		nettop.Stdout = output
 		if e := nettop.Run(); e != nil {
 			s.State.NettopError = "nettop sample failed"
-			return nil
+			return false, nil
 		}
 		s.State.NettopError = ""
 		items, unknown := ParseNettop(output.String())
@@ -417,13 +437,11 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 				return e
 			}
 		case <-tick.C:
-			if e = sample(); e != nil {
-				return e
-			}
-			if ctx.Err() == nil && !cl.CheckHealth(ctx) {
-				_ = cl.Init(ctx)
-			}
-			if e = save(); e != nil {
+			if e = sampleTick(sample, save, func() {
+				if ctx.Err() == nil && !cl.CheckHealth(ctx) {
+					_ = cl.Init(ctx)
+				}
+			}); e != nil {
 				return e
 			}
 		}

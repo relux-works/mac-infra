@@ -167,14 +167,15 @@ func TestPruneScanPathContract(t *testing.T) {
 }
 
 // BUG-261029-do8v1i regression witness: at a 10000-entry, 10000-event,
-// 10000-span cap with time-ordered events, prune allocates nothing for entries
-// and events, and a repeat observation allocates no copy of events or coverage. The pre-fix prune copied every event on each call. Allocation counts
+// 10000-span cap with ordered wall-clock state (as loaded or observed), prune
+// allocates nothing, and a repeat observation allocates no copy of events or
+// coverage. The pre-fix prune copied every event on each call. Allocation counts
 // and bytes, not timing, keep this deterministic; Observe still makes small
 // allocations for the item key, far below one copy.
 func TestPruneAtCapDoesNotCopyState(t *testing.T) {
 	const max = 10000
 	s := pruneFixture(t, max)
-	now := time.Now()
+	now := time.Now().Round(0) // persisted state carries wall-clock times only
 	start := now.Add(-time.Hour)
 	for i := 0; i < max; i++ {
 		seen := start.Add(time.Duration(i) * time.Millisecond)
@@ -182,7 +183,7 @@ func TestPruneAtCapDoesNotCopyState(t *testing.T) {
 		s.State.Events = append(s.State.Events, Event{TS: seen, Source: "nettop", App: fmt.Sprintf("app%05d", i), Label: "noise", Reason: "x", Mode: "shadow", Counts: 1})
 		s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: seen, End: seen.Add(time.Microsecond)})
 	}
-	if allocs := testing.AllocsPerRun(20, func() { s.pruneObservations(now) }); allocs != 0 {
+	if allocs := testing.AllocsPerRun(20, func() { s.prune(now) }); allocs != 0 {
 		t.Fatalf("prune at cap allocated %.0f times per call", allocs)
 	}
 	it := Item{App: "app09999", Source: "nettop", Verdict: "observed", Remote: "lan"}
@@ -206,7 +207,7 @@ func TestPruneAtCapDoesNotCopyState(t *testing.T) {
 
 // A nettop sample whose new keys all emit writes state once, at the tick's save
 // after the sample, instead of once per emitted row (the pre-fix behaviour wrote
-// five times here). A sample still classifying after save_interval saves its
+// five times here), and reports that it emitted. A sample still classifying after save_interval saves its
 // rows emitted so far mid-sample, and a failed save stops the sample with its
 // error. Every emitted row is in the reopened state afterwards.
 func TestCollectSampleSavesOncePerSample(t *testing.T) {
@@ -230,8 +231,8 @@ func TestCollectSampleSavesOncePerSample(t *testing.T) {
 		s, writes, clock := setup(t)
 		collect := func(it Item) bool { return len(s.Observe(it, *clock, ruleClassify)) > 0 }
 		flush := func(emitted bool) error { return s.Flush(*clock, emitted, false) }
-		if e := collectSample(items, collect, flush); e != nil {
-			t.Fatal(e)
+		if emitted, e := collectSample(items, collect, flush); e != nil || !emitted {
+			t.Fatal(emitted, e)
 		}
 		if writes["state.json"] != 0 {
 			t.Fatalf("state written %d times during the sample", writes["state.json"])
@@ -257,7 +258,7 @@ func TestCollectSampleSavesOncePerSample(t *testing.T) {
 			return len(s.Observe(it, *clock, ruleClassify)) > 0
 		}
 		flush := func(emitted bool) error { return s.Flush(*clock, emitted, false) }
-		if e := collectSample(items, collect, flush); e != nil {
+		if _, e := collectSample(items, collect, flush); e != nil {
 			t.Fatal(e)
 		}
 		reopened, e := OpenStore(s.Config)
@@ -278,8 +279,141 @@ func TestCollectSampleSavesOncePerSample(t *testing.T) {
 			}
 			return nil
 		}
-		if e := collectSample(items, collect, flush); !errors.Is(e, failed) || collected != 2 {
+		if _, e := collectSample(items, collect, flush); !errors.Is(e, failed) || collected != 2 {
 			t.Fatalf("error %v after %d items; want disk full after 2", e, collected)
 		}
 	})
+}
+
+// PR65 review r1: observations store wall-clock times, so in-memory state is
+// the state a reload yields. An observation made with a monotonic clock
+// reading leaves none in its event or entry, and a Save/OpenStore round trip
+// returns equal events.
+func TestObservationsUseWallClock(t *testing.T) {
+	s := pruneFixture(t, 20)
+	now := time.Now()
+	if wallClock(now) {
+		t.Fatal("fixture needs a monotonic reading")
+	}
+	s.Observe(Item{App: "wall", Source: "nettop", Verdict: "observed", Remote: "lan"}, now, ruleClassify)
+	if len(s.State.Events) != 1 || !wallClock(s.State.Events[0].TS) || !s.State.Events[0].TS.Equal(now) {
+		t.Fatalf("event time %v", s.State.Events)
+	}
+	for _, e := range s.State.Entries {
+		if !wallClock(e.FirstSeen) || !wallClock(e.LastSeen) || !wallClock(e.WindowStart) {
+			t.Fatalf("entry times keep a monotonic reading: %+v", e)
+		}
+	}
+	if e := s.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	reopened, e := OpenStore(s.Config)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(reopened.State.Events[0].TS, s.State.Events[0].TS) {
+		t.Fatal("reloaded event time differs from the in-memory one")
+	}
+}
+
+// The fast paths' guards refuse every state where they would not be exact:
+// a monotonic reading anywhere, out-of-order times, an expired span, spans over
+// the bound, or empty coverage (the sorting path turns it into nil). Ordered
+// wall-clock state within the bound is accepted, so the fast path is reachable.
+func TestPruneFastPathGuards(t *testing.T) {
+	mono := time.Now()
+	wall := mono.Round(0)
+	if !wallClock(wall) || wallClock(mono) {
+		t.Fatal("wallClock does not detect the monotonic reading")
+	}
+	later := wall.Add(time.Minute)
+	if !eventsWallOrdered([]Event{{TS: wall}, {TS: wall}, {TS: later}}) || !eventsWallOrdered(nil) {
+		t.Fatal("ordered wall-clock events refused")
+	}
+	for name, events := range map[string][]Event{
+		"monotonic":    {{TS: wall}, {TS: mono.Add(time.Hour)}},
+		"out of order": {{TS: later}, {TS: wall}},
+	} {
+		if eventsWallOrdered(events) {
+			t.Errorf("events %s accepted", name)
+		}
+	}
+	cutoff := wall.Add(-time.Hour)
+	span := func(start time.Time) CoverageSpan { return CoverageSpan{Start: start, End: start.Add(time.Second)} }
+	if !coverageSettled([]CoverageSpan{span(wall), span(later)}, 2, cutoff) {
+		t.Fatal("settled coverage refused")
+	}
+	stalled := span(wall)
+	stalled.StallAfter = &CoverageStall{From: stalled.End, To: mono.Add(time.Hour)}
+	for name, spans := range map[string][]CoverageSpan{
+		"empty":           {},
+		"over the bound":  {span(wall), span(later), span(later)},
+		"monotonic start": {span(mono)},
+		"monotonic stall": {stalled},
+		"out of order":    {span(later), span(wall)},
+		"expired":         {span(cutoff.Add(-time.Hour)), span(wall)},
+	} {
+		if coverageSettled(spans, 2, cutoff) {
+			t.Errorf("coverage %s accepted", name)
+		}
+	}
+}
+
+// PR65 review r1, finding 2: coverage expiry stays irreversible at observation
+// time. An observation past a span's retention removes it and advances the
+// watermark; a later Save with an earlier clock reading neither restores the
+// span nor clears the watermark, in memory, in Split or in state.json.
+func TestCoverageExpiresAtObservation(t *testing.T) {
+	s := pruneFixture(t, 20)
+	now := time.Now().Round(0)
+	end := now.Add(-time.Duration(s.Config.RetentionDays) * 24 * time.Hour)
+	s.BeginCoverage(end.Add(-time.Hour))
+	s.EndCoverage(end)
+	if e := s.Save(end); e != nil {
+		t.Fatal(e)
+	}
+	if len(s.State.Coverage) != 1 {
+		t.Fatalf("fixture coverage %v", s.State.Coverage)
+	}
+	s.Observe(Item{App: "clock", Source: "nettop", Verdict: "observed", Remote: "lan"}, now.Add(time.Second), ruleClassify)
+	if len(s.State.Coverage) != 0 || !s.State.CoverageEvictedThrough.Equal(end) || !s.Split(end.Add(-time.Minute), end).Window.Truncated {
+		t.Fatalf("observation kept expired coverage: %v watermark %v", s.State.Coverage, s.State.CoverageEvictedThrough)
+	}
+	if e := s.Save(now.Add(-time.Second)); e != nil {
+		t.Fatal(e)
+	}
+	reopened, e := OpenStore(s.Config)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(reopened.State.Coverage) != 0 || !reopened.State.CoverageEvictedThrough.Equal(end) {
+		t.Fatalf("saved coverage %v watermark %v", reopened.State.Coverage, reopened.State.CoverageEvictedThrough)
+	}
+}
+
+// PR65 review r1, finding 3: a tick saves a sample that emitted before backend
+// maintenance, which can block for the backend timeout, then saves once more.
+// A failed first save returns its error without maintenance; a sample that
+// emitted nothing skips the early save; a sample error stops the tick.
+func TestSampleTickSavesBeforeMaintenance(t *testing.T) {
+	run := func(emitted bool, sampleErr, saveErr error) ([]string, error) {
+		var calls []string
+		e := sampleTick(func() (bool, error) { calls = append(calls, "sample"); return emitted, sampleErr },
+			func() error { calls = append(calls, "save"); return saveErr },
+			func() { calls = append(calls, "maintain") })
+		return calls, e
+	}
+	if calls, e := run(true, nil, nil); e != nil || !reflect.DeepEqual(calls, []string{"sample", "save", "maintain", "save"}) {
+		t.Fatalf("emitted: %v %v", calls, e)
+	}
+	if calls, e := run(false, nil, nil); e != nil || !reflect.DeepEqual(calls, []string{"sample", "maintain", "save"}) {
+		t.Fatalf("silent: %v %v", calls, e)
+	}
+	failed := errors.New("disk full")
+	if calls, e := run(true, nil, failed); !errors.Is(e, failed) || !reflect.DeepEqual(calls, []string{"sample", "save"}) {
+		t.Fatalf("failed save: %v %v", calls, e)
+	}
+	if calls, e := run(true, failed, nil); !errors.Is(e, failed) || !reflect.DeepEqual(calls, []string{"sample"}) {
+		t.Fatalf("failed sample: %v %v", calls, e)
+	}
 }
