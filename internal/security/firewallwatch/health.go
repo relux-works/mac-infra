@@ -37,6 +37,10 @@ type RunHealth struct {
 	// latest completion time among records the bound dropped.
 	SlowOps               []SlowOp   `json:"slow_ops"`
 	SlowOpsDroppedThrough *time.Time `json:"slow_ops_dropped_through"`
+	// Journal times state-journal appends, heartbeats included.
+	// JournalTornTail counts journals found with a torn last line at open.
+	Journal         TimingSummary `json:"journal"`
+	JournalTornTail uint64        `json:"journal_torn_tail"`
 }
 
 // The slow-operation record keeps run-loop operations of at least two seconds,
@@ -52,6 +56,7 @@ const (
 	SlowClassification = "classification"
 	SlowMaintenance    = "maintenance"
 	SlowNettopSample   = "nettop_sample"
+	SlowJournal        = "journal"
 )
 
 // slowOpThreshold is SlowOpThreshold; tests lower it.
@@ -68,7 +73,7 @@ type SlowOp struct {
 }
 
 func slowKind(kind string) bool {
-	return kind == SlowSave || kind == SlowClassification || kind == SlowMaintenance || kind == SlowNettopSample
+	return kind == SlowSave || kind == SlowClassification || kind == SlowMaintenance || kind == SlowNettopSample || kind == SlowJournal
 }
 
 // recordSlow keeps an operation of at least slowOpThreshold, dropping the

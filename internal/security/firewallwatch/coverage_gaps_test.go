@@ -312,7 +312,7 @@ func TestRunHealthInstrumentation(t *testing.T) {
 		t.Fatal("classification summary counted repeats")
 	}
 	s.atomicWrite = func(path string, raw []byte) error { time.Sleep(2 * time.Millisecond); return atomicWrite(path, raw) }
-	if err = s.Flush(time.Now(), true, false); err != nil {
+	if err = s.Save(time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	first := s.State.Health.Save

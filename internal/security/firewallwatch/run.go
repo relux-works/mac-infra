@@ -129,7 +129,13 @@ func (s *Store) signer(ctx context.Context, path string) string {
 	if err != nil {
 		v = "unknown"
 	}
-	s.State.Signers[cacheKey] = SignerEntry{Value: Sanitize(v), LastSeen: now, Identity: identity, Failed: err != nil, Inspected: now}
+	entry := SignerEntry{Value: Sanitize(v), LastSeen: now, Identity: identity, Failed: err != nil, Inspected: now}
+	// A new or changed result is journaled; re-inspections with the same
+	// result (bundle directories, failure retries) only refresh times.
+	if prev, ok := s.State.Signers[cacheKey]; !ok || prev.Value != entry.Value || prev.Identity != entry.Identity || prev.Failed != entry.Failed {
+		s.journalSigner(cacheKey, entry)
+	}
+	s.State.Signers[cacheKey] = entry
 	s.dirty = true
 	return Sanitize(v)
 }
@@ -353,6 +359,11 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	if e != nil {
 		return e
 	}
+	// The startup snapshot folds a replayed journal, a torn tail included,
+	// into state.json and starts a fresh journal.
+	if e = s.Save(time.Now()); e != nil {
+		return e
+	}
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := collectorCommand(childCtx, "log")
@@ -419,9 +430,11 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	s.lastSave = time.Now()
 	saveTick := time.NewTicker(duration(c.SaveInterval))
 	defer saveTick.Stop()
+	// save is the tick's and the netfilter end's durable write: a heartbeat
+	// with any pending records, or a snapshot when due.
 	save := func() error {
 		s.State.BackendHealthy = cl.Healthy()
-		e := s.Save(time.Now())
+		e := s.Checkpoint(time.Now())
 		if e == nil {
 			saveTick.Reset(duration(c.SaveInterval))
 		}

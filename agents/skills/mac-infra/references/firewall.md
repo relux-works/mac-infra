@@ -220,7 +220,7 @@ are outside these counters. No configuration fields are added.
 a live health probe; a stale timestamp may mean the watcher has stopped.
 The persisted health also reports `line_queue_high_water` (`alf` and
 `netfilter`, observed buffered depths from 0 to the unchanged capacity of 64)
-and `run_loop_timing` (`save`, `classification` and `maintenance`). Each timing has `last_ns`,
+and `run_loop_timing` (`save`, `classification`, `maintenance` and `journal`). Each timing has `last_ns`,
 `max_ns`, a saturating `count` and a nullable `max_at` timestamp, with no sample
 history. Queue depths keep the numeric `alf` and `netfilter` values and add
 `max_at: {alf, netfilter}` for their nullable timestamps. Timestamps record the
@@ -233,17 +233,18 @@ inspection or deduplicated repeats. Save timing covers the whole save attempt,
 including state and daily-file writes; a flush that saves uses the same timing,
 while a skipped flush adds no sample. Maintenance timing covers each nettop
 tick's backend health check, including a classifier Init after a failed check;
-old states read it as zero. The completed duration is persisted by the
+old states read it as zero. Journal timing covers each state-journal append,
+heartbeats included; save timing covers snapshots. The completed duration is persisted by the
 next save, including failed attempts: the last save on shutdown cannot include
 its own full duration without another write. Queue high-water values, timing
 counters and maxima accumulate across runs, together with their timestamps.
 Text status displays the same measurements as durations and their maxima times. In
 `state.json`, these fields live under `health.line_queue_high_water`,
-`health.save`, `health.classification` and `health.maintenance`. These observations do not measure
+`health.save`, `health.classification`, `health.maintenance` and `health.journal`. These observations do not measure
 upstream log loss or establish the cause of stalls.
 `health.slow_ops` keeps the newest 512 run-loop operations that took at least
 two seconds, in completion order: `kind` (`save`, `classification`,
-`maintenance` or `nettop_sample`), `at` (completion time), `duration_ns`, and
+`maintenance`, `nettop_sample` or `journal`), `at` (completion time), `duration_ns`, and
 `items` when known (the rows of a nettop sample, including the time spent on
 collector lines drained during it, or the labelled pool rows of a maintenance
 whose Init succeeded). A failed or timed-out nettop command is recorded as a
@@ -268,7 +269,7 @@ count, `coverage_gaps`, `coalesced_short_stalls`, `evicted_through`, `coverage_e
 earlier), per-kind `kinds` with `count`, `max_ns` and `max_at` in that window,
 and `dropped_through` when the bound dropped records completed at or after
 since; it does not affect `truncated`. `run` records coverage spans in state: a span opens when collection
-starts and ends at its last save, or when the ALF log stream ended if that came
+starts and ends at its last snapshot or heartbeat, or when the ALF log stream ended if that came
 first. `coverage_gaps` lists disjoint intervals in [since, as_of], each with
 `from`, `to` and `kind`:
 
@@ -320,14 +321,14 @@ separate clean span. Windows starting at or after that boundary inherit none
 of the batch's counters.
 If `max_entries` is smaller than the number of running sources, the hard bound
 still applies: an evicted open span is retained in its runtime tracker and
-restored and extended on the next save. Its discarded time advances the same
+restored and extended on the next snapshot or heartbeat. Its discarded time advances the same
 watermark, so it is unknown rather than reported as a stop. The runtime snapshot
 is not persisted; a new watcher run opens new coverage as usual.
 
 When a span reaches the window, its end may trail as_of by up to
-`nettop_interval` + `save_interval`, the unchanged expected save cadence,
+`nettop_interval` + `save_interval`, the unchanged expected heartbeat cadence,
 without an unrecorded tail gap. A watcher that died within that interval is
-not detected, and a save delayed longer can add a spurious tail gap. Explicit
+not detected, and a heartbeat delayed longer can add a spurious tail gap. Explicit
 stalls never receive this grace. Without a span reaching the window, all
 unrecorded time is a gap whatever its length. When a state file without
 `coverage_version` loads, all existing spans are marked `legacy: true` and
@@ -453,35 +454,71 @@ token that was not an address. Truncation never splits a UTF-8 rune.
 
 The state directory must be owned by the caller, mode `0700`, and not a symlink.
 Choose a short absolute path: Darwin UNIX socket path names must fit in 103 bytes.
-`state.json`, `events-YYYY-MM-DD.jsonl`, and `new-events.flag` are `0600`.
-Writes use same-directory temporary files and rename. State is authoritative;
-daily projections are rewritten atomically only when their events changed,
-recovering projections after an interrupted write. ALF and netfilter new-key,
-spike and escalation events save immediately. Those of a nettop sample save once
-when the sample ends, before backend health maintenance. During a slow sample,
-an emitted row also saves once `save_interval` has passed since the last save
-completed (the interval runs from completion, so a slow save is not followed
-at once by another),
-because every save rewrites the whole state; the save timer does not interrupt
-a classification in progress. Before each nettop row is classified, the sample
-handles the ALF and netfilter lines already queued, at most one queue's worth
-per source (each source has its own budget) and without waiting, so a sample of many slow classifications does
-not hold the feeders in a stall. After cancellation the sample drains nothing.
-Backend maintenance and the tick's saves still block the run loop. An observation decides only its own key's
-retention: an entry last seen before the cutoff counts as new. Entries, events
-and coverage spans nobody observes expire at the next save. When an
-observation takes entries, events or signers over `max_entries`, the full
-retention and bound prune runs at once. Those later prunes apply every cutoff
-an earlier observation had, both by monotonic and by wall readings. A clock
-correction, or a save handed an earlier time, never brings back an item an
-earlier observation had expired. The first observation after a backward wall
-step runs one full prune. Silent updates mark state dirty, then save at
-`save_interval`, the next nettop tick if earlier, and shutdown. The flag contains
-the latest event RFC3339 timestamp. A per-directory advisory lock is acquired
-before loading state and refuses concurrent collectors.
-Directory ancestors and same-user concurrent replacement are not a security
-boundary. The files do not form a multi-file transaction, and sudden power
-loss durability is not guaranteed by rename alone.
+`state.json`, `state-journal.jsonl`, `events-YYYY-MM-DD.jsonl` and
+`new-events.flag` are `0600`. `state.json` is a snapshot; the state journal
+(`state-journal.jsonl`) holds what happened since it, one JSON record per line,
+each append followed by a full sync (BUG-261029-kpyw8s). ALF, netfilter and
+nettop new-key, spike and escalation events are journaled at once, with the
+observed key's entry, and so is every observation that changes deny-window
+state (window start, deny count, spike or escalation marks) even when it emits
+nothing. New or changed signer inspection results are journaled too.
+`new-events.flag`, which holds the latest event RFC3339 timestamp, is updated
+with each append that carries events. Silent state (parser and nettop counters,
+errors, backend health, run-loop health, coverage) follows in a heartbeat
+record once `save_interval` has passed since the last durable write completed,
+on each nettop tick and when the netfilter stream ends. A heartbeat carries, of
+the coverage, each source's spans from its open span at the last snapshot.
+
+A snapshot rewrites `state.json` (with `journal_seq`, the last record folded
+in) by a same-directory temporary file, full sync and rename, then the day
+files and the flag, then syncs the directory, removes the journal and syncs
+the directory again. It runs at watcher start (folding any journal left by a
+crash), every 5 minutes, after 500 records or 8 MiB of journal, at shutdown,
+when a heartbeat's coverage would exceed 256 spans, and after a failed append;
+after a failed append nothing more is appended until a snapshot succeeds, so a
+torn write can only be the journal's last line. A crash before the rename
+leaves the old snapshot and the whole journal; after it, records up to
+`journal_seq` are skipped. Day files are projections written only by
+snapshots, so they can lag the journal by up to one snapshot interval;
+`digest` and `status` read the journal.
+
+Opening the store (the watcher, `status`, `digest`) opens the journal before
+reading `state.json`, then applies the records after `journal_seq` in order.
+Only complete lines count: a last line without a newline, or a last line that
+is not valid JSON, is a torn tail, ignored and counted in
+`health.journal_torn_tail`. Any other malformed line, a seq gap or an unknown
+record type refuses the state as corrupt. Readers never write: only the
+watcher's start-up snapshot removes a torn tail, together with the folded
+journal.
+
+After a crash the journal restores every emitted event, its entry and
+deny-window state, signer results, and silent state up to the last heartbeat.
+Lost are at most one snapshot interval (5 minutes or 500 records) of last-seen
+times and counts of observations that neither emit nor change deny-window
+state, and signer last-seen times. The only effect on emission: a key whose
+lost last-seen time makes it expire up to that much earlier emits again if it
+reappears, at most one duplicate row per such key, after a crash only.
+A shutdown takes a snapshot and removes the journal, so an older binary reads
+the full state after a clean stop. After a crash, run this binary once before
+rolling back, or the older binary misses the journaled records.
+
+Before each nettop row is classified, the sample handles the ALF and netfilter
+lines already queued, at most one queue's worth per source (each source has
+its own budget) and without waiting, so a sample of many slow classifications
+does not hold the feeders in a stall. After cancellation the sample drains
+nothing. Backend maintenance, journal appends and snapshots still block the
+run loop. An observation decides only its own key's retention: an entry last
+seen before the cutoff counts as new. Entries, events and coverage spans nobody
+observes expire at the next snapshot. When an observation takes entries,
+events or signers over `max_entries`, the full retention and bound prune runs
+at once. Those later prunes apply every cutoff an earlier observation had, both
+by monotonic and by wall readings. A clock correction, or a save handed an
+earlier time, never brings back an item an earlier observation had expired.
+The first observation after a backward wall step runs one full prune. A
+per-directory advisory lock is acquired before loading state and refuses
+concurrent collectors. Directory ancestors and same-user concurrent replacement
+are not a security boundary. The files do not form a multi-file transaction,
+and sudden power loss durability is not guaranteed by rename alone.
 
 Direct watcher artifacts are under `state_dir`, including the private UNIX
 socket and lock. `MkdirAll` may also create missing ancestor directories above

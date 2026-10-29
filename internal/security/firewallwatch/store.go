@@ -57,6 +57,8 @@ type State struct {
 	EvictedThrough         time.Time `json:"evicted_through"`
 	CoverageEvictedThrough time.Time `json:"coverage_evicted_through"`
 	Health                 RunHealth `json:"health"`
+	// JournalSeq is the last state-journal record folded into this snapshot.
+	JournalSeq uint64 `json:"journal_seq"`
 }
 
 // CoverageSpan is one interval in which a watcher collected one source and
@@ -125,6 +127,17 @@ type Store struct {
 	// backward wall step. The expiry they decided is applied lazily: by the
 	// observed key's own check, an over-cap prune, or the next Save.
 	refs expiryRefs
+	// State journal (journal.go): the last seq written or replayed, records
+	// not yet appended, and the journal since the last snapshot.
+	seq            uint64
+	pending        []journalRecord
+	lastSnapshot   time.Time
+	journalRecords int
+	journalBytes   int64
+	journalBroken  bool
+	snapOpen       map[string]time.Time
+	// journalWrite replaces the append's single write in tests.
+	journalWrite func(*os.File, []byte) error
 }
 
 func safeDir(dir string) error {
@@ -155,11 +168,27 @@ func safeExisting(path string) error {
 	}
 	return nil
 }
+
+// afterJournalOpen runs in OpenStore between opening the journal and reading
+// state.json; tests use it to rotate at that point.
+var afterJournalOpen func()
+
 func OpenStore(c Config) (*Store, error) {
 	if e := safeDir(c.StateDir); e != nil {
 		return nil, e
 	}
 	s := &Store{Config: c}
+	// The journal is opened before state.json is read: see openJournal.
+	journal, e := openJournal(s.journalPath())
+	if e != nil {
+		return nil, e
+	}
+	if journal != nil {
+		defer journal.Close()
+	}
+	if afterJournalOpen != nil {
+		afterJournalOpen()
+	}
 	path := filepath.Join(c.StateDir, "state.json")
 	if e := safeExisting(path); e != nil {
 		return nil, e
@@ -186,6 +215,21 @@ func OpenStore(c Config) (*Store, error) {
 		s.State.Entries = map[string]*Entry{}
 		s.State.Signers = map[string]SignerEntry{}
 	}
+	s.seq = s.State.JournalSeq
+	if journal != nil {
+		// Readers replay read-only; only the watcher's startup snapshot
+		// removes a torn tail together with the folded journal.
+		torn, e := s.replayJournal(journal)
+		if e != nil {
+			return nil, fmt.Errorf("corrupt state journal: %w", e)
+		}
+		if e = s.validateState(); e != nil {
+			return nil, fmt.Errorf("corrupt state journal: %w", e)
+		}
+		if torn {
+			s.State.Health.JournalTornTail = addCount(s.State.Health.JournalTornTail, 1)
+		}
+	}
 	if s.State.CoverageVersion == 0 {
 		for i := range s.State.Coverage {
 			s.State.Coverage[i].Legacy = true
@@ -193,6 +237,7 @@ func OpenStore(c Config) (*Store, error) {
 		s.State.CoverageVersion = coverageVersion
 	}
 	s.prune(time.Now())
+	s.markSnapshot()
 	return s, nil
 }
 
@@ -232,7 +277,7 @@ func (s *Store) validateState() error {
 		return bad()
 	}
 	h := st.Health
-	if h.LineQueueHighWater.ALF < 0 || h.LineQueueHighWater.ALF > 64 || h.LineQueueHighWater.Netfilter < 0 || h.LineQueueHighWater.Netfilter > 64 || !h.Save.valid() || !h.Classification.valid() || !h.Maintenance.valid() || !h.slowOpsValid() {
+	if h.LineQueueHighWater.ALF < 0 || h.LineQueueHighWater.ALF > 64 || h.LineQueueHighWater.Netfilter < 0 || h.LineQueueHighWater.Netfilter > 64 || !h.Save.valid() || !h.Classification.valid() || !h.Maintenance.valid() || !h.Journal.valid() || !h.slowOpsValid() {
 		return bad()
 	}
 	for _, v := range st.Coverage {
@@ -346,7 +391,8 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 	entry.LastSeen = now
 	entry.Count++
 	spike := false
-	if it.Verdict != "allow" && it.Verdict != "observed" && it.Verdict != "unknown" {
+	denied := it.Verdict != "allow" && it.Verdict != "observed" && it.Verdict != "unknown"
+	if denied {
 		if !now.Before(entry.WindowStart.Add(duration(s.Config.DenySpikeWindow))) {
 			entry.WindowStart = now
 			entry.Denies = 0
@@ -404,6 +450,11 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 	if spike {
 		it.Spike = true
 		add(it, s.classify(it, classify))
+	}
+	// Emitted events and deny-window state are journaled at once; other
+	// changes to the entry (last_seen, count) wait for the next snapshot.
+	if len(events) > 0 || denied {
+		s.journalEntry(k, entry, events)
 	}
 	if len(s.State.Entries) > s.Config.MaxEntries || len(s.State.Events) > s.Config.MaxEntries || len(s.State.Signers) > s.Config.MaxEntries {
 		s.pruneAt(s.refs)
@@ -525,16 +576,42 @@ func (s *Store) write(path string, data []byte) error {
 	return atomicWrite(path, data)
 }
 
-// Flush saves emitted events immediately; silent updates wait for an interval,
-// a nettop tick, or shutdown. Failed writes retain dirty state for a retry.
+// Flush makes pending journal records (emitted events, deny-window state,
+// new signer results) durable at once; emitted is kept for callers, the
+// pending records decide. Silent state follows in a heartbeat once
+// save_interval has passed since the last durable write, and a snapshot
+// replaces both when one is due or forced. A failed append falls back to a
+// snapshot. Failed writes retain dirty state for a retry.
 func (s *Store) Flush(now time.Time, emitted, force bool) error {
-	if !s.dirty && !force {
+	if force || (s.snapshotDue(now) && (s.dirty || len(s.pending) > 0)) {
+		return s.Save(now)
+	}
+	beat := s.dirty && (s.lastSave.IsZero() || !now.Before(s.lastSave.Add(duration(s.Config.SaveInterval))))
+	if len(s.pending) == 0 && !beat {
 		return nil
 	}
-	if !emitted && !force && !s.lastSave.IsZero() && now.Before(s.lastSave.Add(duration(s.Config.SaveInterval))) {
+	return s.journalOrSnapshot(now, beat)
+}
+
+// Checkpoint makes the pending records and the silent state durable now, as a
+// heartbeat, or takes a snapshot when one is due. The run loop calls it on the
+// nettop tick and when the netfilter stream ends.
+func (s *Store) Checkpoint(now time.Time) error {
+	if s.snapshotDue(now) {
+		return s.Save(now)
+	}
+	return s.journalOrSnapshot(now, true)
+}
+
+func (s *Store) journalOrSnapshot(now time.Time, beat bool) error {
+	e := s.appendJournal(now, beat)
+	if e == nil {
 		return nil
 	}
-	return s.Save(now)
+	if se := s.Save(now); se != nil {
+		return errors.Join(e, se)
+	}
+	return nil
 }
 
 // Coverage returns the coverage tracker of one source ("" is the ALF log).
@@ -706,6 +783,30 @@ func (s *Store) Save(now time.Time) error {
 	if e := safeDir(s.Config.StateDir); e != nil {
 		return e
 	}
+	s.applyCollectors(now)
+	s.pruneAt(s.refs.with(now))
+	s.State.Updated = now
+	s.State.JournalSeq = s.seq
+	if e := s.validateState(); e != nil {
+		return fmt.Errorf("refusing invalid state save: %w", e)
+	}
+	data, e := json.Marshal(s.State)
+	if e != nil {
+		return e
+	}
+	if int64(len(data)) > s.Config.MaxStateBytes {
+		return errors.New("state exceeds max_state_bytes")
+	}
+	if e = s.write(filepath.Join(s.Config.StateDir, "state.json"), data); e != nil {
+		return e
+	}
+	return s.saveProjections(now, start)
+}
+
+// applyCollectors moves the feeders' observations (dropped lines, stalls,
+// queue depth, collector end) into state and extends each covering source's
+// open span to now. Snapshots and heartbeats both run it.
+func (s *Store) applyCollectors(now time.Time) {
 	for _, source := range sortedCoverageSources(s.coverage) {
 		c := s.coverage[source]
 		c.mu.Lock()
@@ -721,21 +822,11 @@ func (s *Store) Save(now time.Time) error {
 			s.extendCoverage(c, now)
 		}
 	}
-	s.pruneAt(s.refs.with(now))
-	s.State.Updated = now
-	if e := s.validateState(); e != nil {
-		return fmt.Errorf("refusing invalid state save: %w", e)
-	}
-	data, e := json.Marshal(s.State)
-	if e != nil {
-		return e
-	}
-	if int64(len(data)) > s.Config.MaxStateBytes {
-		return errors.New("state exceeds max_state_bytes")
-	}
-	if e = s.write(filepath.Join(s.Config.StateDir, "state.json"), data); e != nil {
-		return e
-	}
+}
+
+// saveProjections finishes a snapshot after state.json is written: the day
+// files and the flag, then the journal rotation.
+func (s *Store) saveProjections(now, start time.Time) (e error) {
 	// Daily files are atomic projections of authoritative state: crash/retry cannot
 	// append duplicates. Retention also caps the total event count across days.
 	days := map[string][]byte{}
@@ -794,21 +885,15 @@ func (s *Store) Save(now time.Time) error {
 		}
 	}
 	if !s.State.LastEvent.IsZero() {
-		flagPath := filepath.Join(s.Config.StateDir, "new-events.flag")
-		if e = safeExisting(flagPath); e != nil {
+		if e = s.writeFlag(); e != nil {
 			return e
 		}
-		stamp := []byte(s.State.LastEvent.Format(time.RFC3339Nano) + "\n")
-		existing, readErr := os.ReadFile(flagPath)
-		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return readErr
-		}
-		if !bytes.Equal(existing, stamp) {
-			if e = s.write(flagPath, stamp); e != nil {
-				return e
-			}
-		}
 	}
+	if e = s.rotateJournal(); e != nil {
+		return e
+	}
+	s.markSnapshot()
+	s.lastSnapshot = now.Add(time.Since(start))
 	s.dirty = false
 	// The save interval runs from completion: a save slower than the interval
 	// must not make the next silent flush save again at once (BUG-261030-v6ahj5).
@@ -859,7 +944,8 @@ func (s *Store) Status() map[string]any {
 		"line_queue_high_water":     s.State.Health.LineQueueHighWater,
 		"shutdown_dropped_lines":    s.State.Health.ShutdownDroppedLines,
 		"run_loop_timing": map[string]TimingSummary{"save": s.State.Health.Save,
-			"classification": s.State.Health.Classification, "maintenance": s.State.Health.Maintenance},
+			"classification": s.State.Health.Classification, "maintenance": s.State.Health.Maintenance, "journal": s.State.Health.Journal},
+		"journal_torn_tail": s.State.Health.JournalTornTail,
 	}
 }
 func (s *Store) String() string {
@@ -873,4 +959,21 @@ func sortedCoverageSources(m map[string]*SourceCoverage) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// writeFlag stamps new-events.flag with the latest event time, if it changed.
+func (s *Store) writeFlag() error {
+	flagPath := filepath.Join(s.Config.StateDir, "new-events.flag")
+	if e := safeExisting(flagPath); e != nil {
+		return e
+	}
+	stamp := []byte(s.State.LastEvent.Format(time.RFC3339Nano) + "\n")
+	existing, readErr := os.ReadFile(flagPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+	if bytes.Equal(existing, stamp) {
+		return nil
+	}
+	return s.write(flagPath, stamp)
 }

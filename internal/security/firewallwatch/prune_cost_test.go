@@ -320,11 +320,11 @@ func TestObserveOverCapRunsFullPrune(t *testing.T) {
 	}
 }
 
-// A nettop sample whose new keys all emit writes state once, at the tick's save
-// after the sample, instead of once per emitted row (the pre-fix behaviour wrote
-// five times here), and reports that it emitted. A sample still classifying after save_interval saves its
-// rows emitted so far mid-sample, and a failed save stops the sample with its
-// error. Every emitted row is in the reopened state afterwards.
+// A nettop sample whose new keys all emit never rewrites state.json during the
+// sample (the pre-fix behaviour wrote five times here) and reports that it
+// emitted. Each emitted row is journaled as it is flushed, so even a long
+// sample's rows are all in the reopened state without a state.json write
+// (BUG-261029-kpyw8s). A failed flush stops the sample with its error.
 func TestCollectSampleSavesOncePerSample(t *testing.T) {
 	setup := func(t *testing.T) (*Store, map[string]int, *time.Time) {
 		t.Helper()
@@ -380,8 +380,8 @@ func TestCollectSampleSavesOncePerSample(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if writes["state.json"] != 1 || len(reopened.State.Events) != 3 {
-			t.Fatalf("writes %d, persisted events %d; want 1 and 3", writes["state.json"], len(reopened.State.Events))
+		if writes["state.json"] != 0 || len(reopened.State.Events) != len(items) {
+			t.Fatalf("writes %d, persisted events %d; want 0 and %d", writes["state.json"], len(reopened.State.Events), len(items))
 		}
 	})
 	t.Run("failed save", func(t *testing.T) {
@@ -427,20 +427,19 @@ func TestSampleTickSavesBeforeMaintenance(t *testing.T) {
 	}
 }
 
-// BUG-261030-v6ahj5: save_interval runs from the end of the last save. After
-// a save slower than the interval, a silent flush one interval after the
-// save's start does not save again; one interval after its completion it does
-// (the positive control). The flushes use caller timestamps derived from the
-// save, so a scheduler pause in the test cannot change the verdict (PR68
-// review r1); only the save's own duration is real time.
+// BUG-261030-v6ahj5: save_interval runs from the end of the last durable
+// write. After a snapshot slower than the interval, a silent flush one
+// interval after the snapshot's start writes nothing; one interval after its
+// completion it writes a heartbeat (the positive control). The flushes use
+// caller timestamps derived from the save, so a scheduler pause in the test
+// cannot change the verdict (PR68 review r1); only the save's duration is real
+// time.
 func TestSaveIntervalRunsFromCompletion(t *testing.T) {
 	s := pruneFixture(t, 20)
 	s.Config.SaveInterval = "50ms"
 	interval := 50 * time.Millisecond
-	writes := 0
 	s.atomicWrite = func(path string, b []byte) error {
 		if filepath.Base(path) == "state.json" {
-			writes++
 			time.Sleep(80 * time.Millisecond) // slower than save_interval
 		}
 		return atomicWrite(path, b)
@@ -449,17 +448,18 @@ func TestSaveIntervalRunsFromCompletion(t *testing.T) {
 	if e := s.Save(started); e != nil {
 		t.Fatal(e)
 	}
+	seq := s.seq
 	s.dirty = true
 	if e := s.Flush(started.Add(interval), false, false); e != nil {
 		t.Fatal(e)
 	}
-	if writes != 1 {
-		t.Fatalf("state written %d times; a silent flush one interval after a slow save started must wait", writes)
+	if s.seq != seq {
+		t.Fatalf("journal seq %d -> %d; a silent flush one interval after a slow save started must wait", seq, s.seq)
 	}
 	if e := s.Flush(s.lastSave.Add(interval), false, false); e != nil {
 		t.Fatal(e)
 	}
-	if writes != 2 {
-		t.Fatalf("state written %d times; the flush one interval after completion must save", writes)
+	if s.seq != seq+1 || s.dirty {
+		t.Fatalf("journal seq %d -> %d, dirty %t; the flush one interval after completion must write a heartbeat", seq, s.seq, s.dirty)
 	}
 }

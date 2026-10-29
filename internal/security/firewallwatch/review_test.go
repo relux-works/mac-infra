@@ -182,7 +182,11 @@ func TestReviewUnverifiedInbound(t *testing.T) {
 	}
 }
 
-// Silent repeated sightings never rewrite days and write state at most once per interval; new keys flush immediately.
+// A new key is durable at once through the journal, without rewriting
+// state.json or a day file; silent repeats write nothing and their state
+// follows in one heartbeat per interval. Day files are written only by a
+// snapshot, which leaves an unchanged day alone, and a forced flush takes a
+// snapshot (BUG-261029-kpyw8s).
 func TestReviewWriteAmplification(t *testing.T) {
 	c := testConfig(t)
 	s, e := OpenStore(c)
@@ -200,47 +204,58 @@ func TestReviewWriteAmplification(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
+	types := func() map[string]int {
+		t.Helper()
+		got := map[string]int{}
+		for _, r := range readJournal(t, s.journalPath()) {
+			got[r.Type]++
+		}
+		return got
+	}
 	observe(now)
 	day := "events-" + now.UTC().Format("2006-01-02") + ".jsonl"
-	if writes["state.json"] != 1 || writes[day] != 1 {
-		t.Fatal("new key not immediately saved", writes)
+	if writes["state.json"] != 0 || writes[day] != 0 || types()[recordObserve] != 1 || writes["new-events.flag"] != 1 {
+		t.Fatal("new key not journaled at once", writes, types())
 	}
 	clear(writes)
 	for i := 1; i <= 100; i++ {
 		observe(now.Add(time.Duration(i) * time.Millisecond))
 	}
-	if writes[day] != 0 || writes["state.json"] != 0 {
-		t.Fatal("repeat write amplification", writes)
+	if len(writes) != 0 || types()[recordObserve] != 1 {
+		t.Fatal("repeat write amplification", writes, types())
 	}
+	beats := types()[recordHeartbeat] // a fresh store's first flush also writes one
 	if e = s.Flush(now.Add(11*time.Second), false, false); e != nil {
 		t.Fatal(e)
 	}
 	if e = s.Flush(now.Add(12*time.Second), false, false); e != nil {
 		t.Fatal(e)
 	}
-	if writes[day] != 0 || writes["state.json"] != 1 {
-		t.Fatal("interval writes", writes)
+	if len(writes) != 0 || types()[recordHeartbeat] != beats+1 {
+		t.Fatal("interval writes", writes, types())
 	}
 	it.App = "another"
 	observe(now.Add(13 * time.Second))
-	if writes[day] != 1 || writes["state.json"] != 2 {
-		t.Fatal("new key delayed", writes)
+	if writes["state.json"] != 0 || types()[recordObserve] != 2 {
+		t.Fatal("new key delayed", writes, types())
 	}
-	// Changes on a second day must not rewrite the first day's projection.
+	// A snapshot writes the day; a later snapshot after changes on a second
+	// day must not rewrite the first day's projection.
+	if e = s.Flush(now.Add(14*time.Second), false, true); e != nil {
+		t.Fatal(e)
+	}
+	if writes["state.json"] != 1 || writes[day] != 1 || len(readJournal(t, s.journalPath())) != 0 {
+		t.Fatal("forced snapshot", writes)
+	}
 	clear(writes)
 	it.App = "next day"
 	observe(now.Add(24 * time.Hour))
-	if writes[day] != 0 {
-		t.Fatal("unchanged day rewritten", writes)
-	}
-	// Shutdown/nettop forces a pending silent count even before its interval.
-	observe(now.Add(24*time.Hour + time.Second))
-	before := writes["state.json"]
-	if e = s.Flush(now.Add(24*time.Hour+2*time.Second), false, true); e != nil {
+	if e = s.Flush(now.Add(24*time.Hour+time.Second), false, true); e != nil {
 		t.Fatal(e)
 	}
-	if writes["state.json"] != before+1 {
-		t.Fatal("forced flush missed", writes)
+	next := "events-" + now.Add(24*time.Hour).UTC().Format("2006-01-02") + ".jsonl"
+	if writes[day] != 0 || writes[next] != 1 {
+		t.Fatal("unchanged day rewritten", writes)
 	}
 }
 
