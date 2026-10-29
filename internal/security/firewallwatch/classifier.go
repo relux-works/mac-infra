@@ -184,7 +184,22 @@ func (c *Classifier) CheckHealth(ctx context.Context) bool {
 	return c.healthy
 }
 
-func (c *Classifier) Classify(ctx context.Context, it Item) Decision {
+func (c *Classifier) shuttingDown(ctx context.Context) bool {
+	return ctx.Err() != nil || (c != nil && c.backend != nil && c.backend.stopping.Load())
+}
+
+func (c *Classifier) Classify(ctx context.Context, it Item) (result Decision) {
+	shutdown := Decision{Label: "digest", Reason: "backend_shutdown"}
+	if c.shuttingDown(ctx) {
+		return shutdown
+	}
+	// Cancellation can interrupt an embedding request, or Stop can race its
+	// reply. Neither is evidence of a classifier failure during normal running.
+	defer func() {
+		if c.shuttingDown(ctx) {
+			result = shutdown
+		}
+	}()
 	if d, ok := Rules(it); ok {
 		return d
 	}
@@ -215,7 +230,7 @@ func (c *Classifier) Classify(ctx context.Context, it Item) Decision {
 		nbs[j] = nb{Neighbour{Sanitize(c.pool[j].ID), s}, c.pool[j].Label}
 	}
 	sort.SliceStable(nbs, func(i, j int) bool { return nbs[i].Similarity > nbs[j].Similarity })
-	result := Decision{Label: "decide", Reason: "knn"}
+	result = Decision{Label: "decide", Reason: "knn"}
 	votes := map[string]float64{}
 	for _, n := range nbs[:c.cfg.K] {
 		result.Neighbours = append(result.Neighbours, n.Neighbour)

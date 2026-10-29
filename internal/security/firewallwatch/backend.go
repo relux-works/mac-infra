@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,14 +21,15 @@ import (
 )
 
 type Backend struct {
-	pid    int
-	socket string
-	done   <-chan struct{}
-	stop   func()
+	pid      int
+	socket   string
+	done     <-chan struct{}
+	stop     func()
+	stopping atomic.Bool
 }
 
 func (b *Backend) alive() bool {
-	if b == nil || b.pid <= 0 || b.done == nil {
+	if b == nil || b.stopping.Load() || b.pid <= 0 || b.done == nil {
 		return false
 	}
 	select {
@@ -38,8 +40,11 @@ func (b *Backend) alive() bool {
 	}
 }
 func (b *Backend) Stop() {
-	if b != nil && b.stop != nil {
-		b.stop()
+	if b != nil {
+		b.stopping.Store(true)
+		if b.stop != nil {
+			b.stop()
+		}
 	}
 }
 
@@ -216,7 +221,9 @@ func StartBackend(ctx context.Context, c Config) (*Backend, error) {
 	var once sync.Once
 	b.stop = func() {
 		once.Do(func() {
-			if b.alive() {
+			select {
+			case <-done:
+			default:
 				_ = cmd.Process.Signal(syscall.SIGTERM)
 			}
 			select {

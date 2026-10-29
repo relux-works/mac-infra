@@ -322,7 +322,8 @@ func TestBackendChildIdentityAndExit(t *testing.T) {
 	server.Start()
 	defer server.Close()
 	d := cl.Classify(context.Background(), unmatched("near"))
-	if d.Label != "decide" || d.Reason != "classifier_unavailable" {
+	// Explicit Stop remains shutdown even if a replacement answers its socket.
+	if d.Label != "digest" || d.Reason != "backend_shutdown" {
 		t.Fatal(d)
 	}
 }

@@ -198,6 +198,23 @@ mac-firewall watch classify --config /ABSOLUTE/firewall-watch.json --fixtures /A
 
 `run` stays in the foreground. SIGINT/SIGTERM stop collection and reap its
 llama-server child. Exit codes are 0 success, 1 refused/failed, 2 bad usage.
+Once the run context is cancelled or owned-backend teardown starts, rows
+still reached by the run loop (including the rest of a nettop sample) are
+retained as `digest` with reason `backend_shutdown`, without new backend or
+signer work. Cancellation during classification uses the same reason. These
+rows do not enter `needs_review`; actual non-nettop denies still enter
+`real_deny`. They remain ordinary retained/deduplicated events, not pending
+work to retry on the next run. A backend crash, timeout or classifier failure
+while the run context is active still yields `decide/classifier_unavailable`.
+Collector lines left in ALF/netfilter queues when the run loop exits are
+discarded and counted in `health.shutdown_dropped_lines` in `state.json`,
+also exposed as `shutdown_dropped_lines` in JSON status and split health.
+Its `alf` and `netfilter` counters saturate at uint64's maximum and accumulate
+across runs. They count raw lines, including a feeder's already-read line
+blocked on a full queue when cancelled; one line need not be a valid event.
+The final save follows feeder cleanup, so it includes these counts and the
+collector's coverage end. Unread collector/pipe data and upstream log loss
+are outside these counters. No configuration fields are added.
 `status` reports last persisted backend health with its observation time, not
 a live health probe; a stale timestamp may mean the watcher has stopped.
 The persisted health also reports `line_queue_high_water` (`alf` and

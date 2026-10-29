@@ -25,9 +25,22 @@ type QueueHighWaterTimes struct {
 }
 
 type RunHealth struct {
-	LineQueueHighWater QueueHighWater `json:"line_queue_high_water"`
-	Save               TimingSummary  `json:"save"`
-	Classification     TimingSummary  `json:"classification"`
+	LineQueueHighWater   QueueHighWater `json:"line_queue_high_water"`
+	ShutdownDroppedLines DroppedLines   `json:"shutdown_dropped_lines"`
+	Save                 TimingSummary  `json:"save"`
+	Classification       TimingSummary  `json:"classification"`
+}
+
+// DroppedLines counts collector lines discarded during run-loop teardown.
+type DroppedLines struct {
+	ALF       uint64 `json:"alf"`
+	Netfilter uint64 `json:"netfilter"`
+}
+
+func (c *SourceCoverage) DropLines(n uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.droppedLines = addCount(c.droppedLines, n)
 }
 
 func addCount(a, b uint64) uint64 {

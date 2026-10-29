@@ -169,6 +169,9 @@ func feedLines(ctx context.Context, r io.Reader, lines chan<- []byte, observer c
 			observer.ResumeCoverage(time.Now())
 			return nil
 		case <-ctx.Done():
+			if o, ok := observer.(interface{ DropLines(uint64) }); ok {
+				o.DropLines(1)
+			}
 			return ctx.Err()
 		}
 	})
@@ -212,7 +215,33 @@ func scanLines(ctx context.Context, r io.Reader, consume func([]byte) error) err
 		}
 	}
 }
-func Run(ctx context.Context, c Config, cl *Classifier) error {
+
+// discardLines runs after the feeder has closed lines, so teardown accounts
+// for every buffered line without parsing or starting any more inspection.
+func discardLines(lines <-chan []byte, coverage *SourceCoverage) {
+	var n uint64
+	for range lines {
+		n++
+	}
+	coverage.DropLines(n)
+}
+
+func (s *Store) collect(ctx context.Context, cl *Classifier, it Item) bool {
+	path := it.InspectionPath
+	if path == "" {
+		path = it.App
+	}
+	// Netfilter items carry the extension's verified signing facts. Shutdown
+	// rows need no signer inspection: Classify records backend_shutdown.
+	if it.Source != SourceNetfilter && !cl.shuttingDown(ctx) {
+		it.Signer = s.signer(ctx, path)
+	}
+	return len(s.Observe(it, time.Now(), func(it Item) Decision {
+		return cl.Classify(ctx, it)
+	})) > 0
+}
+
+func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	if e := safeDir(c.StateDir); e != nil {
 		return e
 	}
@@ -236,13 +265,25 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 	if e = cmd.Start(); e != nil {
 		return e
 	}
+	// Registered before collector cleanup: the final save runs after both
+	// feeders end and discarded queue lines have been counted.
+	defer func() {
+		s.State.BackendHealthy = cl.Healthy()
+		err = errors.Join(err, s.Save(time.Now()))
+	}()
 	// A bounded queue provides backpressure while classification is slow.
 	lines := make(chan []byte, 64)
 	scanDone := make(chan error, 1)
 	s.BeginCoverage(time.Now())
 	alfCoverage := s.Coverage("")
 	go func() { scanDone <- feedLines(childCtx, pipe, lines, alfCoverage) }()
-	defer func() { cancel(); pipe.Close(); _ = cmd.Wait(); <-scanDone }()
+	defer func() {
+		cancel()
+		pipe.Close()
+		_ = cmd.Wait()
+		<-scanDone
+		discardLines(lines, alfCoverage)
+	}()
 	// The netfilter stream is optional (config netfilter_source). Its end does
 	// not stop the watcher: ALF and nettop continue, the stream's coverage
 	// ends, and health reports netfilter_error.
@@ -265,21 +306,16 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 		s.BeginSourceCoverage(SourceNetfilter, time.Now())
 		netCoverage := s.Coverage(SourceNetfilter)
 		go func() { netDone <- feedLines(childCtx, netPipe, netLines, netCoverage) }()
-		defer func() { cancel(); netPipe.Close(); _ = netCmd.Wait(); <-netDone }()
+		defer func(queue <-chan []byte) {
+			cancel()
+			netPipe.Close()
+			_ = netCmd.Wait()
+			<-netDone
+			discardLines(queue, netCoverage)
+		}(netLines)
 		s.State.NetfilterError = ""
 	}
-	classify := func(it Item) Decision { return cl.Classify(ctx, it) }
-	collect := func(it Item) bool {
-		path := it.InspectionPath
-		if path == "" {
-			path = it.App
-		}
-		// Netfilter items carry the extension's verified signing facts.
-		if it.Source != SourceNetfilter {
-			it.Signer = s.signer(ctx, path)
-		}
-		return len(s.Observe(it, time.Now(), classify)) > 0
-	}
+	collect := func(it Item) bool { return s.collect(ctx, cl, it) }
 	// Startup metadata is dirty, but only an emitted event may flush it early.
 	s.dirty = true
 	s.lastSave = time.Now()
@@ -329,7 +365,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return save()
+			return nil
 		case <-saveTick.C:
 			if e = flush(false); e != nil {
 				return e
@@ -337,9 +373,9 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 		case line, ok := <-lines:
 			if !ok {
 				if ctx.Err() != nil {
-					return save()
+					return nil
 				}
-				return errors.Join(errors.New("ALF log stream ended"), save())
+				return errors.New("ALF log stream ended")
 			}
 			s.dirty = true
 			emitted := false

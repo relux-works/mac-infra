@@ -108,6 +108,7 @@ type SourceCoverage struct {
 	evictedThrough   time.Time
 	queueHighWater   int
 	queueHighWaterAt *time.Time
+	droppedLines     uint64
 }
 
 type Store struct {
@@ -626,7 +627,17 @@ func (s *Store) Save(now time.Time) error {
 		return e
 	}
 	for _, source := range sortedCoverageSources(s.coverage) {
-		if c := s.coverage[source]; c.covering {
+		c := s.coverage[source]
+		c.mu.Lock()
+		dropped := c.droppedLines
+		c.droppedLines = 0
+		c.mu.Unlock()
+		drops := &s.State.Health.ShutdownDroppedLines.ALF
+		if source == SourceNetfilter {
+			drops = &s.State.Health.ShutdownDroppedLines.Netfilter
+		}
+		*drops = addCount(*drops, dropped)
+		if c.covering {
 			s.extendCoverage(c, now)
 		}
 	}
@@ -764,6 +775,7 @@ func (s *Store) Status() map[string]any {
 		"netfilter_error":           s.State.NetfilterError,
 		"mode":                      "shadow",
 		"line_queue_high_water":     s.State.Health.LineQueueHighWater,
+		"shutdown_dropped_lines":    s.State.Health.ShutdownDroppedLines,
 		"run_loop_timing": map[string]TimingSummary{"save": s.State.Health.Save,
 			"classification": s.State.Health.Classification},
 	}
