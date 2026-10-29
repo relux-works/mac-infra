@@ -91,6 +91,8 @@ ALL_BINARIES=(
   "mac-document-sanitize"
   "mac-infra-core"
   "mac-security"
+  "mac-tool-secret"
+  "mac-tool-secret-probe"
   "mac-netnone"
   "mac-firewall"
   "mac-keyvault"
@@ -121,6 +123,9 @@ for name in ${SELECTED_BINARIES[@]+"${SELECTED_BINARIES[@]}"}; do
     exit 2
   fi
 done
+if [[ "$ONLY" == 1 ]] && selected mac-tool-secret && ! selected mac-tool-secret-probe; then
+  SELECTED_BINARIES+=("mac-tool-secret-probe")
+fi
 if [[ "$ONLY" == 1 && "$REBUILD_KEYVAULT" != 1 ]] && selected mac-keyvault; then
   echo "--only mac-keyvault requires --rebuild-keyvault (planned owner sitting only)" >&2
   exit 1
@@ -273,6 +278,21 @@ if selected mac-security; then
   echo "Building mac-security..."
   go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-security" ./cmd/mac-security
 fi
+if selected mac-tool-secret; then
+  echo "Building mac-tool-secret..."
+  go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-tool-secret" ./cmd/mac-tool-secret
+fi
+if selected mac-tool-secret-probe; then
+  echo "Building mac-tool-secret-probe..."
+  go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-tool-secret-probe" ./cmd/mac-tool-secret-probe
+fi
+for name in mac-tool-secret mac-tool-secret-probe; do
+  if selected "$name"; then
+    # Separate ad-hoc identities: the negative probe must never be an owner.
+    /usr/bin/codesign --force --sign - --options runtime --identifier "works.relux.mac-infra.$name" "$STAGE_DIR/$name"
+    /usr/bin/codesign --verify --strict "$STAGE_DIR/$name"
+  fi
+done
 if selected mac-netnone; then
   echo "Building mac-netnone..."
   go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-netnone" ./cmd/mac-netnone
@@ -312,6 +332,8 @@ BUILT_BINARIES=(
   "mac-document-sanitize"
   "mac-infra-core"
   "mac-security"
+  "mac-tool-secret"
+  "mac-tool-secret-probe"
   "mac-netnone"
   "mac-firewall"
 )
@@ -392,6 +414,11 @@ fi
 if selected mac-security; then
   ln -sf "$BUILD_DIR/mac-security" "$BIN_DIR/mac-security"
 fi
+for name in mac-tool-secret mac-tool-secret-probe; do
+  if selected "$name"; then
+    ln -sf "$BUILD_DIR/$name" "$BIN_DIR/$name"
+  fi
+done
 if selected mac-netnone; then
   ln -sf "$BUILD_DIR/mac-netnone" "$BIN_DIR/mac-netnone"
 fi
@@ -449,6 +476,11 @@ fi
 if selected mac-security; then
   echo "  $BIN_DIR/mac-security -> $BUILD_DIR/mac-security"
 fi
+for name in mac-tool-secret mac-tool-secret-probe; do
+  if selected "$name"; then
+    echo "  $BIN_DIR/$name -> $BUILD_DIR/$name"
+  fi
+done
 if selected mac-netnone; then
   echo "  $BIN_DIR/mac-netnone -> $BUILD_DIR/mac-netnone"
 fi

@@ -363,8 +363,8 @@ func TestSetupProvenanceWiring(t *testing.T) {
 	}
 	list := source[listStart:publish]
 	builds := regexp.MustCompile(`go -C "\$PROJECT_ROOT" build[^\n]* -o "\$STAGE_DIR/([^"\n]+)"`).FindAllStringSubmatch(source, -1)
-	if len(builds) != 15 || strings.Count(source, `go -C "$PROJECT_ROOT" build`) != len(builds) {
-		t.Fatal("all 15 Go outputs must build into staging")
+	if len(builds) != 17 || strings.Count(source, `go -C "$PROJECT_ROOT" build`) != len(builds) {
+		t.Fatal("all 17 Go outputs must build into staging")
 	}
 	for _, build := range builds {
 		if strings.Count(list, `"`+build[1]+`"`) != 1 {

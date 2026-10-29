@@ -188,6 +188,28 @@ read [security.md](references/security.md). Start with `mac-security scan --json
 Unknown/partial coverage never establishes a clean host. Never run sudo or
 change host policy as part of an audit.
 
+## Tool-Owned Secret ACLs
+
+Read [tool-secret.md](references/tool-secret.md) for `mac-tool-secret inventory`,
+`bind --dry-run`, attended `bind --owner-sitting`, strict `verify`, and the
+separately signed three-outcome probe. All plaintext-release ACL authorizations
+(decrypt, clear/wrapped export and any) are covered. Inventory also reports
+item modification/deletion and ACL
+writers; verify fails on any `foreign_writer`. Inventory, verify and the probe
+are implemented and tested; bind's gated real mutation is not yet exercised.
+Owners need a leaf/root (or equivalent anchor) certificate hash pin. Team OU
+alone is `team_ou_forgeable`: every developer key of that team signs silently
+on this host, including with the owner's chosen identifier. Bind refuses it,
+inventory flags it, and verify fails. Default inventory covers known
+services; full `--all --owner-sitting --out FILE` output stays in a local 0600
+file. `verify-audit` checks the append-only hash chain and checkpoint. The
+metadata tool never reads or outputs secret values. UI is off except one
+bounded bind authorization requiring the flag, both TTYs, and no TMUX/STY.
+Passwords go only into system dialogs. Never use it to migrate a real item
+before its owner reader and consumers are deployed and independently accepted.
+The trust-time requirement SPI was verified on macOS 26.5.1 (25F80); unknown
+requirements are refused without falling back to a binary's current signature.
+
 ## Firewall Management
 
 Use `mac-firewall` (never `socketfilterfw` with sudo) to manage the macOS
