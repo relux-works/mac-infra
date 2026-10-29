@@ -113,32 +113,75 @@ func publishFixturePID(path string, pid int) error {
 	return err
 }
 
-// BUG-261029-2s0frz witness: a reader polling during publication never sees an empty PID file
-// (with a direct os.WriteFile, about a third of 3000 rounds did).
+// BUG-261029-2s0frz witness: a reader polling during publication never sees incomplete PID contents
+// (with a direct os.WriteFile, about a third of 500 rounds did) and no temporary file is left behind.
 func TestFixturePIDPublishIsAtomic(t *testing.T) {
 	const rounds = 500
-	empty := 0
+	incomplete := 0
 	for range rounds {
 		path := filepath.Join(t.TempDir(), "child.pid")
-		done := make(chan error, 1)
-		go func() { done <- publishFixturePID(path, 4242424) }()
-		for {
-			if b, err := os.ReadFile(path); err == nil {
-				if string(b) != "4242424" {
-					empty++
-				}
-				break
-			}
-		}
-		if err := <-done; err != nil {
+		contents, err := pollFixturePIDPublication(path, 4242424, 5*time.Second)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if contents != "4242424" {
+			incomplete++
 		}
 		if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".child.pid.*")); len(matches) != 0 {
 			t.Fatalf("temporary PID files left behind: %v", matches)
 		}
 	}
-	if empty != 0 {
-		t.Fatalf("reader saw incomplete PID contents in %d of %d rounds", empty, rounds)
+	if incomplete != 0 {
+		t.Fatalf("reader saw incomplete PID contents in %d of %d rounds", incomplete, rounds)
+	}
+}
+
+// A publication that fails without creating the file is reported promptly, not polled for forever.
+func TestFixturePIDPublishFailureIsReported(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-parent", "child.pid")
+	start := time.Now()
+	if _, err := pollFixturePIDPublication(path, 4242424, 5*time.Second); err == nil {
+		t.Fatal("publication into a missing directory was not reported as an error")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("publication error took %s to report", elapsed)
+	}
+}
+
+// pollFixturePIDPublication publishes pid at path while polling for it as waitPID does, and returns
+// the first contents the reader saw. It fails on a publication error, an unexpected read error, or
+// no visible file within limit.
+func pollFixturePIDPublication(path string, pid int, limit time.Duration) (string, error) {
+	done := make(chan error, 1)
+	go func() { done <- publishFixturePID(path, pid) }()
+	deadline := time.After(limit)
+	published := false
+	for {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			if !published {
+				if perr := <-done; perr != nil {
+					return "", perr
+				}
+			}
+			return string(b), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		if published {
+			return "", fmt.Errorf("publication returned but %s is missing", path)
+		}
+		select {
+		case perr := <-done:
+			if perr != nil {
+				return "", perr
+			}
+			published = true
+		case <-deadline:
+			return "", fmt.Errorf("%s not visible after %s", path, limit)
+		default:
+		}
 	}
 }
 
