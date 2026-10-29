@@ -135,7 +135,10 @@ type Store struct {
 	journalRecords int
 	journalBytes   int64
 	journalBroken  bool
-	snapOpen       map[string]time.Time
+	// snapLen and snapOpen describe the snapshot on disk: its coverage span
+	// count and each source's open span position (markSnapshot).
+	snapLen  int
+	snapOpen map[string]int
 	// replayDrop collects the event removals of the records replayed so far;
 	// replayIDs counts the identities replay computed (a cost test reads it).
 	replayDrop map[string]int
@@ -270,6 +273,9 @@ func OpenStore(c Config) (*Store, error) {
 		s.State.Entries = map[string]*Entry{}
 		s.State.Signers = map[string]SignerEntry{}
 	}
+	// The heartbeats in the journal describe coverage relative to this
+	// snapshot, so its shape is taken before replay.
+	s.markSnapshot()
 	s.seq = s.State.JournalSeq
 	if journal != nil {
 		// Readers replay read-only; only the watcher's startup snapshot
@@ -301,7 +307,6 @@ func OpenStore(c Config) (*Store, error) {
 	if e := s.validateShape(true, journalMaxTailSpans); e != nil {
 		return nil, fmt.Errorf("corrupt state journal: %w", e)
 	}
-	s.markSnapshot()
 	return s, nil
 }
 
@@ -863,8 +868,16 @@ func (s *Store) extendCoverage(c *SourceCoverage, now time.Time) {
 	extend(end)
 }
 
-func (s *Store) Save(now time.Time) error {
+func (s *Store) Save(now time.Time) (err error) {
 	start := time.Now()
+	// A failed snapshot may already have pruned and reordered coverage in
+	// memory, so journal positions no longer match the snapshot on disk:
+	// nothing more is appended until a snapshot succeeds.
+	defer func() {
+		if err != nil {
+			s.journalBroken = true
+		}
+	}()
 	// A save cannot persist its own completed duration without another write.
 	// The next save persists this result, including failed attempts.
 	defer func() {

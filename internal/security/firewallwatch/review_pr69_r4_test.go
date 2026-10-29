@@ -57,6 +57,13 @@ func TestR4TornTailRemoval(t *testing.T) {
 
 // Heartbeat replay preserves exact spans/gaps under repeated snapshots,
 // tail overflow, both sources, stalls and source ends; no reader mutates bytes.
+//
+// Keeper's adaptation (r5 finding 2): each fixture takes one snapshot and then
+// 140 heartbeats; it reaches neither a snapshot threshold nor the 256-span
+// tail limit (TestR4TailLimit covers that). So the claim it proves is: exact
+// spans, gaps and truncated across 140 heartbeats with both sources, stalls
+// and source ends, at caps 1, 3 and 260. The byte check below backs the
+// "no reader mutates bytes" part.
 func TestR4CoverageTransitions(t *testing.T) {
 	for _, cap := range []int{1, 3, 260} {
 		c := testConfig(t)
@@ -84,7 +91,11 @@ func TestR4CoverageTransitions(t *testing.T) {
 			if e := s.Checkpoint(at.Add(500 * time.Millisecond)); e != nil {
 				t.Fatal(e)
 			}
+			before := dirHashes(t, c.StateDir)
 			r := reopen(t, c)
+			if !reflect.DeepEqual(before, dirHashes(t, c.StateDir)) {
+				t.Fatalf("cap %d step %d: the reader changed the state dir", cap, i)
+			}
 			if a, z := canonicalCoverage(s.State.Coverage), canonicalCoverage(r.State.Coverage); a != z {
 				t.Fatalf("cap %d step %d spans differ", cap, i)
 			}

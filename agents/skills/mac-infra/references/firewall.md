@@ -470,8 +470,11 @@ timestamp, is updated with each append that carries events. Other changes
 and nettop counters, errors, backend health, run-loop health, coverage) follow
 in a heartbeat append once `save_interval` has passed since the last durable
 write completed, on each nettop tick and when the netfilter stream ends. A
-heartbeat carries, of the coverage, each source's spans from its open span at
-the last snapshot. The journal never grows past 8 MiB or `max_state_bytes`,
+heartbeat carries, of the coverage, what changed since the last snapshot, by
+position: the current value of each source's open span there, and the spans
+appended since. Only snapshots prune or reorder coverage, so nothing else can
+change in between, and positions are independent of span times (a clock step
+across a restart cannot hide a new run's span). The journal never grows past 8 MiB or `max_state_bytes`,
 whichever is smaller; an append that would cross it takes a snapshot instead.
 
 A snapshot rewrites `state.json` (with `journal_seq`, the last record folded
@@ -479,7 +482,7 @@ in) by a same-directory temporary file, full sync and rename, then the day
 files and the flag, then syncs the directory, removes the journal and syncs
 the directory again. It runs at watcher start (folding any journal left by a
 crash), every 5 minutes, after 500 records, at shutdown, when a heartbeat's
-coverage would exceed 256 spans, and after a failed append. An append reserves
+coverage delta would exceed 256 spans, and after a failed append or snapshot. An append reserves
 its seq before writing, so the fallback snapshot's `journal_seq` covers
 whatever part of a failed append reached the disk; after a failed append
 nothing more is appended until a snapshot succeeds, so a torn write can only be

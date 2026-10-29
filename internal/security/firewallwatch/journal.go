@@ -62,10 +62,8 @@ type journalRecord struct {
 }
 
 // heartbeat is the silent state: every State field that no delta field, the
-// snapshot boundary or the coverage tail carries. Of the coverage it holds
-// each source's spans from its open span at the last snapshot; between
-// snapshots coverage only changes from there on, because it is pruned only
-// by snapshots. Replay applies the latest heartbeat.
+// snapshot boundary or the coverage delta carries. Replay applies the latest
+// heartbeat.
 // TestHeartbeatRoundTrip and TestHeartbeatCoversState keep this complete.
 type heartbeat struct {
 	Parser                 ALFParser       `json:"alf"`
@@ -78,14 +76,26 @@ type heartbeat struct {
 	CoverageVersion        int             `json:"coverage_version"`
 	CoverageEvictedThrough time.Time       `json:"coverage_evicted_through"`
 	Health                 RunHealth       `json:"health"`
-	Coverage               []coverageTail  `json:"coverage"`
+	Coverage               coverageDelta   `json:"coverage"`
 }
 
-// coverageTail replaces a source's spans that start at or after From.
-type coverageTail struct {
-	Source string         `json:"source"`
-	From   time.Time      `json:"from"`
-	Spans  []CoverageSpan `json:"spans"`
+// coverageDelta is the coverage changed since the last snapshot, by position.
+// Snapshots alone prune and reorder coverage, so between snapshots only two
+// kinds of span change: each source's open span at the snapshot (its last
+// span there), which collection extends, and the spans appended after the
+// snapshot. Base is the snapshot's span count. Positions do not depend on
+// span times, so a clock step across a restart cannot hide a new run's span
+// (PR69 review r5).
+type coverageDelta struct {
+	Base     int            `json:"base"`
+	Open     []openSpan     `json:"open,omitempty"`
+	Appended []CoverageSpan `json:"appended,omitempty"`
+}
+
+// openSpan is the current value of the span at a snapshot position.
+type openSpan struct {
+	Index int          `json:"index"`
+	Span  CoverageSpan `json:"span"`
 }
 
 // journalDelta tracks the changes since the last append or snapshot. urgent
@@ -162,40 +172,22 @@ func (s *Store) heartbeat(now time.Time) (*heartbeat, bool) {
 	st := &s.State
 	st.Updated = now
 	h := &heartbeat{Parser: st.Parser, Netfilter: st.Netfilter, NetfilterError: st.NetfilterError, NettopUnrecognized: st.NettopUnrecognized, BackendHealthy: st.BackendHealthy, Updated: st.Updated, NettopError: st.NettopError, CoverageVersion: st.CoverageVersion, CoverageEvictedThrough: st.CoverageEvictedThrough, Health: st.Health}
-	spans := 0
-	for _, source := range s.coverageSources() {
-		tail := coverageTail{Source: source, From: s.snapOpen[source], Spans: []CoverageSpan{}}
-		for _, span := range st.Coverage {
-			if span.Source == source && !span.Start.Before(tail.From) {
-				tail.Spans = append(tail.Spans, span)
-			}
-		}
-		spans += len(tail.Spans)
-		h.Coverage = append(h.Coverage, tail)
+	h.Coverage = coverageDelta{Base: s.snapLen, Appended: slices.Clone(st.Coverage[s.snapLen:])}
+	for _, i := range s.snapOpen {
+		h.Coverage.Open = append(h.Coverage.Open, openSpan{Index: i, Span: st.Coverage[i]})
 	}
-	return h, spans <= journalMaxTailSpans
+	sort.Slice(h.Coverage.Open, func(i, j int) bool { return h.Coverage.Open[i].Index < h.Coverage.Open[j].Index })
+	return h, len(h.Coverage.Open)+len(h.Coverage.Appended) <= journalMaxTailSpans
 }
 
-// coverageSources lists every source with a span, sorted.
-func (s *Store) coverageSources() []string {
-	var sources []string
-	for _, span := range s.State.Coverage {
-		if !slices.Contains(sources, span.Source) {
-			sources = append(sources, span.Source)
-		}
-	}
-	slices.Sort(sources)
-	return sources
-}
-
-// markSnapshot records each source's open span (its latest-starting span)
-// after a snapshot: later heartbeats carry the spans from there on.
+// markSnapshot records the coverage of the snapshot on disk: its span count
+// and each source's open span (its last span) by position. Later heartbeats
+// carry the changes from there.
 func (s *Store) markSnapshot() {
-	s.snapOpen = map[string]time.Time{}
-	for _, span := range s.State.Coverage {
-		if from, ok := s.snapOpen[span.Source]; !ok || span.Start.After(from) {
-			s.snapOpen[span.Source] = span.Start
-		}
+	s.snapLen = len(s.State.Coverage)
+	s.snapOpen = map[string]int{}
+	for i, span := range s.State.Coverage {
+		s.snapOpen[span.Source] = i
 	}
 }
 
@@ -459,15 +451,18 @@ func (s *Store) applyRecord(r journalRecord) error {
 		st.Parser, st.Netfilter, st.NetfilterError, st.NettopUnrecognized = h.Parser, h.Netfilter, h.NetfilterError, h.NettopUnrecognized
 		st.BackendHealthy, st.Updated, st.NettopError = h.BackendHealthy, h.Updated, h.NettopError
 		st.CoverageVersion, st.CoverageEvictedThrough, st.Health = h.CoverageVersion, h.CoverageEvictedThrough, h.Health
-		for _, tail := range h.Coverage {
-			kept := st.Coverage[:0]
-			for _, span := range st.Coverage {
-				if span.Source != tail.Source || span.Start.Before(tail.From) {
-					kept = append(kept, span)
-				}
-			}
-			st.Coverage = append(kept, tail.Spans...)
+		d := h.Coverage
+		if d.Base != s.snapLen {
+			return fmt.Errorf("coverage base %d, snapshot has %d spans", d.Base, s.snapLen)
 		}
+		st.Coverage = st.Coverage[:d.Base]
+		for _, o := range d.Open {
+			if o.Index < 0 || o.Index >= d.Base {
+				return fmt.Errorf("coverage open index %d outside the snapshot's %d spans", o.Index, d.Base)
+			}
+			st.Coverage[o.Index] = o.Span
+		}
+		st.Coverage = append(st.Coverage, d.Appended...)
 	}
 	return nil
 }

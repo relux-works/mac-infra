@@ -498,8 +498,8 @@ func TestJournalAppendFailureFallsBackToSnapshot(t *testing.T) {
 
 // A heartbeat carries coverage beyond each source's open span at the last
 // snapshot, with stalls and a source begun after it; the replayed coverage
-// equals the watcher's in canonical order, and status reports the heartbeat's
-// time and health.
+// equals the watcher's exactly, in its order, and status reports the
+// heartbeat's time and health.
 func TestJournalHeartbeatCoverageReplay(t *testing.T) {
 	s, c := journalStore(t)
 	t0 := time.Now().Add(-time.Hour).Round(0)
@@ -517,11 +517,9 @@ func TestJournalHeartbeatCoverageReplay(t *testing.T) {
 	if e := s.Checkpoint(beat); e != nil {
 		t.Fatal(e)
 	}
-	// Opening leaves coverage exact; replay appends each source's tail after
-	// the snapshot's spans, so compare in canonical start order.
-	canonical := slices.Clone(s.State.Coverage)
-	sort.SliceStable(canonical, func(i, j int) bool { return canonical[i].Start.Before(canonical[j].Start) })
-	want, _ := json.Marshal(canonical)
+	// Opening leaves coverage exact and replay restores it by position, so
+	// the spans equal the watcher's in its own order.
+	want, _ := json.Marshal(s.State.Coverage)
 	got := reopen(t, c)
 	have, _ := json.Marshal(got.State.Coverage)
 	if string(want) != string(have) {
@@ -899,5 +897,77 @@ func TestJournalReplayRemovalCost(t *testing.T) {
 	}
 	if apps := eventApps(got.State.Events); len(apps) != 100 || apps[0] != "app150" || apps[99] != "app249" {
 		t.Fatalf("replayed events %d, first %v; want app150..app249", len(apps), apps[:1])
+	}
+}
+
+// A failed snapshot may already have pruned and reordered coverage in memory,
+// so the journal's positions no longer match the snapshot on disk: after it,
+// no record is appended until a snapshot succeeds (PR69 review r5).
+func TestJournalFailedSaveBlocksAppends(t *testing.T) {
+	s, c := journalStore(t)
+	now := time.Now()
+	if e := s.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	s.atomicWrite = func(path string, b []byte) error {
+		if filepath.Base(path) == "state.json" {
+			return errors.New("disk full")
+		}
+		return atomicWrite(path, b)
+	}
+	if e := s.Save(now.Add(time.Second)); e == nil {
+		t.Fatal("injected failure ignored")
+	}
+	appends := 0
+	s.journalWrite = func(f *os.File, b []byte) error { appends++; _, e := f.Write(b); return e }
+	s.Observe(newKey(1), now.Add(2*time.Second), ruleClassify)
+	if e := s.Flush(now.Add(2*time.Second), true, false); e == nil {
+		t.Fatal("the snapshot that replaces the append should still fail")
+	}
+	if appends != 0 {
+		t.Fatal("appended after a failed snapshot")
+	}
+	s.atomicWrite = nil
+	s.Observe(newKey(2), now.Add(3*time.Second), ruleClassify)
+	if e := s.Flush(now.Add(3*time.Second), true, false); e != nil {
+		t.Fatal(e)
+	}
+	if appends != 0 || len(reopen(t, c).State.Events) != 2 {
+		t.Fatal("recovery snapshot missing the events")
+	}
+}
+
+// A heartbeat whose coverage base or open position does not match the
+// snapshot it follows is refused, not applied to the wrong spans.
+func TestJournalCoverageBaseMismatchRefused(t *testing.T) {
+	for _, field := range []string{"base", "index"} {
+		t.Run(field, func(t *testing.T) {
+			s, c := journalStore(t)
+			t0 := time.Now().Add(-time.Hour).Round(0)
+			s.BeginCoverage(t0)
+			if e := s.Save(t0.Add(time.Second)); e != nil {
+				t.Fatal(e)
+			}
+			s.dirty = true
+			if e := s.Checkpoint(t0.Add(2 * time.Second)); e != nil {
+				t.Fatal(e)
+			}
+			records := readJournal(t, s.journalPath())
+			if len(records) != 1 || records[0].Heartbeat == nil || len(records[0].Heartbeat.Coverage.Open) != 1 {
+				t.Fatalf("fixture: %d records", len(records))
+			}
+			if field == "base" {
+				records[0].Heartbeat.Coverage.Base++
+			} else {
+				records[0].Heartbeat.Coverage.Open[0].Index = 5
+			}
+			line, _ := json.Marshal(records[0])
+			if e := os.WriteFile(s.journalPath(), append(line, '\n'), 0600); e != nil {
+				t.Fatal(e)
+			}
+			if _, e := OpenStore(c); e == nil || !strings.Contains(e.Error(), "coverage") {
+				t.Fatalf("mismatched coverage %s admitted: %v", field, e)
+			}
+		})
 	}
 }
