@@ -59,6 +59,9 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 
 var netfilterRun = appRunner
 
+// netfilterLoadProtectList is swapped by tests, which cannot create root-owned files.
+var netfilterLoadProtectList = netfilterctl.LoadProtectList
+
 func runNetfilter(args []string, out, errOut io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(errOut, netfilterUsage)
@@ -120,7 +123,7 @@ func runNetfilter(args []string, out, errOut io.Writer) int {
 			fmt.Fprintln(errOut, err)
 			return 2
 		}
-		protect, err := netfilterctl.LoadProtectList(*protectPath)
+		protect, err := netfilterLoadProtectList(*protectPath)
 		if err != nil {
 			return printJSON(netfilterctl.Result{Error: err.Error()}, false)
 		}

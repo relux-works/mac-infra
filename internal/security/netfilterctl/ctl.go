@@ -42,6 +42,13 @@ func LoadProtectList(path string) (ProtectList, error) {
 	return loadProtectList(path, 0, "/")
 }
 
+// LoadProtectListFrom applies the same checks with an explicit expected owner
+// and trust anchor; path is resolved inside rootDirectory. It exists for tests
+// that cannot create root-owned files; production callers use LoadProtectList.
+func LoadProtectListFrom(path string, expectedUID uint32, rootDirectory string) (ProtectList, error) {
+	return loadProtectList(path, expectedUID, rootDirectory)
+}
+
 func loadProtectList(path string, expectedUID uint32, rootDirectory string) (ProtectList, error) {
 	var p ProtectList
 	raw, err := readProtectList(path, expectedUID, rootDirectory)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,11 +15,25 @@ import (
 
 func netfilterFixture(t *testing.T, answer string) (journalDir, protect string, calls *[][]string) {
 	t.Helper()
-	root := t.TempDir()
+	// The temp dir lies under the /var symlink on macOS; anchor the checked
+	// walk at its resolved path and expect the test user instead of root.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	protect = filepath.Join(root, "protect.json")
 	if err := os.WriteFile(protect, []byte(`{"schema":"mac-infra.netfilter-protect/v1","entries":[{"host_suffix":"matrix.relux.works","reason":"Matrix"}]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
+	oldLoad := netfilterLoadProtectList
+	netfilterLoadProtectList = func(path string) (netfilterctl.ProtectList, error) {
+		rel, err := filepath.Rel(root, path)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return netfilterctl.ProtectList{}, fmt.Errorf("fixture path %s is outside %s", path, root)
+		}
+		return netfilterctl.LoadProtectListFrom("/"+rel, uint32(os.Getuid()), root)
+	}
+	t.Cleanup(func() { netfilterLoadProtectList = oldLoad })
 	var c [][]string
 	old := netfilterRun
 	netfilterRun = func(string) netfilterctl.Runner {
@@ -88,5 +103,26 @@ func TestNetfilterCLIUsageAndRefusals(t *testing.T) {
 	}
 	if len(*calls) != 0 {
 		t.Fatalf("app ran: %v", *calls)
+	}
+}
+
+// Negative: the CLI uses the checked loader. A group-writable protect-list is
+// refused with exit 1, and nothing is journaled or sent to the app. The kill
+// test above is the positive control with a safe 0644 list.
+func TestNetfilterCLIRefusesUnsafeProtectList(t *testing.T) {
+	jdir, protect, calls := netfilterFixture(t, `{"ok":true,"killed":[{}],"rules":[],"killable_flows":1}`)
+	if err := os.Chmod(protect, 0664); err != nil {
+		t.Fatal(err)
+	}
+	var o, e bytes.Buffer
+	code := run([]string{"netfilter", "kill", "--journal-dir", jdir, "--protect-list", protect, "--app-binary", "/x", "--actor", "a", "--reason", "r", "--app", "/y"}, &o, &e)
+	if code != 1 || !strings.Contains(o.String(), "protect-list is group/world writable") {
+		t.Fatalf("unsafe list: code %d out %s", code, o.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("app ran: %v", *calls)
+	}
+	if entries, _ := os.ReadDir(jdir); len(entries) != 0 {
+		t.Fatalf("journal written: %d entries", len(entries))
 	}
 }
