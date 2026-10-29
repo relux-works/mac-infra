@@ -120,7 +120,7 @@ func TestFixturePIDPublishIsAtomic(t *testing.T) {
 	incomplete := 0
 	for range rounds {
 		path := filepath.Join(t.TempDir(), "child.pid")
-		contents, err := pollFixturePIDPublication(path, 4242424, 5*time.Second)
+		contents, err := pollFixturePIDPublication(path, func() error { return publishFixturePID(path, 4242424) }, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -140,7 +140,7 @@ func TestFixturePIDPublishIsAtomic(t *testing.T) {
 func TestFixturePIDPublishFailureIsReported(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing-parent", "child.pid")
 	start := time.Now()
-	if _, err := pollFixturePIDPublication(path, 4242424, 5*time.Second); err == nil {
+	if _, err := pollFixturePIDPublication(path, func() error { return publishFixturePID(path, 4242424) }, 5*time.Second); err == nil {
 		t.Fatal("publication into a missing directory was not reported as an error")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -148,20 +148,44 @@ func TestFixturePIDPublishFailureIsReported(t *testing.T) {
 	}
 }
 
-// pollFixturePIDPublication publishes pid at path while polling for it as waitPID does, and returns
-// the first contents the reader saw. It fails on a publication error, an unexpected read error, or
-// no visible file within limit.
-func pollFixturePIDPublication(path string, pid int, limit time.Duration) (string, error) {
+// A publisher that makes the file visible but then stalls is bounded by the round deadline too.
+func TestFixturePIDPublishStallAfterVisibilityIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "child.pid")
+	start := time.Now()
+	_, err := pollFixturePIDPublication(path, func() error {
+		if err := publishFixturePID(path, 4242424); err != nil {
+			return err
+		}
+		time.Sleep(time.Second)
+		return nil
+	}, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("a stalled publisher was accepted")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("stalled publisher held the poller for %s", elapsed)
+	}
+}
+
+// pollFixturePIDPublication runs publish while polling path as waitPID does, and returns the first
+// contents the reader saw once publish has returned. It fails on a publication error, an unexpected
+// read error, a missing file after publication, or publish not finishing within limit.
+func pollFixturePIDPublication(path string, publish func() error, limit time.Duration) (string, error) {
 	done := make(chan error, 1)
-	go func() { done <- publishFixturePID(path, pid) }()
+	go func() { done <- publish() }()
 	deadline := time.After(limit)
 	published := false
 	for {
 		b, err := os.ReadFile(path)
 		if err == nil {
 			if !published {
-				if perr := <-done; perr != nil {
-					return "", perr
+				select {
+				case perr := <-done:
+					if perr != nil {
+						return "", perr
+					}
+				case <-deadline:
+					return "", fmt.Errorf("publisher of %s did not return within %s", path, limit)
 				}
 			}
 			return string(b), nil
