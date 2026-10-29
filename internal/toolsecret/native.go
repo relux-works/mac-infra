@@ -95,6 +95,9 @@ func (n Native) Apply(ctx context.Context, k string, p Plan, ui bool) error {
 	return e
 }
 
+// nativeDispatch is the single native entry; tests replace it to count dispatches.
+var nativeDispatch = nativeCall
+
 // Worker serves exactly one metadata request. Only the CLI calls this dispatch;
 // default tests never construct Native or perform keychain I/O.
 func Worker(in io.Reader, out io.Writer) int {
@@ -121,6 +124,13 @@ func Worker(in io.Reader, out io.Writer) int {
 		return 3
 	}
 	if req.Operation == "apply" {
+		// An ACL change is attended-only. The worker entry point is directly
+		// callable, so refuse an unattended apply here, before any native
+		// dispatch, instead of relying on bind's --owner-sitting gate. The
+		// native layer refuses independently (incident 2026-10-29 11:30Z).
+		if !req.AllowUI {
+			return 3
+		}
 		if req.Plan == nil || ValidateOwner(req.Plan.Owner) != nil {
 			return 3
 		}
@@ -139,7 +149,7 @@ func Worker(in io.Reader, out io.Writer) int {
 			return 3
 		}
 	}
-	result, err := nativeCall(string(body))
+	result, err := nativeDispatch(string(body))
 	if err != nil {
 		return 1
 	}

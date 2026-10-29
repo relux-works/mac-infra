@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -443,5 +444,34 @@ func TestWorkerGate(t *testing.T) {
 		if Worker(bytes.NewReader(b), &out) == 0 || out.Len() != 0 {
 			t.Fatal("invalid native request accepted")
 		}
+	}
+}
+
+// PR61 review r1 finding 1: a valid apply plan without owner presence is refused before any native dispatch; a valid inventory request through the same stub dispatches once (control).
+func TestWorkerRefusesUnattendedApplyBeforeDispatch(t *testing.T) {
+	calls := 0
+	saved := nativeDispatch
+	nativeDispatch = func(string) (string, error) { calls++; return `{"status":0}`, nil }
+	t.Cleanup(func() { nativeDispatch = saved })
+	owner := Owner{Path: "/review/owner", Requirement: `identifier "review.owner" and certificate leaf = H"0123456789012345678901234567890123456789"`, HardenedRuntime: true, Partition: "cdhash:review", Entitlements: []string{}}
+	item := Item{Service: "works.relux.review", Account: "synthetic", ReleaseACLs: []ReleaseACL{{Authorizations: []string{"decrypt"}, Applications: []TrustedApplication{OwnerApplication(owner)}}}, Partitions: []string{owner.Partition}}
+	plan, err := PlanBind(item, owner, BindOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := json.Marshal(nativeRequest{Operation: "apply", Keychain: "/nonexistent-test-only.keychain-db", Plan: &plan, AllowUI: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exit := Worker(bytes.NewReader(request), io.Discard); exit != 3 || calls != 0 {
+		t.Fatalf("unattended apply: exit=%d native dispatches=%d, want 3 and 0", exit, calls)
+	}
+	control, err := json.Marshal(nativeRequest{Operation: "inventory", Keychain: "/nonexistent-test-only.keychain-db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	Worker(bytes.NewReader(control), io.Discard)
+	if calls != 1 {
+		t.Fatalf("control inventory request dispatches=%d, want 1", calls)
 	}
 }

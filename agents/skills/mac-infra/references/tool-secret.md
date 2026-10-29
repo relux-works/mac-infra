@@ -230,18 +230,24 @@ and failing allowed/missing/locked cases; and stale-path classification.
 The security-style fixture uses `SecAccessCreate` trusting `/usr/bin/security`,
 without launching a generic reader with an item password.
 
-On **macOS 26.5.1**, `SecKeychainItemSetAccess` with UI disabled is refused
-with **-26275** or does not return, even on a self-unlocked disposable
-keychain. This is the measured limitation: **change_acl needs UI**. The opt-in
-`change-acl-no-ui-refused` test makes exactly one attempt and expects a known
-refusal (-26275, errSecInteractionNotAllowed or errSecAuthFailed) or the
-10-second deadline. It never tries to make the change succeed or enables UI.
-A phase trace proves the call reached SetAccess; an earlier error/timeout is
-not accepted as this evidence. The child is reaped within the deadline/reap
-bound. Afterwards the test requires unchanged item metadata and the original
-creator/rebuilt-reader success plus non-owner refusal. It never inspects item
-bytes. The fixture checks UI is disabled before invoking the native operation,
-and every request has `allow_ui:false`.
+On **macOS 26.5.1**, `SecKeychainItemSetAccess` raises a SecurityAgent
+dialog on the owner's screen even after
+`SecKeychainSetUserInteractionAllowed(false)`. That dialog can outlive the
+calling process, and while it is open, securityd blocks every other keychain
+client on the host. On 2026-10-29 at 11:30Z a test that attempted this on a
+disposable keychain left such a dialog for about 30 minutes, until the owner
+dismissed it. A subprocess deadline cannot contain it. Therefore:
+
+- **No test calls SecKeychainItemSetAccess**, and no test exercises `bind`.
+  The former single-attempt test was removed, not bounded; it must not be
+  restored.
+- The only call is in the attended region of `native_darwin.m`. The native
+  layer refuses with errSecInteractionNotAllowed unless UI is allowed and
+  fds 3 and 4 are terminals. The worker refuses any unattended `apply`
+  before native dispatch. `TestSetAccessOnlyInAttendedRegion` and
+  `TestWorkerRefusesUnattendedApplyBeforeDispatch` pin both properties.
+- The opt-in tests cover inventory, writers, requirement pins and the
+  probe's three outcomes, with UI disabled in every fixture binary.
 
 Bind remains gated behind `--owner-sitting`, both TTYs and no TMUX/STY. Its
 real dialog and successful authorization/mutation are **not exercised end to
