@@ -208,35 +208,40 @@ func TestReviewWriteAmplification(t *testing.T) {
 		t.Helper()
 		got := map[string]int{}
 		for _, r := range readJournal(t, s.journalPath()) {
-			got[r.Type]++
+			if len(r.Events) > 0 {
+				got["events"]++
+			}
+			if r.Heartbeat != nil {
+				got["heartbeat"]++
+			}
 		}
 		return got
 	}
 	observe(now)
 	day := "events-" + now.UTC().Format("2006-01-02") + ".jsonl"
-	if writes["state.json"] != 0 || writes[day] != 0 || types()[recordObserve] != 1 || writes["new-events.flag"] != 1 {
+	if writes["state.json"] != 0 || writes[day] != 0 || types()["events"] != 1 || writes["new-events.flag"] != 1 {
 		t.Fatal("new key not journaled at once", writes, types())
 	}
 	clear(writes)
 	for i := 1; i <= 100; i++ {
 		observe(now.Add(time.Duration(i) * time.Millisecond))
 	}
-	if len(writes) != 0 || types()[recordObserve] != 1 {
+	if len(writes) != 0 || types()["events"] != 1 {
 		t.Fatal("repeat write amplification", writes, types())
 	}
-	beats := types()[recordHeartbeat] // a fresh store's first flush also writes one
+	beats := types()["heartbeat"] // a fresh store's first flush also writes one
 	if e = s.Flush(now.Add(11*time.Second), false, false); e != nil {
 		t.Fatal(e)
 	}
 	if e = s.Flush(now.Add(12*time.Second), false, false); e != nil {
 		t.Fatal(e)
 	}
-	if len(writes) != 0 || types()[recordHeartbeat] != beats+1 {
+	if len(writes) != 0 || types()["heartbeat"] != beats+1 {
 		t.Fatal("interval writes", writes, types())
 	}
 	it.App = "another"
 	observe(now.Add(13 * time.Second))
-	if writes["state.json"] != 0 || types()[recordObserve] != 2 {
+	if writes["state.json"] != 0 || types()["events"] != 2 {
 		t.Fatal("new key delayed", writes, types())
 	}
 	// A snapshot writes the day; a later snapshot after changes on a second

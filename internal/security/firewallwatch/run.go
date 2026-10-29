@@ -117,6 +117,7 @@ func (s *Store) signer(ctx context.Context, path string) string {
 	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) {
 		v.LastSeen = now
 		s.State.Signers[cacheKey] = v
+		s.signerChanged(cacheKey)
 		return v.Value
 	}
 	childCtx, cancel := context.WithTimeout(ctx, duration(s.Config.ClassifierTimeout))
@@ -130,12 +131,14 @@ func (s *Store) signer(ctx context.Context, path string) string {
 		v = "unknown"
 	}
 	entry := SignerEntry{Value: Sanitize(v), LastSeen: now, Identity: identity, Failed: err != nil, Inspected: now}
-	// A new or changed result is journaled; re-inspections with the same
-	// result (bundle directories, failure retries) only refresh times.
+	// A new or changed result is journaled at once; re-inspections with the
+	// same result (bundle directories, failure retries) only refresh times,
+	// which follow with the next append.
 	if prev, ok := s.State.Signers[cacheKey]; !ok || prev.Value != entry.Value || prev.Identity != entry.Identity || prev.Failed != entry.Failed {
-		s.journalSigner(cacheKey, entry)
+		s.delta.urgent = true
 	}
 	s.State.Signers[cacheKey] = entry
+	s.signerChanged(cacheKey)
 	s.dirty = true
 	return Sanitize(v)
 }

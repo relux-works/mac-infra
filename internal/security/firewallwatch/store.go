@@ -130,7 +130,7 @@ type Store struct {
 	// State journal (journal.go): the last seq written or replayed, records
 	// not yet appended, and the journal since the last snapshot.
 	seq            uint64
-	pending        []journalRecord
+	delta          journalDelta
 	lastSnapshot   time.Time
 	journalRecords int
 	journalBytes   int64
@@ -138,6 +138,20 @@ type Store struct {
 	snapOpen       map[string]time.Time
 	// journalWrite replaces the append's single write in tests.
 	journalWrite func(*os.File, []byte) error
+}
+
+// checkDir applies safeDir's checks to an existing state dir without
+// creating it; a missing dir is os.ErrNotExist.
+func checkDir(dir string) error {
+	s, e := os.Lstat(dir)
+	if e != nil {
+		return e
+	}
+	st, ok := s.Sys().(*syscall.Stat_t)
+	if !s.IsDir() || s.Mode()&os.ModeSymlink != 0 || s.Mode().Perm() != 0700 || !ok || int(st.Uid) != os.Getuid() {
+		return errors.New("state dir must be owned by caller, non-symlink and mode 0700")
+	}
+	return nil
 }
 
 func safeDir(dir string) error {
@@ -203,8 +217,17 @@ func safeExisting(path string) error {
 var afterJournalOpen func()
 
 func OpenStore(c Config) (*Store, error) {
-	if e := safeDir(c.StateDir); e != nil {
-		return nil, e
+	// Opening never creates the state dir: status and digest only read
+	// (PR69 review r1). The watcher creates it before opening.
+	if e := checkDir(c.StateDir); e != nil {
+		if !errors.Is(e, os.ErrNotExist) {
+			return nil, e
+		}
+		s := &Store{Config: c}
+		s.State.Entries, s.State.Signers = map[string]*Entry{}, map[string]SignerEntry{}
+		s.State.CoverageVersion = coverageVersion
+		s.markSnapshot()
+		return s, nil
 	}
 	s := &Store{Config: c}
 	// The journal is opened before state.json is read: see openJournal.
@@ -251,7 +274,9 @@ func OpenStore(c Config) (*Store, error) {
 		if e != nil {
 			return nil, fmt.Errorf("corrupt state journal: %w", e)
 		}
-		if e = s.validateState(); e != nil {
+		// Bounds hold only after the prune below: coverage may have grown
+		// past max_entries since the snapshot.
+		if e = s.validateShape(false); e != nil {
 			return nil, fmt.Errorf("corrupt state journal: %w", e)
 		}
 		if torn {
@@ -265,18 +290,30 @@ func OpenStore(c Config) (*Store, error) {
 		s.State.CoverageVersion = coverageVersion
 	}
 	s.prune(time.Now())
+	if e := s.validateState(); e != nil {
+		return nil, fmt.Errorf("corrupt state journal: %w", e)
+	}
 	s.markSnapshot()
 	return s, nil
 }
 
 // validateState runs before pruning or dereferencing any loaded entry.
-func (s *Store) validateState() error {
+func (s *Store) validateState() error { return s.validateShape(true) }
+
+// validateShape checks structure and fields, and the max_entries bounds when
+// bounded. A replayed journal is checked unbounded: between snapshots the
+// watcher grows coverage without pruning it, and OpenStore prunes after
+// replay, then checks the bounds.
+func (s *Store) validateShape(bounded bool) error {
 	st := s.State
 	bad := func() error { return errors.New("invalid structure, count or field") }
 	if st.CoverageVersion < 0 || st.CoverageVersion > coverageVersion {
 		return bad()
 	}
-	if st.Entries == nil || st.Signers == nil || len(st.Entries) > s.Config.MaxEntries || len(st.Events) > s.Config.MaxEntries || len(st.Signers) > s.Config.MaxEntries || len(st.Coverage) > s.Config.MaxEntries || len(st.Parser.Samples) > SampleLimit {
+	if st.Entries == nil || st.Signers == nil || len(st.Parser.Samples) > SampleLimit {
+		return bad()
+	}
+	if bounded && (len(st.Entries) > s.Config.MaxEntries || len(st.Events) > s.Config.MaxEntries || len(st.Signers) > s.Config.MaxEntries || len(st.Coverage) > s.Config.MaxEntries) {
 		return bad()
 	}
 	for k, v := range st.Entries {
@@ -353,6 +390,9 @@ func atomicWrite(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 func (s *Store) Lock() (func(), error) {
+	if e := safeDir(s.Config.StateDir); e != nil {
+		return nil, e
+	}
 	path := filepath.Join(s.Config.StateDir, "watch.lock")
 	if e := safeExisting(path); e != nil {
 		return nil, e
@@ -403,7 +443,7 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 	// lower the cutoff, so it first applies what the later readings already
 	// decided, once per step (PR66 review r1).
 	if !s.refs.wallAll.IsZero() && now.Round(0).Before(s.refs.wallAll) {
-		s.pruneAt(s.refs.with(now))
+		s.pruneItems(s.refs.with(now))
 		s.refs = expiryRefs{}
 	}
 	s.refs.add(now)
@@ -457,6 +497,7 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 		}
 		events = append(events, event)
 		s.State.Events = append(s.State.Events, event)
+		s.delta.events = append(s.delta.events, event)
 		s.State.LastEvent = now
 	}
 	if !exists {
@@ -479,13 +520,15 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 		it.Spike = true
 		add(it, s.classify(it, classify))
 	}
-	// Emitted events and deny-window state are journaled at once; other
-	// changes to the entry (last_seen, count) wait for the next snapshot.
+	// Every entry change goes into the next journal append. Emitted events
+	// and deny-window state make that append due at once; other changes
+	// (last_seen, count) wait for the next heartbeat.
+	s.entryChanged(k)
 	if len(events) > 0 || denied {
-		s.journalEntry(k, entry, events)
+		s.delta.urgent = true
 	}
 	if len(s.State.Entries) > s.Config.MaxEntries || len(s.State.Events) > s.Config.MaxEntries || len(s.State.Signers) > s.Config.MaxEntries {
-		s.pruneAt(s.refs)
+		s.pruneItems(s.refs)
 	}
 	return events
 }
@@ -533,12 +576,22 @@ func (s *Store) expired(t time.Time, r expiryRefs) bool {
 
 func (s *Store) prune(now time.Time) { s.pruneAt(expiryRefs{}.with(now)) }
 
-// pruneAt applies retention for every reference time, and the bounds.
+// pruneAt applies retention for every reference time, and the bounds, to
+// entries, events, signers and coverage.
 func (s *Store) pruneAt(refs expiryRefs) {
+	s.pruneItems(refs)
+	s.pruneCoverageBy(func(t time.Time) bool { return s.expired(t, refs) })
+}
+
+// pruneItems is pruneAt without coverage. Observations use it: between
+// snapshots coverage only grows at its tail, which keeps the journal's
+// heartbeat tail exact (PR69 review r1); snapshots prune coverage.
+func (s *Store) pruneItems(refs expiryRefs) {
 	expired := func(t time.Time) bool { return s.expired(t, refs) }
 	for k, v := range s.State.Entries {
 		if expired(v.LastSeen) {
 			delete(s.State.Entries, k)
+			s.entryRemoved(k)
 		}
 	}
 	if len(s.State.Entries) > s.Config.MaxEntries {
@@ -555,6 +608,7 @@ func (s *Store) pruneAt(refs expiryRefs) {
 		})
 		for _, k := range keys[:len(keys)-s.Config.MaxEntries] {
 			delete(s.State.Entries, k)
+			s.entryRemoved(k)
 		}
 	}
 	evicted := func(e Event) {
@@ -578,7 +632,6 @@ func (s *Store) pruneAt(refs expiryRefs) {
 		events = events[len(events)-s.Config.MaxEntries:]
 	}
 	s.State.Events = append([]Event(nil), events...)
-	s.pruneCoverageBy(expired)
 	// Keep executable signature cache bounded as well; evicted paths may be inspected again.
 	if len(s.State.Signers) > s.Config.MaxEntries {
 		keys := make([]string, 0, len(s.State.Signers))
@@ -594,6 +647,7 @@ func (s *Store) pruneAt(refs expiryRefs) {
 		})
 		for _, k := range keys[:len(keys)-s.Config.MaxEntries] {
 			delete(s.State.Signers, k)
+			s.signerRemoved(k)
 		}
 	}
 }
@@ -604,24 +658,24 @@ func (s *Store) write(path string, data []byte) error {
 	return atomicWrite(path, data)
 }
 
-// Flush makes pending journal records (emitted events, deny-window state,
-// new signer results) durable at once; emitted is kept for callers, the
-// pending records decide. Silent state follows in a heartbeat once
+// Flush makes urgent changes (emitted events, deny-window state, new signer
+// results) durable at once, with every other change since the last append;
+// emitted is kept for callers, the urgent mark decides. Silent state follows in a heartbeat once
 // save_interval has passed since the last durable write, and a snapshot
 // replaces both when one is due or forced. A failed append falls back to a
 // snapshot. Failed writes retain dirty state for a retry.
 func (s *Store) Flush(now time.Time, emitted, force bool) error {
-	if force || (s.snapshotDue(now) && (s.dirty || len(s.pending) > 0)) {
+	if force || (s.snapshotDue(now) && (s.dirty || s.delta.urgent)) {
 		return s.Save(now)
 	}
 	beat := s.dirty && (s.lastSave.IsZero() || !now.Before(s.lastSave.Add(duration(s.Config.SaveInterval))))
-	if len(s.pending) == 0 && !beat {
+	if !s.delta.urgent && !beat {
 		return nil
 	}
 	return s.journalOrSnapshot(now, beat)
 }
 
-// Checkpoint makes the pending records and the silent state durable now, as a
+// Checkpoint makes every change and the silent state durable now, as a
 // heartbeat, or takes a snapshot when one is due. The run loop calls it on the
 // nettop tick and when the netfilter stream ends.
 func (s *Store) Checkpoint(now time.Time) error {

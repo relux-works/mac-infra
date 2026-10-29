@@ -456,48 +456,57 @@ The state directory must be owned by the caller, mode `0700`, and not a symlink.
 Choose a short absolute path: Darwin UNIX socket path names must fit in 103 bytes.
 `state.json`, `state-journal.jsonl`, `events-YYYY-MM-DD.jsonl` and
 `new-events.flag` are `0600`. `state.json` is a snapshot; the state journal
-(`state-journal.jsonl`) holds what happened since it, one JSON record per line,
-each append followed by a full sync (BUG-261029-kpyw8s). ALF, netfilter and
-nettop new-key, spike and escalation events are journaled at once, with the
-observed key's entry, and so is every observation that changes deny-window
-state (window start, deny count, spike or escalation marks) even when it emits
-nothing. New or changed signer inspection results are journaled too.
-`new-events.flag`, which holds the latest event RFC3339 timestamp, is updated
-with each append that carries events. Silent state (parser and nettop counters,
-errors, backend health, run-loop health, coverage) follows in a heartbeat
-record once `save_interval` has passed since the last durable write completed,
-on each nettop tick and when the netfilter stream ends. A heartbeat carries, of
-the coverage, each source's spans from its open span at the last snapshot.
+(`state-journal.jsonl`) holds what changed since it, one JSON record per line,
+each append followed by a full sync (BUG-261029-kpyw8s). Every append carries
+all changes since the previous one: each entry and signer that changed or was
+removed, the events added, the watcher's event count and its latest event and
+eviction times. An append is due at once for new-key, spike and escalation
+events of every source, for any change of deny-window state (window start,
+deny count, spike or escalation marks) and for a new or changed signer
+inspection result; `new-events.flag`, which holds the latest event RFC3339
+timestamp, is updated with each append that carries events. Other changes
+(last-seen times and counts, signer refreshes) and the silent state (parser
+and nettop counters, errors, backend health, run-loop health, coverage) follow
+in a heartbeat append once `save_interval` has passed since the last durable
+write completed, on each nettop tick and when the netfilter stream ends. A
+heartbeat carries, of the coverage, each source's spans from its open span at
+the last snapshot. The journal never grows past 8 MiB or `max_state_bytes`,
+whichever is smaller; an append that would cross it takes a snapshot instead.
 
 A snapshot rewrites `state.json` (with `journal_seq`, the last record folded
 in) by a same-directory temporary file, full sync and rename, then the day
 files and the flag, then syncs the directory, removes the journal and syncs
 the directory again. It runs at watcher start (folding any journal left by a
-crash), every 5 minutes, after 500 records or 8 MiB of journal, at shutdown,
-when a heartbeat's coverage would exceed 256 spans, and after a failed append;
-after a failed append nothing more is appended until a snapshot succeeds, so a
-torn write can only be the journal's last line. A crash before the rename
-leaves the old snapshot and the whole journal; after it, records up to
-`journal_seq` are skipped. Day files are projections written only by
-snapshots, so they can lag the journal by up to one snapshot interval;
-`digest` and `status` read the journal.
-
-Opening the store (the watcher, `status`, `digest`) opens the journal before
-reading `state.json`, then applies the records after `journal_seq` in order.
-Only complete lines count: a last line without a newline, or a last line that
-is not valid JSON, is a torn tail, ignored and counted in
-`health.journal_torn_tail`. Any other malformed line, a seq gap or an unknown
-record type refuses the state as corrupt. Readers never write: only the
-watcher's start-up snapshot removes a torn tail, together with the folded
+crash), every 5 minutes, after 500 records, at shutdown, when a heartbeat's
+coverage would exceed 256 spans, and after a failed append. An append reserves
+its seq before writing, so the fallback snapshot's `journal_seq` covers
+whatever part of a failed append reached the disk; after a failed append
+nothing more is appended until a snapshot succeeds, so a torn write can only be
+the journal's last line. A crash before a snapshot's rename leaves the old
+snapshot and the whole journal; after it, records up to `journal_seq` are
+skipped. Day files are projections written only by snapshots, so they can lag
+the journal by up to one snapshot interval; `digest` and `status` read the
 journal.
 
-After a crash the journal restores every emitted event, its entry and
-deny-window state, signer results, and silent state up to the last heartbeat.
-Lost are at most one snapshot interval (5 minutes or 500 records) of last-seen
-times and counts of observations that neither emit nor change deny-window
-state, and signer last-seen times. The only effect on emission: a key whose
-lost last-seen time makes it expire up to that much earlier emits again if it
-reappears, at most one duplicate row per such key, after a crash only.
+Opening the store (the watcher, `status`, `digest`) opens the journal before
+reading `state.json`, without following symlinks, and checks each opened file
+(a private regular file of the caller, at most one link), so a rotation in
+between still gives a consistent view. It then applies the records after
+`journal_seq` in order, checks the result's structure, prunes it and checks the
+bounds. Only complete lines count: a last line without a newline, or a last
+line that is not valid JSON, is a torn tail, ignored and counted in
+`health.journal_torn_tail`. Any other malformed line, a seq gap or an unknown
+record type refuses the state as corrupt. Readers never write and never create
+a missing state directory: only the watcher's start-up snapshot removes a torn
+tail, together with the folded journal.
+
+After a crash the journal restores the watcher's state as of its last append:
+every emitted event and deny-window change, signer results, and every other
+change up to the last heartbeat, at most `save_interval` old, as full saves
+did before the journal. The only effect on emission is the one a lost
+`save_interval` always had: a key whose latest last-seen refresh was not yet
+appended can expire, or lose a count-pressure eviction choice, earlier than it
+would have, and emit again if it reappears.
 A shutdown takes a snapshot and removes the journal, so an older binary reads
 the full state after a clean stop. After a crash, run this binary once before
 rolling back, or the older binary misses the journaled records.
@@ -510,8 +519,9 @@ nothing. Backend maintenance, journal appends and snapshots still block the
 run loop. An observation decides only its own key's retention: an entry last
 seen before the cutoff counts as new. Entries, events and coverage spans nobody
 observes expire at the next snapshot. When an observation takes entries,
-events or signers over `max_entries`, the full retention and bound prune runs
-at once. Those later prunes apply every cutoff an earlier observation had, both
+events or signers over `max_entries`, their retention and bound prune runs at
+once; coverage is pruned and compacted only by snapshots, so between snapshots
+it can briefly exceed `max_entries`. Those later prunes apply every cutoff an earlier observation had, both
 by monotonic and by wall readings. A clock correction, or a save handed an
 earlier time, never brings back an item an earlier observation had expired.
 The first observation after a backward wall step runs one full prune. A

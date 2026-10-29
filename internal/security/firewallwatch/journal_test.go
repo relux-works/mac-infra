@@ -142,56 +142,72 @@ func TestJournalTornTail(t *testing.T) {
 
 // A complete but invalid last line is also a torn tail; an invalid line before
 // the last, a seq gap, a first record past journal_seq+1 or an unknown record
-// type refuses the journal instead of skipping silently.
+// type refuses the journal instead of skipping silently. Each planted record
+// otherwise continues the journal's seq, so only the planted defect can
+// refuse it, and each refusal names its cause (PR69 review r1, finding 8).
 func TestJournalCorruptionRefused(t *testing.T) {
-	cases := map[string]func(path string, first string){
-		"invalid last line is torn": func(path, first string) { appendRaw(t, path, "garbage\n") },
-		// The record after the garbage is the valid next seq (3 follows the
-		// heartbeat, 2), so only the garbage line can refuse the journal.
-		"mid-file garbage": func(path, first string) {
-			appendRaw(t, path, "garbage\n"+strings.Replace(first, `"seq":1`, `"seq":3`, 1))
-		},
-		"seq gap":      func(path, first string) { appendRaw(t, path, strings.Replace(first, `"seq":1`, `"seq":5`, 1)) },
-		"unknown type": func(path, first string) { appendRaw(t, path, `{"seq":2,"type":"bogus"}`+"\n") },
+	setup := func(t *testing.T) (*Store, Config, string, uint64) {
+		t.Helper()
+		s, c := journalStore(t)
+		observeFlush(t, s, newKey(1), time.Now())
+		observeFlush(t, s, newKey(2), time.Now())
+		records := readJournal(t, s.journalPath())
+		raw, e := os.ReadFile(s.journalPath())
+		if e != nil || len(records) == 0 {
+			t.Fatal(e, len(records))
+		}
+		return s, c, strings.SplitAfter(string(raw), "\n")[0], records[len(records)-1].Seq
 	}
-	for name, plant := range cases {
-		t.Run(name, func(t *testing.T) {
-			s, c := journalStore(t)
-			observeFlush(t, s, newKey(1), time.Now())
-			raw, e := os.ReadFile(s.journalPath())
-			if e != nil {
-				t.Fatal(e)
-			}
-			first := strings.SplitAfter(string(raw), "\n")[0]
-			if !strings.Contains(first, `"seq":1,`) {
-				t.Fatalf("first record %q", first)
-			}
-			plant(s.journalPath(), first)
-			_, e = OpenStore(c)
-			if name == "invalid last line is torn" {
+	withSeq := func(line string, seq uint64) string {
+		var r journalRecord
+		if e := json.Unmarshal([]byte(line), &r); e != nil {
+			t.Fatal(e)
+		}
+		r.Seq = seq
+		out, _ := json.Marshal(r)
+		return string(out) + "\n"
+	}
+	cases := []struct {
+		name  string
+		plant func(first string, last uint64) string
+		want  string // empty: admitted as a torn tail
+	}{
+		{"invalid last line is torn", func(string, uint64) string { return "garbage\n" }, ""},
+		{"mid-file garbage", func(first string, last uint64) string { return "garbage\n" + withSeq(first, last+1) }, "invalid character"},
+		{"seq gap", func(first string, last uint64) string { return withSeq(first, last+2) }, "seq"},
+		{"unknown type", func(_ string, last uint64) string {
+			return fmt.Sprintf(`{"seq":%d,"type":"bogus","events_len":0}`, last+1) + "\n"
+		}, "unknown record type"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, c, first, last := setup(t)
+			appendRaw(t, s.journalPath(), tc.plant(first, last))
+			_, e := OpenStore(c)
+			if tc.want == "" {
 				if e != nil {
 					t.Fatal("torn complete last line refused:", e)
 				}
 				return
 			}
-			if e == nil || !strings.Contains(e.Error(), "corrupt state journal") {
-				t.Fatal("corrupt journal admitted:", e)
+			if e == nil || !strings.Contains(e.Error(), "corrupt state journal") || !strings.Contains(e.Error(), tc.want) {
+				t.Fatalf("want a refusal naming %q, got %v", tc.want, e)
 			}
 		})
 	}
 	t.Run("first record past journal_seq+1", func(t *testing.T) {
-		s, c := journalStore(t)
-		observeFlush(t, s, newKey(1), time.Now())
-		raw, e := os.ReadFile(s.journalPath())
-		if e != nil {
+		s, c, _, _ := setup(t)
+		var out strings.Builder
+		for _, r := range readJournal(t, s.journalPath()) {
+			r.Seq += 4
+			line, _ := json.Marshal(r)
+			out.Write(append(line, '\n'))
+		}
+		if e := os.WriteFile(s.journalPath(), []byte(out.String()), 0600); e != nil {
 			t.Fatal(e)
 		}
-		shifted := strings.ReplaceAll(strings.ReplaceAll(string(raw), `"seq":2`, `"seq":6`), `"seq":1,`, `"seq":5,`)
-		if e = os.WriteFile(s.journalPath(), []byte(shifted), 0600); e != nil {
-			t.Fatal(e)
-		}
-		if _, e = OpenStore(c); e == nil {
-			t.Fatal("journal starting past journal_seq+1 admitted")
+		if _, e := OpenStore(c); e == nil || !strings.Contains(e.Error(), "want 1") {
+			t.Fatal("journal starting past journal_seq+1 admitted:", e)
 		}
 	})
 }
@@ -218,9 +234,10 @@ func TestJournalReplayIdempotent(t *testing.T) {
 // new key, not a spike (deny-window state is journaled even when nothing is
 // emitted). The uninterrupted store is the control for the same sequence.
 func TestJournalNoReEmitAfterCrash(t *testing.T) {
+	base := time.Now()
 	run := func(crash bool) []Event {
 		s, c := journalStore(t)
-		now := time.Now()
+		now := base
 		deny := Item{Source: "alf", App: "/d", Verdict: "deny", Remote: "lan", LocalPort: intp(80)}
 		var all []Event
 		step := func(it Item, at time.Time) {
@@ -244,7 +261,8 @@ func TestJournalNoReEmitAfterCrash(t *testing.T) {
 	labels := func(events []Event) []string {
 		var out []string
 		for _, e := range events {
-			out = append(out, fmt.Sprintf("%s:%t", e.App, strings.Contains(fmt.Sprint(e.Reason), "spike") || e.Counts >= 3))
+			// The time matters: a lost deny count would move the spike.
+			out = append(out, fmt.Sprintf("%s:%t@%v", e.App, strings.Contains(fmt.Sprint(e.Reason), "spike") || e.Counts >= 3, e.TS.Sub(base).Round(time.Second)))
 		}
 		return out
 	}
@@ -254,29 +272,72 @@ func TestJournalNoReEmitAfterCrash(t *testing.T) {
 	}
 }
 
-// The only re-emit after a crash: a key whose last_seen bump was lost expires
-// earlier and emits again when it reappears. Control: after a snapshot holding
-// the bump, the same key does not re-emit.
-func TestJournalOnlyReEmitIsEarlyExpiry(t *testing.T) {
+// After a crash only the changes since the last journal append are lost, and
+// silent changes are appended at least every save_interval, as full saves
+// were before the journal. So the only re-emit path is a key whose last_seen
+// refresh came after the last append: it can expire early and emit again
+// when it reappears. Controls: a refresh followed by a heartbeat, or by a
+// snapshot, survives and nothing re-emits.
+func TestJournalOnlyReEmitIsUnappendedRefresh(t *testing.T) {
 	retention := time.Duration(testConfig(t).RetentionDays) * 24 * time.Hour
-	for _, snapshot := range []bool{false, true} {
-		t.Run(fmt.Sprintf("snapshot=%t", snapshot), func(t *testing.T) {
+	for _, after := range []string{"crash", "heartbeat", "snapshot"} {
+		t.Run(after, func(t *testing.T) {
 			s, c := journalStore(t)
 			now := time.Now()
-			first, bump := now.Add(-retention-time.Minute), now.Add(-retention+3*time.Minute)
-			observeFlush(t, s, newKey(1), first) // emits, journaled
-			observeFlush(t, s, newKey(1), bump)  // silent last_seen bump
-			if snapshot {
+			first, bump := now.Add(-retention-2*time.Second), now.Add(-retention+3*time.Second)
+			observeFlush(t, s, newKey(1), first) // emits; the append also starts the interval
+			s.Observe(newKey(1), bump, ruleClassify)
+			if e := s.Flush(bump, false, false); e != nil { // within save_interval: nothing appended
+				t.Fatal(e)
+			}
+			switch after {
+			case "heartbeat":
+				if e := s.Checkpoint(bump); e != nil {
+					t.Fatal(e)
+				}
+			case "snapshot":
 				if e := s.Save(bump); e != nil {
 					t.Fatal(e)
 				}
 			}
 			s = reopen(t, c) // crash
-			reemitted := len(observeFlush(t, s, newKey(1), now)) > 0
-			if reemitted == snapshot {
-				t.Fatalf("re-emitted=%t with snapshot=%t", reemitted, snapshot)
+			reemitted := len(observeFlush(t, s, newKey(1), time.Now())) > 0
+			if reemitted != (after == "crash") {
+				t.Fatalf("re-emitted=%t after %s", reemitted, after)
 			}
 		})
+	}
+}
+
+// PR69 review r1, finding 7: count-pressure eviction picks the entry with the
+// oldest last_seen, so a lost refresh could evict a recently seen key and
+// re-emit it. A refresh made durable by a heartbeat keeps the eviction order
+// of the uninterrupted watcher: the same key is evicted and nothing else
+// re-emits.
+func TestJournalCapOrderSurvivesCrash(t *testing.T) {
+	run := func(crash bool) int {
+		c := testConfig(t)
+		c.MaxEntries = 3
+		s := reopen(t, c)
+		base := time.Now().Add(-time.Hour)
+		for i := 0; i < 3; i++ {
+			observeFlush(t, s, newKey(i), base.Add(time.Duration(i)*time.Second))
+		}
+		if e := s.Save(base.Add(3 * time.Second)); e != nil {
+			t.Fatal(e)
+		}
+		s.Observe(newKey(0), base.Add(time.Minute), ruleClassify) // silent refresh of the oldest key
+		if e := s.Checkpoint(base.Add(time.Minute)); e != nil {
+			t.Fatal(e)
+		}
+		if crash {
+			s = reopen(t, c)
+		}
+		observeFlush(t, s, newKey(3), base.Add(2*time.Minute)) // evicts the oldest: key 1
+		return len(observeFlush(t, s, newKey(0), base.Add(3*time.Minute)))
+	}
+	if uninterrupted, crashed := run(false), run(true); uninterrupted != 0 || crashed != 0 {
+		t.Fatalf("key 0 re-emitted: uninterrupted %d, after crash %d", uninterrupted, crashed)
 	}
 }
 
@@ -308,7 +369,7 @@ func TestJournalSnapshotCrashPoints(t *testing.T) {
 		s, c := journalStore(t)
 		now := time.Now()
 		for i := 0; i < 3; i++ {
-			observeFlush(t, s, newKey(i), now)
+			observeFlush(t, s, newKey(i), now.Add(time.Duration(i)*time.Second))
 		}
 		old, e := os.ReadFile(s.journalPath())
 		if e != nil {
@@ -321,8 +382,8 @@ func TestJournalSnapshotCrashPoints(t *testing.T) {
 			t.Fatal(e)
 		}
 		got := reopen(t, c)
-		if len(got.State.Events) != 3 {
-			t.Fatalf("%d events; want 3, none applied twice", len(got.State.Events))
+		if apps := eventApps(got.State.Events); !reflect.DeepEqual(apps, []string{"app0", "app1", "app2"}) {
+			t.Fatalf("events %v; want app0..app2 once each, none applied twice", apps)
 		}
 		// The watcher continues: a new record follows the old journal's.
 		observeFlush(t, got, newKey(9), now)
@@ -488,7 +549,7 @@ func TestHeartbeatCoversState(t *testing.T) {
 	beat := tags(heartbeat{})
 	for tag := range tags(State{}) {
 		switch tag {
-		case "entries", "events", "signers", "journal_seq", "coverage":
+		case "entries", "events", "signers", "last_event", "evicted_through", "journal_seq", "coverage":
 			continue
 		}
 		if !beat[tag] {
@@ -505,22 +566,14 @@ func TestJournalSigner(t *testing.T) {
 	bundle := t.TempDir()
 	result := "Developer ID: X"
 	s.inspectSigner = func(context.Context, string) (string, error) { return result, nil }
-	count := func() int {
-		n := 0
-		for _, r := range s.pending {
-			if r.Type == recordSigner {
-				n++
-			}
-		}
-		return n
-	}
 	s.signer(context.Background(), bundle)
-	if count() != 1 {
-		t.Fatal("new signer result not journaled")
+	if !s.delta.urgent || len(s.delta.signers) != 1 {
+		t.Fatal("new signer result not due at once")
 	}
+	s.delta = journalDelta{}
 	s.signer(context.Background(), bundle)
-	if count() != 1 {
-		t.Fatal("unchanged re-inspection journaled")
+	if s.delta.urgent || len(s.delta.signers) != 1 {
+		t.Fatal("an unchanged re-inspection must follow with the next append, not at once")
 	}
 	if e := s.Flush(time.Now(), false, false); e != nil {
 		t.Fatal(e)
@@ -530,8 +583,8 @@ func TestJournalSigner(t *testing.T) {
 	}
 	result = "Developer ID: Y"
 	s.signer(context.Background(), bundle)
-	if count() != 1 {
-		t.Fatal("changed signer result not journaled")
+	if !s.delta.urgent {
+		t.Fatal("changed signer result not due at once")
 	}
 }
 
@@ -630,5 +683,163 @@ func TestOpenPrivate(t *testing.T) {
 			f.Close()
 			t.Errorf("%s admitted", name)
 		}
+	}
+}
+
+// Every field a heartbeat carries comes back after a crash: each is set to a
+// non-zero value, a heartbeat is appended, and the reopened state has the
+// same value per field. TestHeartbeatCoversState only inventories the tags;
+// this checks capture and application (PR69 review r1, finding 8).
+func TestHeartbeatRoundTrip(t *testing.T) {
+	s, c := journalStore(t)
+	now := time.Now().Add(-time.Minute).Round(0)
+	if e := s.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	st := &s.State
+	st.Parser = ALFParser{Unrecognized: 7, Invalid: 3, Samples: []string{"sample"}}
+	st.Netfilter = NetfilterParser{Invalid: 2, RejectedSender: 5}
+	st.NetfilterError, st.NettopError = "netfilter log stream ended", "nettop sample failed"
+	st.NettopUnrecognized, st.BackendHealthy = 11, true
+	st.CoverageEvictedThrough = now.Add(-time.Hour)
+	st.Health.Classification.observe(time.Second, now)
+	st.Health.JournalTornTail = 1
+	s.dirty = true
+	if e := s.Checkpoint(now.Add(time.Second)); e != nil {
+		t.Fatal(e)
+	}
+	got := reopen(t, c)
+	// An append cannot persist its own duration; the next write carries it,
+	// as with save timing.
+	got.State.Health.Journal = s.State.Health.Journal
+	want, _ := json.Marshal(s.State)
+	have, _ := json.Marshal(got.State)
+	var w, h map[string]json.RawMessage
+	json.Unmarshal(want, &w)
+	json.Unmarshal(have, &h)
+	tags := reflect.TypeOf(heartbeat{})
+	for i := 0; i < tags.NumField(); i++ {
+		tag := strings.Split(tags.Field(i).Tag.Get("json"), ",")[0]
+		if tag == "coverage" {
+			continue // TestJournalHeartbeatCoverageReplay
+		}
+		if string(w[tag]) != string(h[tag]) {
+			t.Errorf("%s: replayed %s, want %s", tag, h[tag], w[tag])
+		}
+	}
+}
+
+// Replay reproduces the watcher's entries, events and signers after every
+// append, through new keys, refreshes, deny windows and count-pressure
+// evictions at a small cap (PR69 review r1, findings 1 and 7).
+func TestJournalReplayEqualsRuntime(t *testing.T) {
+	c := testConfig(t)
+	c.MaxEntries = 4
+	c.SaveInterval = "1ms"
+	s := reopen(t, c)
+	s.inspectSigner = func(context.Context, string) (string, error) { return "Developer ID: X", nil }
+	base := time.Now().Add(-time.Hour).Round(0)
+	canon := func(st State) string {
+		events := slices.Clone(st.Events)
+		sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
+		raw, _ := json.Marshal(map[string]any{"entries": st.Entries, "events": events, "signers": st.Signers})
+		return string(raw)
+	}
+	for i := 0; i < 40; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		it := newKey(i % 7)
+		if i%5 == 0 {
+			it = Item{Source: "alf", App: fmt.Sprintf("/d%d", i%3), Verdict: "deny", Remote: "lan"}
+		}
+		s.Observe(it, at, ruleClassify)
+		if e := s.Flush(at, false, false); e != nil {
+			t.Fatal(e)
+		}
+		if want, got := canon(s.State), canon(reopen(t, c).State); want != got {
+			t.Fatalf("step %d: replay %s\nruntime %s", i, got, want)
+		}
+	}
+}
+
+// eventApps lists the events' apps in time order.
+func eventApps(events []Event) []string {
+	events = slices.Clone(events)
+	sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
+	var apps []string
+	for _, e := range events {
+		apps = append(apps, e.App)
+	}
+	return apps
+}
+
+// PR69 review r1, finding 2: an append that fails after its record reached
+// the disk falls back to a snapshot whose journal_seq covers that record. A
+// crash after the snapshot's rename but before the journal's removal must not
+// apply the record a second time: each event appears exactly once.
+func TestJournalFallbackCrashExactEvents(t *testing.T) {
+	s, c := journalStore(t)
+	now := time.Now()
+	if e := s.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	s.Observe(newKey(1), now.Add(time.Second), ruleClassify)
+	s.Observe(newKey(2), now.Add(2*time.Second), ruleClassify)
+	s.journalWrite = func(f *os.File, b []byte) error {
+		if _, e := f.Write(b); e != nil { // the whole record, then the sync fails
+			return e
+		}
+		return errors.New("sync failed")
+	}
+	s.atomicWrite = func(path string, b []byte) error {
+		if strings.HasPrefix(filepath.Base(path), "events-") {
+			return errors.New("crash after the snapshot rename, before rotation")
+		}
+		return atomicWrite(path, b)
+	}
+	if e := s.Flush(now.Add(2*time.Second), true, false); e == nil {
+		t.Fatal("injected crash missing")
+	}
+	if _, e := os.Stat(s.journalPath()); e != nil {
+		t.Fatal("the failed append's record should still be on disk:", e)
+	}
+	if apps := eventApps(reopen(t, c).State.Events); !reflect.DeepEqual(apps, []string{"app1", "app2"}) {
+		t.Fatalf("events %v; want app1, app2 once each", apps)
+	}
+}
+
+// A watcher whose observation carried a time later than its append's and the
+// reader's clock pruned by that reference: entries and events older than
+// retention from it are gone. A reader opening now would not expire them by
+// its own clock, so only the journaled removals and event count reproduce the
+// watcher's state.
+func TestJournalReplayFutureObservation(t *testing.T) {
+	c := testConfig(t)
+	c.MaxEntries = 2
+	s := reopen(t, c)
+	now := time.Now()
+	if e := s.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	observeFlush(t, s, newKey(1), now)
+	observeFlush(t, s, newKey(2), now.Add(time.Second))
+	future := now.Add(30 * 24 * time.Hour)
+	s.Observe(newKey(3), future, ruleClassify) // over the cap: prunes by the future reference
+	// The append runs on the present clock, so no snapshot is due and only
+	// the journal carries the prune.
+	if e := s.Flush(now.Add(2*time.Second), true, false); e != nil {
+		t.Fatal(e)
+	}
+	if len(readJournal(t, s.journalPath())) == 0 {
+		t.Fatal("fixture: the prune was not journaled")
+	}
+	if len(s.State.Entries) != 1 || len(s.State.Events) != 1 {
+		t.Fatalf("fixture: runtime holds %d entries, %d events; want 1 and 1", len(s.State.Entries), len(s.State.Events))
+	}
+	got := reopen(t, c)
+	if len(got.State.Entries) != 1 || got.State.Entries[key(cleanItem(newKey(3)))] == nil {
+		t.Fatalf("replayed entries %v; want only app3", got.State.Entries)
+	}
+	if apps := eventApps(got.State.Events); !reflect.DeepEqual(apps, []string{"app3"}) {
+		t.Fatalf("replayed events %v; want app3", apps)
 	}
 }

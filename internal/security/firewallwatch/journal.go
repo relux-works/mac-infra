@@ -9,62 +9,68 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"time"
 )
 
-// The state journal keeps emitted events durable without rewriting the whole
-// state for each one (BUG-261029-kpyw8s; sysadmin decisions 2026-10-29). Each
-// record is one JSON line in state-journal.jsonl, appended and synced. A
-// snapshot (Save) folds the journal into state.json, records the last folded
-// seq as journal_seq, and only then removes the journal.
+// The state journal keeps state durable without rewriting the whole snapshot
+// for each change (BUG-261029-kpyw8s; sysadmin decisions 2026-10-29). Each
+// append is one JSON record on its own line in state-journal.jsonl, followed
+// by a full sync. A record carries every entry and signer that changed or was
+// removed since the previous append, the events added and the resulting event
+// count, so replay reproduces exactly what the watcher held at that append.
+// A snapshot (Save) folds the journal into state.json, records the last
+// folded seq as journal_seq, and only then removes the journal.
 const (
 	journalFile = "state-journal.jsonl"
 	// A snapshot runs this long after the previous one, or after this many
-	// records or bytes since it, whichever comes first.
+	// records since it, whichever comes first.
 	journalSnapshotInterval = 5 * time.Minute
 	journalSnapshotRecords  = 500
-	journalSnapshotBytes    = 8 << 20
+	// The journal never grows past this many bytes, nor past max_state_bytes,
+	// the reader's limit: a record that would cross either takes a snapshot.
+	journalSnapshotBytes = 8 << 20
 	// A heartbeat whose coverage tail exceeds this many spans takes a
 	// snapshot instead.
 	journalMaxTailSpans = 256
 )
 
-// Journal record types.
-const (
-	recordObserve   = "observe"
-	recordSigner    = "signer"
-	recordHeartbeat = "heartbeat"
-)
+const recordDelta = "delta"
 
-// journalRecord is one journal line. An observe record carries an observed
-// key's entry after the observation and the events it emitted; a signer record
-// one inspection result; a heartbeat the silently changing state.
+// journalRecord is one journal line: the state changes since the previous
+// append, and the silent state when it is also a heartbeat.
 type journalRecord struct {
-	Seq       uint64       `json:"seq"`
-	Type      string       `json:"type"`
-	Key       string       `json:"key,omitempty"`
-	Entry     *Entry       `json:"entry,omitempty"`
-	Events    []Event      `json:"events,omitempty"`
-	Path      string       `json:"path,omitempty"`
-	Signer    *SignerEntry `json:"signer,omitempty"`
-	Heartbeat *heartbeat   `json:"heartbeat,omitempty"`
+	Seq            uint64                 `json:"seq"`
+	Type           string                 `json:"type"`
+	Entries        map[string]*Entry      `json:"entries,omitempty"`
+	RemovedEntries []string               `json:"removed_entries,omitempty"`
+	Signers        map[string]SignerEntry `json:"signers,omitempty"`
+	RemovedSigners []string               `json:"removed_signers,omitempty"`
+	// Events were added since the previous append; EventsLen is the
+	// watcher's event count after them. Pruning only ever drops the oldest
+	// events, so replay keeps the newest EventsLen.
+	Events         []Event    `json:"events,omitempty"`
+	EventsLen      int        `json:"events_len"`
+	LastEvent      time.Time  `json:"last_event"`
+	EvictedThrough time.Time  `json:"evicted_through"`
+	Heartbeat      *heartbeat `json:"heartbeat,omitempty"`
 }
 
-// heartbeat is the state that changes without emitting: every State field
-// except entries, events, signers and the journal seq, and of the coverage only
-// each source's spans from its open span at the last snapshot. Replay applies
-// the latest heartbeat. TestHeartbeatCoversState keeps this list complete.
+// heartbeat is the silent state: every State field that no delta field, the
+// snapshot boundary or the coverage tail carries. Of the coverage it holds
+// each source's spans from its open span at the last snapshot; between
+// snapshots coverage only changes from there on, because it is pruned only
+// by snapshots. Replay applies the latest heartbeat.
+// TestHeartbeatRoundTrip and TestHeartbeatCoversState keep this complete.
 type heartbeat struct {
 	Parser                 ALFParser       `json:"alf"`
 	Netfilter              NetfilterParser `json:"netfilter"`
 	NetfilterError         string          `json:"netfilter_error,omitempty"`
 	NettopUnrecognized     uint64          `json:"nettop_unrecognized"`
-	LastEvent              time.Time       `json:"last_event"`
 	BackendHealthy         bool            `json:"backend_healthy"`
 	Updated                time.Time       `json:"updated"`
 	NettopError            string          `json:"nettop_error,omitempty"`
 	CoverageVersion        int             `json:"coverage_version"`
-	EvictedThrough         time.Time       `json:"evicted_through"`
 	CoverageEvictedThrough time.Time       `json:"coverage_evicted_through"`
 	Health                 RunHealth       `json:"health"`
 	Coverage               []coverageTail  `json:"coverage"`
@@ -77,20 +83,44 @@ type coverageTail struct {
 	Spans  []CoverageSpan `json:"spans"`
 }
 
+// journalDelta tracks the changes since the last append or snapshot. urgent
+// marks changes that must be durable at once: emitted events, deny-window
+// state and new or changed signer results.
+type journalDelta struct {
+	entries, removedEntries map[string]bool
+	signers, removedSigners map[string]bool
+	events                  []Event
+	urgent                  bool
+}
+
+func mark(set *map[string]bool, k string) {
+	if *set == nil {
+		*set = map[string]bool{}
+	}
+	(*set)[k] = true
+}
+
+func (s *Store) entryChanged(k string) {
+	mark(&s.delta.entries, k)
+	delete(s.delta.removedEntries, k)
+}
+
+func (s *Store) entryRemoved(k string) {
+	mark(&s.delta.removedEntries, k)
+	delete(s.delta.entries, k)
+}
+
+func (s *Store) signerChanged(k string) {
+	mark(&s.delta.signers, k)
+	delete(s.delta.removedSigners, k)
+}
+
+func (s *Store) signerRemoved(k string) {
+	mark(&s.delta.removedSigners, k)
+	delete(s.delta.signers, k)
+}
+
 func (s *Store) journalPath() string { return filepath.Join(s.Config.StateDir, journalFile) }
-
-// journalEntry queues an observe record. Called by observe when the
-// observation emitted or changed deny-window state.
-func (s *Store) journalEntry(k string, entry *Entry, events []Event) {
-	copied := *entry
-	copied.Escalated = slices.Clone(entry.Escalated)
-	s.pending = append(s.pending, journalRecord{Type: recordObserve, Key: k, Entry: &copied, Events: slices.Clone(events)})
-}
-
-// journalSigner queues a signer record for a new or changed inspection result.
-func (s *Store) journalSigner(path string, v SignerEntry) {
-	s.pending = append(s.pending, journalRecord{Type: recordSigner, Path: path, Signer: &v})
-}
 
 // heartbeat applies the collectors' observations to coverage, as a snapshot
 // does, and captures the silent state. It reports false when the coverage
@@ -99,8 +129,7 @@ func (s *Store) heartbeat(now time.Time) (*heartbeat, bool) {
 	s.applyCollectors(now)
 	st := &s.State
 	st.Updated = now
-	h := &heartbeat{Parser: st.Parser, Netfilter: st.Netfilter, NetfilterError: st.NetfilterError, NettopUnrecognized: st.NettopUnrecognized, LastEvent: st.LastEvent, BackendHealthy: st.BackendHealthy, Updated: st.Updated, NettopError: st.NettopError, CoverageVersion: st.CoverageVersion, EvictedThrough: st.EvictedThrough, CoverageEvictedThrough: st.CoverageEvictedThrough, Health: st.Health}
-	h.Health.SlowOps = slices.Clone(st.Health.SlowOps)
+	h := &heartbeat{Parser: st.Parser, Netfilter: st.Netfilter, NetfilterError: st.NetfilterError, NettopUnrecognized: st.NettopUnrecognized, BackendHealthy: st.BackendHealthy, Updated: st.Updated, NettopError: st.NettopError, CoverageVersion: st.CoverageVersion, CoverageEvictedThrough: st.CoverageEvictedThrough, Health: st.Health}
 	spans := 0
 	for _, source := range s.coverageSources() {
 		tail := coverageTail{Source: source, From: s.snapOpen[source], Spans: []CoverageSpan{}}
@@ -127,53 +156,88 @@ func (s *Store) coverageSources() []string {
 	return sources
 }
 
-// markSnapshot records each source's open span (its last span) after a
-// snapshot: later heartbeats carry the spans from there on.
+// markSnapshot records each source's open span (its latest-starting span)
+// after a snapshot: later heartbeats carry the spans from there on.
 func (s *Store) markSnapshot() {
 	s.snapOpen = map[string]time.Time{}
 	for _, span := range s.State.Coverage {
-		s.snapOpen[span.Source] = span.Start
+		if from, ok := s.snapOpen[span.Source]; !ok || span.Start.After(from) {
+			s.snapOpen[span.Source] = span.Start
+		}
 	}
 }
 
 // snapshotDue reports whether the next durable write must be a snapshot.
 func (s *Store) snapshotDue(now time.Time) bool {
-	return s.journalBroken || s.journalRecords >= journalSnapshotRecords || s.journalBytes >= journalSnapshotBytes ||
+	return s.journalBroken || s.journalRecords >= journalSnapshotRecords ||
 		(!s.lastSnapshot.IsZero() && !now.Before(s.lastSnapshot.Add(journalSnapshotInterval)))
 }
 
-// appendJournal appends the pending records, and a heartbeat when asked, in
-// one write followed by a full sync. After a failed append nothing more is
-// appended until a snapshot has replaced the journal, so a torn write can
-// only be the journal's last line.
+// journalLimit is the most bytes the journal may hold: the writer's own bound
+// and never more than a reader accepts.
+func (s *Store) journalLimit() int64 { return min(journalSnapshotBytes, s.Config.MaxStateBytes) }
+
+var (
+	errJournalFull = errors.New("journal record does not fit the journal limit")
+	errJournalTail = errors.New("coverage tail too long for a heartbeat")
+)
+
+// appendJournal appends the changes since the previous append, with the
+// silent state when withHeartbeat, as one record and syncs it. The record's
+// seq is reserved before the write: a fallback snapshot after a failure then
+// covers whatever part of it reached the disk. After a failed append nothing
+// more is appended until a snapshot has replaced the journal, so a torn write
+// can only be the journal's last line.
 func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 	start := time.Now()
-	records := s.pending
 	defer func() {
+		if err != nil {
+			s.journalBroken = true
+		}
 		d, at := time.Since(start), time.Now()
 		s.State.Health.Journal.observe(d, at)
-		s.State.Health.recordSlow(SlowJournal, d, at, len(records))
+		s.State.Health.recordSlow(SlowJournal, d, at, 0)
 	}()
+	st := &s.State
+	r := journalRecord{Seq: s.seq + 1, Type: recordDelta, Events: s.delta.events, EventsLen: len(st.Events), LastEvent: st.LastEvent, EvictedThrough: st.EvictedThrough}
+	for k := range s.delta.entries {
+		if r.Entries == nil {
+			r.Entries = map[string]*Entry{}
+		}
+		r.Entries[k] = st.Entries[k]
+	}
+	for k := range s.delta.removedEntries {
+		r.RemovedEntries = append(r.RemovedEntries, k)
+	}
+	for k := range s.delta.signers {
+		if r.Signers == nil {
+			r.Signers = map[string]SignerEntry{}
+		}
+		r.Signers[k] = st.Signers[k]
+	}
+	for k := range s.delta.removedSigners {
+		r.RemovedSigners = append(r.RemovedSigners, k)
+	}
+	sort.Strings(r.RemovedEntries)
+	sort.Strings(r.RemovedSigners)
 	if withHeartbeat {
 		h, ok := s.heartbeat(now)
 		if !ok {
 			return errJournalTail
 		}
-		records = append(records, journalRecord{Type: recordHeartbeat, Heartbeat: h})
+		r.Heartbeat = h
 	}
-	var buf bytes.Buffer
-	seq := s.seq
-	events := false
-	for i := range records {
-		seq++
-		records[i].Seq = seq
-		line, e := json.Marshal(records[i])
-		if e != nil {
-			return e
-		}
-		buf.Write(line)
-		buf.WriteByte('\n')
-		events = events || len(records[i].Events) > 0
+	line, e := json.Marshal(r)
+	if e != nil {
+		return e
+	}
+	line = append(line, '\n')
+	s.seq = r.Seq // reserved: see above
+	if s.journalBytes+int64(len(line)) > s.journalLimit() {
+		return errJournalFull
+	}
+	if e := safeDir(s.Config.StateDir); e != nil {
+		return e
 	}
 	path := s.journalPath()
 	if e := safeExisting(path); e != nil {
@@ -185,15 +249,10 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 	if e != nil {
 		return e
 	}
-	defer func() {
-		if err != nil {
-			s.journalBroken = true
-		}
-	}()
 	if s.journalWrite != nil {
-		e = s.journalWrite(f, buf.Bytes())
+		e = s.journalWrite(f, line)
 	} else {
-		_, e = f.Write(buf.Bytes())
+		_, e = f.Write(line)
 	}
 	if e == nil {
 		e = f.Sync()
@@ -207,11 +266,11 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 			return e
 		}
 	}
-	s.seq = seq
-	s.pending = nil
-	s.journalRecords += len(records)
-	s.journalBytes += int64(buf.Len())
-	if events && !s.State.LastEvent.IsZero() {
+	s.journalRecords++
+	s.journalBytes += int64(len(line))
+	events := len(s.delta.events) > 0
+	s.delta = journalDelta{}
+	if events && !st.LastEvent.IsZero() {
 		if e = s.writeFlag(); e != nil {
 			return e
 		}
@@ -222,8 +281,6 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 	}
 	return nil
 }
-
-var errJournalTail = errors.New("coverage tail too long for a heartbeat")
 
 // rotateJournal removes the journal after a snapshot that folded it in. The
 // snapshot's rename is made durable first, so a crash leaves either the old
@@ -243,7 +300,7 @@ func (s *Store) rotateJournal() error {
 	if e := syncDir(s.Config.StateDir); e != nil {
 		return e
 	}
-	s.pending = nil
+	s.delta = journalDelta{}
 	s.journalRecords, s.journalBytes, s.journalBroken = 0, 0, false
 	return nil
 }
@@ -310,37 +367,39 @@ func (s *Store) replayJournal(f io.Reader) (torn bool, err error) {
 }
 
 func (s *Store) applyRecord(r journalRecord) error {
+	if r.Type != recordDelta {
+		return fmt.Errorf("unknown record type %q", r.Type)
+	}
+	if r.EventsLen < 0 {
+		return errors.New("negative events_len")
+	}
 	st := &s.State
-	switch r.Type {
-	case recordObserve:
-		if r.Key == "" || r.Entry == nil {
-			return errors.New("incomplete observe record")
+	for _, k := range r.RemovedEntries {
+		delete(st.Entries, k)
+	}
+	for k, v := range r.Entries {
+		if v == nil {
+			return fmt.Errorf("entry %q without value", k)
 		}
-		entry := *r.Entry
-		st.Entries[r.Key] = &entry
-		st.Events = append(st.Events, r.Events...)
-		for _, event := range r.Events {
-			if event.TS.After(st.LastEvent) {
-				st.LastEvent = event.TS
-			}
-		}
-	case recordSigner:
-		if r.Path == "" || r.Signer == nil {
-			return errors.New("incomplete signer record")
-		}
-		st.Signers[r.Path] = *r.Signer
-	case recordHeartbeat:
-		h := r.Heartbeat
-		if h == nil {
-			return errors.New("incomplete heartbeat record")
-		}
-		lastEvent := st.LastEvent
+		st.Entries[k] = v
+	}
+	for _, k := range r.RemovedSigners {
+		delete(st.Signers, k)
+	}
+	for k, v := range r.Signers {
+		st.Signers[k] = v
+	}
+	st.Events = append(st.Events, r.Events...)
+	if len(st.Events) > r.EventsLen {
+		// The watcher dropped its oldest events; keep the newest, as it did.
+		sort.SliceStable(st.Events, func(i, j int) bool { return st.Events[i].TS.Before(st.Events[j].TS) })
+		st.Events = append([]Event(nil), st.Events[len(st.Events)-r.EventsLen:]...)
+	}
+	st.LastEvent, st.EvictedThrough = r.LastEvent, r.EvictedThrough
+	if h := r.Heartbeat; h != nil {
 		st.Parser, st.Netfilter, st.NetfilterError, st.NettopUnrecognized = h.Parser, h.Netfilter, h.NetfilterError, h.NettopUnrecognized
-		st.LastEvent, st.BackendHealthy, st.Updated, st.NettopError = h.LastEvent, h.BackendHealthy, h.Updated, h.NettopError
-		st.CoverageVersion, st.EvictedThrough, st.CoverageEvictedThrough, st.Health = h.CoverageVersion, h.EvictedThrough, h.CoverageEvictedThrough, h.Health
-		if lastEvent.After(st.LastEvent) {
-			st.LastEvent = lastEvent
-		}
+		st.BackendHealthy, st.Updated, st.NettopError = h.BackendHealthy, h.Updated, h.NettopError
+		st.CoverageVersion, st.CoverageEvictedThrough, st.Health = h.CoverageVersion, h.CoverageEvictedThrough, h.Health
 		for _, tail := range h.Coverage {
 			kept := st.Coverage[:0]
 			for _, span := range st.Coverage {
@@ -350,8 +409,6 @@ func (s *Store) applyRecord(r journalRecord) error {
 			}
 			st.Coverage = append(kept, tail.Spans...)
 		}
-	default:
-		return fmt.Errorf("unknown record type %q", r.Type)
 	}
 	return nil
 }
