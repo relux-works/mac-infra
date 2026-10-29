@@ -1,8 +1,10 @@
 package firewallwatch
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -210,6 +212,73 @@ func TestClockCorrectionKeepsExpiry(t *testing.T) {
 			t.Fatalf("unexpired span removed: %v", s.State.Coverage)
 		}
 	})
+}
+
+// sameWallLaterMono returns base with its monotonic reading advanced by d and
+// its wall reading unchanged, as after a wall correction that nets to zero.
+// The time API cannot build this, so it uses the time.Time layout (wall with
+// the monotonic flag in its top bit, ext holding the monotonic reading); the
+// checks fail the test if a Go release changes that layout.
+func sameWallLaterMono(t *testing.T, base time.Time, d time.Duration) time.Time {
+	t.Helper()
+	v := base
+	raw := (*struct {
+		wall uint64
+		ext  int64
+		loc  *time.Location
+	})(unsafe.Pointer(&v))
+	if raw.wall>>63 != 1 {
+		t.Fatal("base needs a monotonic reading")
+	}
+	raw.ext += int64(d)
+	if !v.Round(0).Equal(base.Round(0)) || v.Sub(base) != d || !base.Before(v) {
+		t.Fatal("unexpected time.Time layout")
+	}
+	return v
+}
+
+// PR66 review r2: a later observation with the same wall reading but a later
+// monotonic reading expires in-run state, and a Save handed the earlier time
+// still applies that decision. The old entry, its event and its span are gone
+// from state.json with both watermarks set, as before PR66. With increasing
+// wall readings the same holds (control).
+func TestEqualWallLaterMonotonicExpiry(t *testing.T) {
+	const retention = 7 * 24 * time.Hour // testConfig retains 7 days
+	for _, tie := range []bool{true, false} {
+		t.Run(fmt.Sprintf("wall tie %v", tie), func(t *testing.T) {
+			s := pruneFixture(t, 20)
+			base := time.Now()
+			oldT := base.Add(3 * time.Second)
+			a := base.Add(retention + 2*time.Second) // oldT is retained at a
+			b := a.Add(2 * time.Second)              // and expired at b
+			if tie {
+				b = sameWallLaterMono(t, a, 2*time.Second)
+			}
+			old := Item{App: "old", Source: "nettop", Verdict: "observed", Remote: "lan"}
+			s.Observe(old, oldT, ruleClassify)
+			s.State.Coverage = []CoverageSpan{{Start: oldT.Add(-time.Hour), End: oldT}}
+			other := Item{App: "other", Source: "nettop", Verdict: "observed", Remote: "lan"}
+			s.Observe(other, a, ruleClassify)
+			s.Observe(other, b, ruleClassify)
+			if err := s.Save(a); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(filepath.Join(s.Config.StateDir, "state.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted State
+			if err := json.Unmarshal(raw, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Entries[key(cleanItem(old))] != nil || len(persisted.Events) != 1 || persisted.Events[0].App != "other" || len(persisted.Coverage) != 0 {
+				t.Fatalf("expired state persisted: entries %d events %v coverage %d", len(persisted.Entries), persisted.Events, len(persisted.Coverage))
+			}
+			if !persisted.EvictedThrough.Equal(oldT) || !persisted.CoverageEvictedThrough.Equal(oldT) {
+				t.Fatalf("watermarks %v %v, want %v", persisted.EvictedThrough, persisted.CoverageEvictedThrough, oldT)
+			}
+		})
+	}
 }
 
 // A backward wall step costs one full prune: the first observation after it

@@ -449,10 +449,11 @@ a classification in progress. An observation decides only its own key's
 retention: an entry last seen before the cutoff counts as new. Entries, events
 and coverage spans nobody observes expire at the next save. When an
 observation takes entries, events or signers over `max_entries`, the full
-retention and bound prune runs at once. Those later prunes also apply the
-cutoff of the observation with the latest wall reading, so a backward clock
-correction never brings back an item an earlier observation had expired. The
-first observation after such a step runs one full prune. Silent updates mark state dirty, then save at
+retention and bound prune runs at once. Those later prunes apply every cutoff
+an earlier observation had, both by monotonic and by wall readings. A clock
+correction, or a save handed an earlier time, never brings back an item an
+earlier observation had expired. The first observation after a backward wall
+step runs one full prune. Silent updates mark state dirty, then save at
 `save_interval`, the next nettop tick if earlier, and shutdown. The flag contains
 the latest event RFC3339 timestamp. A per-directory advisory lock is acquired
 before loading state and refuses concurrent collectors.
