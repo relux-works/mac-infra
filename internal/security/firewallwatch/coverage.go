@@ -21,9 +21,6 @@ func (s *Store) coverageEvicted(at time.Time) {
 // pruneCoverage drops the oldest history by start time, preserving each running
 // source's newest span whenever the count bound can hold all active sources.
 func (s *Store) pruneCoverage(cutoff time.Time) {
-	if coverageSettled(s.State.Coverage, s.Config.MaxEntries, cutoff) {
-		return
-	}
 	spans := s.State.Coverage
 	sort.SliceStable(spans, func(i, j int) bool { return spans[i].Start.Before(spans[j].Start) })
 	if len(spans) > s.Config.MaxEntries {
@@ -81,26 +78,6 @@ func (s *Store) pruneCoverage(cutoff time.Time) {
 		}
 	}
 	s.State.Coverage = append([]CoverageSpan(nil), kept...)
-}
-
-// coverageSettled reports that pruneCoverage would return spans unchanged:
-// wall-clock spans in start order (sorting is then the identity), within the
-// bound, none ending before the cutoff. Per-observation prunes then neither
-// sort nor copy the history (BUG-261029-do8v1i).
-func coverageSettled(spans []CoverageSpan, max int, cutoff time.Time) bool {
-	if len(spans) == 0 || len(spans) > max { // the sorting path turns empty into nil
-		return false
-	}
-	for i := range spans {
-		v := &spans[i]
-		if !wallClock(v.Start) || !wallClock(v.End) || (v.StallAfter != nil && (!wallClock(v.StallAfter.From) || !wallClock(v.StallAfter.To))) {
-			return false
-		}
-		if (i > 0 && v.Start.Before(spans[i-1].Start)) || coverageEnd(*v).Before(cutoff) {
-			return false
-		}
-	}
-	return true
 }
 
 // compactCoverage keeps long stalls and run boundaries exact. Only a recorded

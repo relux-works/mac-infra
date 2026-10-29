@@ -316,13 +316,16 @@ func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []
 // needs the predicate to record backend_shutdown during shutdown (PR63
 // review r1). nil means never shutting down.
 func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, shuttingDown func() bool) []Event {
-	// Persisted times carry no monotonic reading. Observations drop it too, so
-	// state compares and expires the same before and after a reload, and the
-	// prune fast paths apply (PR65 review r1).
-	now = now.Round(0)
 	it = cleanItem(it)
-	s.prune(now)
 	k := key(it)
+	// A full prune walks every entry, event and span, which at the max_entries
+	// cap cost the live watcher most of its CPU (BUG-261029-do8v1i). Only the
+	// observed key's own expiry must be decided here: an expired entry counts
+	// as new again. Everything else expires at the next Save, as it would if
+	// nothing were observed; the bounds are restored below whenever exceeded.
+	if entry, ok := s.State.Entries[k]; ok && entry.LastSeen.Before(now.Add(-time.Duration(s.Config.RetentionDays)*24*time.Hour)) {
+		delete(s.State.Entries, k)
+	}
 	entry, exists := s.State.Entries[k]
 	if !exists {
 		entry = &Entry{FirstSeen: now, WindowStart: now}
@@ -391,47 +394,19 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 		it.Spike = true
 		add(it, s.classify(it, classify))
 	}
-	s.prune(now)
+	if len(s.State.Entries) > s.Config.MaxEntries || len(s.State.Events) > s.Config.MaxEntries || len(s.State.Signers) > s.Config.MaxEntries {
+		s.prune(now)
+	}
 	return events
 }
-
-// prune applies retention and max_entries to all persisted state. It runs
-// before and after every observation, so at the cap it must not sort or copy
-// the whole state (BUG-261029-do8v1i). Fast paths apply only to wall-clock
-// times in order, where Before is a total order and sorting is the identity;
-// they then give exactly the sorting path's result, which still handles all
-// other states.
 func (s *Store) prune(now time.Time) {
-	s.pruneObservations(now)
-	s.pruneCoverage(now.Add(-time.Duration(s.Config.RetentionDays) * 24 * time.Hour))
-}
-
-// wallClock reports whether t has no monotonic reading, like a loaded time.
-func wallClock(t time.Time) bool { return t == t.Round(0) }
-
-// pruneObservations bounds entries, events and signers: one entry over the cap
-// is evicted by a scan, and ordered events lose their expired and surplus
-// prefix in place.
-func (s *Store) pruneObservations(now time.Time) {
 	cutoff := now.Add(-time.Duration(s.Config.RetentionDays) * 24 * time.Hour)
-	entriesWall := true
 	for k, v := range s.State.Entries {
 		if v.LastSeen.Before(cutoff) {
 			delete(s.State.Entries, k)
-		} else if !wallClock(v.LastSeen) {
-			entriesWall = false
 		}
 	}
-	if len(s.State.Entries) == s.Config.MaxEntries+1 && entriesWall {
-		oldest, found := "", false
-		var at time.Time
-		for k, v := range s.State.Entries {
-			if !found || v.LastSeen.Before(at) || (v.LastSeen.Equal(at) && k < oldest) {
-				oldest, at, found = k, v.LastSeen, true
-			}
-		}
-		delete(s.State.Entries, oldest)
-	} else if len(s.State.Entries) > s.Config.MaxEntries {
+	if len(s.State.Entries) > s.Config.MaxEntries {
 		keys := make([]string, 0, len(s.State.Entries))
 		for k := range s.State.Entries {
 			keys = append(keys, k)
@@ -452,41 +427,23 @@ func (s *Store) pruneObservations(now time.Time) {
 			s.State.EvictedThrough = e.TS
 		}
 	}
-	if eventsWallOrdered(s.State.Events) {
-		// Expired and surplus events form a prefix. Reslicing keeps the backing
-		// array, which the next growing append replaces.
-		events, start := s.State.Events, 0
-		for start < len(events) && events[start].TS.Before(cutoff) {
-			evicted(events[start])
-			start++
+	events := s.State.Events[:0]
+	for _, e := range s.State.Events {
+		if !e.TS.Before(cutoff) {
+			events = append(events, e)
+		} else {
+			evicted(e)
 		}
-		if surplus := len(events) - start - s.Config.MaxEntries; surplus > 0 {
-			for _, e := range events[start : start+surplus] {
-				evicted(e)
-			}
-			start += surplus
-		}
-		if s.State.Events = events[start:]; len(s.State.Events) == 0 {
-			s.State.Events = nil
-		}
-	} else {
-		events := s.State.Events[:0]
-		for _, e := range s.State.Events {
-			if !e.TS.Before(cutoff) {
-				events = append(events, e)
-			} else {
-				evicted(e)
-			}
-		}
-		sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
-		if len(events) > s.Config.MaxEntries {
-			for _, e := range events[:len(events)-s.Config.MaxEntries] {
-				evicted(e)
-			}
-			events = events[len(events)-s.Config.MaxEntries:]
-		}
-		s.State.Events = append([]Event(nil), events...)
 	}
+	sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
+	if len(events) > s.Config.MaxEntries {
+		for _, e := range events[:len(events)-s.Config.MaxEntries] {
+			evicted(e)
+		}
+		events = events[len(events)-s.Config.MaxEntries:]
+	}
+	s.State.Events = append([]Event(nil), events...)
+	s.pruneCoverage(cutoff)
 	// Keep executable signature cache bounded as well; evicted paths may be inspected again.
 	if len(s.State.Signers) > s.Config.MaxEntries {
 		keys := make([]string, 0, len(s.State.Signers))
@@ -505,15 +462,6 @@ func (s *Store) pruneObservations(now time.Time) {
 		}
 	}
 }
-func eventsWallOrdered(events []Event) bool {
-	for i := range events {
-		if !wallClock(events[i].TS) || (i > 0 && events[i].TS.Before(events[i-1].TS)) {
-			return false
-		}
-	}
-	return true
-}
-
 func (s *Store) write(path string, data []byte) error {
 	if s.atomicWrite != nil {
 		return s.atomicWrite(path, data)
@@ -558,7 +506,6 @@ func (s *Store) EndCoverage(at time.Time)    { s.Coverage("").EndCoverage(at) }
 
 // BeginSourceCoverage opens a coverage span for one source.
 func (s *Store) BeginSourceCoverage(source string, now time.Time) {
-	now = now.Round(0) // coverage times are wall clock, as when loaded
 	s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: now, End: now, Source: source})
 	s.Coverage(source).covering = true
 }
@@ -567,7 +514,6 @@ func (s *Store) BeginSourceCoverage(source string, now time.Time) {
 // run loop is behind and the collector may block or drop lines, so the stall
 // is not coverage. Called from the feeder goroutine; the first open stall wins.
 func (c *SourceCoverage) StallCoverage(at time.Time) {
-	at = at.Round(0)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.stalledAt.IsZero() {
@@ -579,7 +525,6 @@ func (c *SourceCoverage) StallCoverage(at time.Time) {
 // stall's start and opens a new span at at. Under count pressure, short stalls
 // are coalesced; long-stall history that must be dropped advances a watermark.
 func (c *SourceCoverage) ResumeCoverage(at time.Time) {
-	at = at.Round(0)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.stalledAt.IsZero() {
@@ -603,7 +548,6 @@ func (c *SourceCoverage) ResumeCoverage(at time.Time) {
 // feeder goroutine while the run loop is still busy; the next Save caps the
 // span there and no later Save extends it. The first call wins.
 func (c *SourceCoverage) EndCoverage(at time.Time) {
-	at = at.Round(0)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.endedAt.IsZero() {
@@ -616,7 +560,6 @@ func (c *SourceCoverage) EndCoverage(at time.Time) {
 // start and opens a new one at its end; the span then reaches now, but never
 // past an open stall or the collector's end.
 func (s *Store) extendCoverage(c *SourceCoverage, now time.Time) {
-	now = now.Round(0)
 	if c.evictedSpan != nil {
 		s.State.Coverage = append(s.State.Coverage, *c.evictedSpan)
 		c.evictedSpan = nil

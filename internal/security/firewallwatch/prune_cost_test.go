@@ -3,64 +3,13 @@ package firewallwatch
 import (
 	"errors"
 	"fmt"
-	"math/rand"
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"slices"
-	"sort"
 	"testing"
 	"time"
 	"unsafe"
 )
-
-// referencePrune is the entry and event part of prune before BUG-261029-do8v1i:
-// it always sorts and copies. The scan path must keep its results.
-func referencePrune(s *Store, now time.Time) {
-	cutoff := now.Add(-time.Duration(s.Config.RetentionDays) * 24 * time.Hour)
-	for k, v := range s.State.Entries {
-		if v.LastSeen.Before(cutoff) {
-			delete(s.State.Entries, k)
-		}
-	}
-	if len(s.State.Entries) > s.Config.MaxEntries {
-		keys := make([]string, 0, len(s.State.Entries))
-		for k := range s.State.Entries {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool {
-			a, b := s.State.Entries[keys[i]], s.State.Entries[keys[j]]
-			if a.LastSeen.Equal(b.LastSeen) {
-				return keys[i] < keys[j]
-			}
-			return a.LastSeen.Before(b.LastSeen)
-		})
-		for _, k := range keys[:len(keys)-s.Config.MaxEntries] {
-			delete(s.State.Entries, k)
-		}
-	}
-	evicted := func(e Event) {
-		if e.TS.After(s.State.EvictedThrough) {
-			s.State.EvictedThrough = e.TS
-		}
-	}
-	events := s.State.Events[:0]
-	for _, e := range s.State.Events {
-		if !e.TS.Before(cutoff) {
-			events = append(events, e)
-		} else {
-			evicted(e)
-		}
-	}
-	sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
-	if len(events) > s.Config.MaxEntries {
-		for _, e := range events[:len(events)-s.Config.MaxEntries] {
-			evicted(e)
-		}
-		events = events[len(events)-s.Config.MaxEntries:]
-	}
-	s.State.Events = append([]Event(nil), events...)
-}
 
 func pruneFixture(t *testing.T, max int) *Store {
 	t.Helper()
@@ -73,109 +22,12 @@ func pruneFixture(t *testing.T, max int) *Store {
 	return s
 }
 
-// For random stores (stale and tied entries, 0 to 3 entries over the cap,
-// time-ordered and shuffled events with stale ones and equal timestamps), prune
-// keeps the same entries, events in the same order, the same EvictedThrough and
-// the same nil-ness of Events as the pre-fix sorting prune.
-func TestPruneMatchesSortingPrune(t *testing.T) {
-	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	stale := now.Add(-8 * 24 * time.Hour) // testConfig retains 7 days
-	rng := rand.New(rand.NewSource(261029))
-	for round := 0; round < 2000; round++ {
-		max := 1 + rng.Intn(5)
-		at := func() time.Time {
-			if rng.Intn(4) == 0 {
-				return stale.Add(-time.Duration(rng.Intn(3)) * time.Minute)
-			}
-			return now.Add(-time.Duration(rng.Intn(4)) * time.Minute) // few values: ties
-		}
-		entries := map[string]*Entry{}
-		for i, n := 0, rng.Intn(max+4); i < n; i++ {
-			seen := at()
-			entries[fmt.Sprintf("k%02d", rng.Intn(20))] = &Entry{FirstSeen: seen, LastSeen: seen, WindowStart: seen, Count: 1}
-		}
-		var events []Event
-		for i, n := 0, rng.Intn(max+4); i < n; i++ {
-			events = append(events, Event{TS: at(), App: fmt.Sprintf("e%d", i)})
-		}
-		if rng.Intn(2) == 0 {
-			sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
-		}
-		got, want := pruneFixture(t, max), pruneFixture(t, max)
-		for _, s := range []*Store{got, want} {
-			s.State.Entries = map[string]*Entry{}
-			for k, v := range entries {
-				s.State.Entries[k] = v
-			}
-			s.State.Events = slices.Clone(events)
-			s.State.EvictedThrough = time.Time{}
-		}
-		got.prune(now)
-		referencePrune(want, now)
-		keys := func(s *Store) []string {
-			k := make([]string, 0, len(s.State.Entries))
-			for key := range s.State.Entries {
-				k = append(k, key)
-			}
-			sort.Strings(k)
-			return k
-		}
-		if !reflect.DeepEqual(keys(got), keys(want)) {
-			t.Fatalf("round %d entries: got %v want %v", round, keys(got), keys(want))
-		}
-		if !reflect.DeepEqual(got.State.Events, want.State.Events) || (got.State.Events == nil) != (want.State.Events == nil) {
-			t.Fatalf("round %d events: got %v want %v", round, got.State.Events, want.State.Events)
-		}
-		if !got.State.EvictedThrough.Equal(want.State.EvictedThrough) {
-			t.Fatalf("round %d evicted_through: got %v want %v", round, got.State.EvictedThrough, want.State.EvictedThrough)
-		}
-	}
-}
-
-// The scan path follows the eviction contract directly, not only the reference:
-// one entry over the cap evicts the oldest, the smaller key on a tie, and never a
-// fresh entry; expired and surplus time-ordered events leave from the front and
-// advance EvictedThrough to the newest event removed.
-func TestPruneScanPathContract(t *testing.T) {
-	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	s := pruneFixture(t, 2)
-	old := now.Add(-time.Hour)
-	s.State.Entries = map[string]*Entry{
-		"b":     {FirstSeen: old, LastSeen: old, WindowStart: old, Count: 1},
-		"a":     {FirstSeen: old, LastSeen: old, WindowStart: old, Count: 1},
-		"fresh": {FirstSeen: now, LastSeen: now, WindowStart: now, Count: 1},
-	}
-	expired := now.Add(-8 * 24 * time.Hour)
-	s.State.Events = []Event{{TS: expired, App: "expired"}, {TS: old, App: "surplus"}, {TS: old.Add(time.Minute), App: "kept1"}, {TS: now, App: "kept2"}}
-	s.State.EvictedThrough = time.Time{}
-	s.prune(now)
-	if _, ok := s.State.Entries["a"]; ok || len(s.State.Entries) != 2 || s.State.Entries["b"] == nil || s.State.Entries["fresh"] == nil {
-		t.Fatalf("entry eviction: %v", s.State.Entries)
-	}
-	if len(s.State.Events) != 2 || s.State.Events[0].App != "kept1" || s.State.Events[1].App != "kept2" {
-		t.Fatalf("event trim: %v", s.State.Events)
-	}
-	if !s.State.EvictedThrough.Equal(old) {
-		t.Fatalf("evicted_through %v, want %v", s.State.EvictedThrough, old)
-	}
-	// Removing every event leaves nil, as the sorting path did (JSON null).
-	s.State.Events = []Event{{TS: expired}}
-	s.prune(now)
-	if s.State.Events != nil {
-		t.Fatal("empty events not nil")
-	}
-}
-
-// BUG-261029-do8v1i regression witness: at a 10000-entry, 10000-event,
-// 10000-span cap with ordered wall-clock state (as loaded or observed), prune
-// allocates nothing, and a repeat observation allocates no copy of events or
-// coverage. The pre-fix prune copied every event on each call. Allocation counts
-// and bytes, not timing, keep this deterministic; Observe still makes small
-// allocations for the item key, far below one copy.
-func TestPruneAtCapDoesNotCopyState(t *testing.T) {
-	const max = 10000
+// atCap fills a store to max entries, events and coverage spans with times
+// taken from the running clock, as a live watcher holds them.
+func atCap(t *testing.T, max int) (*Store, time.Time) {
+	t.Helper()
 	s := pruneFixture(t, max)
-	now := time.Now().Round(0) // persisted state carries wall-clock times only
+	now := time.Now()
 	start := now.Add(-time.Hour)
 	for i := 0; i < max; i++ {
 		seen := start.Add(time.Duration(i) * time.Millisecond)
@@ -183,12 +35,19 @@ func TestPruneAtCapDoesNotCopyState(t *testing.T) {
 		s.State.Events = append(s.State.Events, Event{TS: seen, Source: "nettop", App: fmt.Sprintf("app%05d", i), Label: "noise", Reason: "x", Mode: "shadow", Counts: 1})
 		s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: seen, End: seen.Add(time.Microsecond)})
 	}
-	if allocs := testing.AllocsPerRun(20, func() { s.prune(now) }); allocs != 0 {
-		t.Fatalf("prune at cap allocated %.0f times per call", allocs)
-	}
+	return s, now
+}
+
+// BUG-261029-do8v1i regression witness: at a 10000-entry, 10000-event,
+// 10000-span cap, a repeat observation allocates far less than one copy of
+// the events or spans; the pre-fix full prune per observation copied both
+// twice. A new key at the cap still holds every bound at once. Bytes, not
+// timing, keep this deterministic.
+func TestObserveAtCapDoesNotPrune(t *testing.T) {
+	const max = 10000
+	s, now := atCap(t, max)
 	it := Item{App: "app09999", Source: "nettop", Verdict: "observed", Remote: "lan"}
 	s.Observe(it, now, ruleClassify)
-	// The pre-fix prune copied events and coverage spans twice per observation.
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	const runs = 20
@@ -198,10 +57,87 @@ func TestPruneAtCapDoesNotCopyState(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	copyBytes := uint64(max) * uint64(min(unsafe.Sizeof(Event{}), unsafe.Sizeof(CoverageSpan{})))
 	if perCall := (after.TotalAlloc - before.TotalAlloc) / runs; perCall >= copyBytes/16 {
-		t.Fatalf("repeat observation at cap allocated %d bytes per call; one state copy is %d", perCall, copyBytes)
+		t.Fatalf("repeat observation at cap allocated %d bytes per call; one copy is %d", perCall, copyBytes)
 	}
+	s.Observe(Item{App: "brand-new", Source: "nettop", Verdict: "observed", Remote: "lan"}, now, ruleClassify)
 	if len(s.State.Entries) != max || len(s.State.Events) != max || len(s.State.Coverage) != max {
-		t.Fatalf("cap not held: entries %d events %d coverage %d", len(s.State.Entries), len(s.State.Events), len(s.State.Coverage))
+		t.Fatalf("bounds after a new key: entries %d events %d coverage %d", len(s.State.Entries), len(s.State.Events), len(s.State.Coverage))
+	}
+}
+
+// An observation still decides its own key's expiry exactly: an entry last
+// seen before the retention cutoff is new again (count 1, a fresh first-seen,
+// a new event), while the same entry inside retention is a silent repeat.
+func TestObserveExpiresOwnKey(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name    string
+		age     time.Duration
+		newKey  bool
+		wantCnt uint64
+	}{
+		{"expired", 8 * 24 * time.Hour, true, 1}, // testConfig retains 7 days
+		{"retained", 6 * 24 * time.Hour, false, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := pruneFixture(t, 20)
+			it := Item{App: "own", Source: "nettop", Verdict: "observed", Remote: "lan"}
+			old := now.Add(-tc.age)
+			s.State.Entries[key(cleanItem(it))] = &Entry{FirstSeen: old, LastSeen: old, WindowStart: old, Count: 1}
+			events := s.Observe(it, now, ruleClassify)
+			e := s.State.Entries[key(cleanItem(it))]
+			if (len(events) > 0) != tc.newKey || e.Count != tc.wantCnt || e.FirstSeen.Equal(now) != tc.newKey {
+				t.Fatalf("events %d count %d first_seen %v", len(events), e.Count, e.FirstSeen)
+			}
+		})
+	}
+}
+
+// Expiry of items nobody observes waits for the next Save, as it did
+// whenever nothing was observed: after an observation of another key the
+// expired entry, event and coverage span are still in memory; the next Save
+// removes all three, advances both watermarks, and the reload agrees.
+func TestUnobservedExpiryAtSave(t *testing.T) {
+	s := pruneFixture(t, 20)
+	now := time.Now()
+	old := now.Add(-8 * 24 * time.Hour)
+	s.State.Entries["stale|nettop|observed|lan"] = &Entry{FirstSeen: old, LastSeen: old, WindowStart: old, Count: 1}
+	s.State.Events = []Event{{TS: old, Source: "nettop", App: "stale", Verdict: "observed", Label: "noise", Reason: "x", Mode: "shadow", Counts: 1}}
+	s.State.Coverage = []CoverageSpan{{Start: old.Add(-time.Hour), End: old}}
+	s.Observe(Item{App: "other", Source: "nettop", Verdict: "observed", Remote: "lan"}, now, ruleClassify)
+	if s.State.Entries["stale|nettop|observed|lan"] == nil || len(s.State.Events) != 2 || len(s.State.Coverage) != 1 {
+		t.Fatalf("observation expired unobserved state early: entries %d events %d coverage %d", len(s.State.Entries), len(s.State.Events), len(s.State.Coverage))
+	}
+	if e := s.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	reopened, e := OpenStore(s.Config)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, st := range []*Store{s, reopened} {
+		if st.State.Entries["stale|nettop|observed|lan"] != nil || len(st.State.Events) != 1 || st.State.Events[0].App != "other" || len(st.State.Coverage) != 0 {
+			t.Fatalf("save kept expired state: entries %d events %v coverage %d", len(st.State.Entries), st.State.Events, len(st.State.Coverage))
+		}
+		if !st.State.EvictedThrough.Equal(old) || !st.State.CoverageEvictedThrough.Equal(old) {
+			t.Fatalf("watermarks %v %v, want %v", st.State.EvictedThrough, st.State.CoverageEvictedThrough, old)
+		}
+	}
+}
+
+// When an observation pushes a bound over max_entries it runs the full
+// prune at once: expired entries go first, so a new key at the cap with one
+// expired entry present evicts that entry and keeps every retained one.
+func TestObserveOverCapRunsFullPrune(t *testing.T) {
+	s := pruneFixture(t, 2)
+	now := time.Now()
+	old, recent := now.Add(-8*24*time.Hour), now.Add(-time.Minute)
+	s.State.Entries["expired|nettop|observed|lan"] = &Entry{FirstSeen: old, LastSeen: old, WindowStart: old, Count: 1}
+	s.State.Entries["recent|nettop|observed|lan"] = &Entry{FirstSeen: recent, LastSeen: recent, WindowStart: recent, Count: 1}
+	it := Item{App: "new", Source: "nettop", Verdict: "observed", Remote: "lan"}
+	s.Observe(it, now, ruleClassify)
+	if len(s.State.Entries) != 2 || s.State.Entries["recent|nettop|observed|lan"] == nil || s.State.Entries[key(cleanItem(it))] == nil {
+		t.Fatalf("entries after over-cap observation: %v", s.State.Entries)
 	}
 }
 
@@ -283,112 +219,6 @@ func TestCollectSampleSavesOncePerSample(t *testing.T) {
 			t.Fatalf("error %v after %d items; want disk full after 2", e, collected)
 		}
 	})
-}
-
-// PR65 review r1: observations store wall-clock times, so in-memory state is
-// the state a reload yields. An observation made with a monotonic clock
-// reading leaves none in its event or entry, and a Save/OpenStore round trip
-// returns equal events.
-func TestObservationsUseWallClock(t *testing.T) {
-	s := pruneFixture(t, 20)
-	now := time.Now()
-	if wallClock(now) {
-		t.Fatal("fixture needs a monotonic reading")
-	}
-	s.Observe(Item{App: "wall", Source: "nettop", Verdict: "observed", Remote: "lan"}, now, ruleClassify)
-	if len(s.State.Events) != 1 || !wallClock(s.State.Events[0].TS) || !s.State.Events[0].TS.Equal(now) {
-		t.Fatalf("event time %v", s.State.Events)
-	}
-	for _, e := range s.State.Entries {
-		if !wallClock(e.FirstSeen) || !wallClock(e.LastSeen) || !wallClock(e.WindowStart) {
-			t.Fatalf("entry times keep a monotonic reading: %+v", e)
-		}
-	}
-	if e := s.Save(now); e != nil {
-		t.Fatal(e)
-	}
-	reopened, e := OpenStore(s.Config)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if !reflect.DeepEqual(reopened.State.Events[0].TS, s.State.Events[0].TS) {
-		t.Fatal("reloaded event time differs from the in-memory one")
-	}
-}
-
-// The fast paths' guards refuse every state where they would not be exact:
-// a monotonic reading anywhere, out-of-order times, an expired span, spans over
-// the bound, or empty coverage (the sorting path turns it into nil). Ordered
-// wall-clock state within the bound is accepted, so the fast path is reachable.
-func TestPruneFastPathGuards(t *testing.T) {
-	mono := time.Now()
-	wall := mono.Round(0)
-	if !wallClock(wall) || wallClock(mono) {
-		t.Fatal("wallClock does not detect the monotonic reading")
-	}
-	later := wall.Add(time.Minute)
-	if !eventsWallOrdered([]Event{{TS: wall}, {TS: wall}, {TS: later}}) || !eventsWallOrdered(nil) {
-		t.Fatal("ordered wall-clock events refused")
-	}
-	for name, events := range map[string][]Event{
-		"monotonic":    {{TS: wall}, {TS: mono.Add(time.Hour)}},
-		"out of order": {{TS: later}, {TS: wall}},
-	} {
-		if eventsWallOrdered(events) {
-			t.Errorf("events %s accepted", name)
-		}
-	}
-	cutoff := wall.Add(-time.Hour)
-	span := func(start time.Time) CoverageSpan { return CoverageSpan{Start: start, End: start.Add(time.Second)} }
-	if !coverageSettled([]CoverageSpan{span(wall), span(later)}, 2, cutoff) {
-		t.Fatal("settled coverage refused")
-	}
-	stalled := span(wall)
-	stalled.StallAfter = &CoverageStall{From: stalled.End, To: mono.Add(time.Hour)}
-	for name, spans := range map[string][]CoverageSpan{
-		"empty":           {},
-		"over the bound":  {span(wall), span(later), span(later)},
-		"monotonic start": {span(mono)},
-		"monotonic stall": {stalled},
-		"out of order":    {span(later), span(wall)},
-		"expired":         {span(cutoff.Add(-time.Hour)), span(wall)},
-	} {
-		if coverageSettled(spans, 2, cutoff) {
-			t.Errorf("coverage %s accepted", name)
-		}
-	}
-}
-
-// PR65 review r1, finding 2: coverage expiry stays irreversible at observation
-// time. An observation past a span's retention removes it and advances the
-// watermark; a later Save with an earlier clock reading neither restores the
-// span nor clears the watermark, in memory, in Split or in state.json.
-func TestCoverageExpiresAtObservation(t *testing.T) {
-	s := pruneFixture(t, 20)
-	now := time.Now().Round(0)
-	end := now.Add(-time.Duration(s.Config.RetentionDays) * 24 * time.Hour)
-	s.BeginCoverage(end.Add(-time.Hour))
-	s.EndCoverage(end)
-	if e := s.Save(end); e != nil {
-		t.Fatal(e)
-	}
-	if len(s.State.Coverage) != 1 {
-		t.Fatalf("fixture coverage %v", s.State.Coverage)
-	}
-	s.Observe(Item{App: "clock", Source: "nettop", Verdict: "observed", Remote: "lan"}, now.Add(time.Second), ruleClassify)
-	if len(s.State.Coverage) != 0 || !s.State.CoverageEvictedThrough.Equal(end) || !s.Split(end.Add(-time.Minute), end).Window.Truncated {
-		t.Fatalf("observation kept expired coverage: %v watermark %v", s.State.Coverage, s.State.CoverageEvictedThrough)
-	}
-	if e := s.Save(now.Add(-time.Second)); e != nil {
-		t.Fatal(e)
-	}
-	reopened, e := OpenStore(s.Config)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if len(reopened.State.Coverage) != 0 || !reopened.State.CoverageEvictedThrough.Equal(end) {
-		t.Fatalf("saved coverage %v watermark %v", reopened.State.Coverage, reopened.State.CoverageEvictedThrough)
-	}
 }
 
 // PR65 review r1, finding 3: a tick saves a sample that emitted before backend

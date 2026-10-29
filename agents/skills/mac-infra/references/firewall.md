@@ -445,11 +445,11 @@ spike and escalation events save immediately. Those of a nettop sample save once
 when the sample ends, before backend health maintenance. During a slow sample,
 an emitted row also saves once `save_interval` has passed since the last save,
 because every save rewrites the whole state; the save timer does not interrupt
-a classification in progress. Retention and `max_entries` pruning, coverage
-expiry included, still run around every observation, without sorting or copying
-state that is already ordered. Observation and coverage times are wall-clock
-readings, as they are after a reload, so a restart does not change what
-expires. Silent updates mark state dirty, then save at
+a classification in progress. An observation decides only its own key's
+retention: an entry last seen before the cutoff counts as new. Entries, events
+and coverage spans nobody observes expire at the next save. When an
+observation takes entries, events or signers over `max_entries`, the full
+retention and bound prune runs at once. Silent updates mark state dirty, then save at
 `save_interval`, the next nettop tick if earlier, and shutdown. The flag contains
 the latest event RFC3339 timestamp. A per-directory advisory lock is acquired
 before loading state and refuses concurrent collectors.
