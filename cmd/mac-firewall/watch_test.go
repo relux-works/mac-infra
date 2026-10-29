@@ -161,6 +161,22 @@ func TestWatchDigestSplit(t *testing.T) {
 	if g := split.KnownFP[firewallwatch.KnownFPNettopRawIP]; g.Count != 1 || g.Rows[0].App != "sample app" || split.Window.EventsInWindow != 1 {
 		t.Fatalf("split: %s", o.String())
 	}
+	// The consumer reads only split JSON, including positive coalesced totals
+	// even when no exact coverage gap remains.
+	store.State.Coverage = []firewallwatch.CoverageSpan{{Start: now.Add(-2 * time.Hour), End: now, ShortStalls: 3, ShortStalledNS: 60000000}}
+	if e = store.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	o.Reset()
+	if code := run([]string{"watch", "digest", "--config", config, "--json", "--since", "1h", "--split"}, &o, &errOut); code != 0 {
+		t.Fatal(code, errOut.String())
+	}
+	if e = json.Unmarshal(o.Bytes(), &split); e != nil {
+		t.Fatal(e)
+	}
+	if !split.Window.Truncated || len(split.Window.CoverageGaps) != 0 || split.Window.CoalescedShortStalls.Count != 3 || split.Window.CoalescedShortStalls.StalledNS != 60000000 || !bytes.Contains(o.Bytes(), []byte(`"coalesced_short_stalls":{"count":3,"stalled_ns":60000000}`)) {
+		t.Fatalf("coalesced stalls missing from CLI split: %s", o.String())
+	}
 }
 
 // Both status formats expose persisted queue and timing health without starting a collector.
@@ -170,9 +186,10 @@ func TestWatchHealthOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	maxAt := time.Date(2026, 10, 29, 0, 15, 0, 0, time.UTC)
 	s.State.Health = firewallwatch.RunHealth{
-		LineQueueHighWater: firewallwatch.QueueHighWater{ALF: 64, Netfilter: 32},
-		Classification:     firewallwatch.TimingSummary{LastNS: 1000000, MaxNS: 2000000, Count: 3},
+		LineQueueHighWater: firewallwatch.QueueHighWater{ALF: 64, Netfilter: 32, MaxAt: firewallwatch.QueueHighWaterTimes{ALF: &maxAt, Netfilter: &maxAt}},
+		Classification:     firewallwatch.TimingSummary{LastNS: 1000000, MaxNS: 2000000, Count: 3, MaxAt: &maxAt},
 	}
 	if err = s.Save(time.Now()); err != nil {
 		t.Fatal(err)
@@ -193,11 +210,12 @@ func TestWatchHealthOutput(t *testing.T) {
 			}
 			queue := status["line_queue_high_water"].(map[string]any)
 			timing := status["run_loop_timing"].(map[string]any)["classification"].(map[string]any)
-			if queue["alf"] != float64(64) || queue["netfilter"] != float64(32) || timing["count"] != float64(3) {
+			times := queue["max_at"].(map[string]any)
+			if queue["alf"] != float64(64) || queue["netfilter"] != float64(32) || timing["count"] != float64(3) || times["alf"] != maxAt.Format(time.RFC3339) || times["netfilter"] != maxAt.Format(time.RFC3339) || timing["max_at"] != maxAt.Format(time.RFC3339) {
 				t.Fatal(status)
 			}
 		} else {
-			for _, want := range []string{"line queue high-water: alf=64 netfilter=32", "save: last=", "classification: last=1ms max=2ms count=3"} {
+			for _, want := range []string{"line queue high-water: alf=64 netfilter=32", "save: last=", "classification: last=1ms max=2ms count=3", "maxima at: line queue alf=2026-10-29T00:15:00Z netfilter=2026-10-29T00:15:00Z; save=unknown classification=2026-10-29T00:15:00Z"} {
 				if !strings.Contains(out.String(), want) {
 					t.Fatalf("missing %s: %s", want, out.String())
 				}

@@ -48,20 +48,28 @@ type SplitGap struct {
 	To   time.Time `json:"to"`
 }
 
+// CoalescedShortStalls sums whole intersecting ALF spans; exact stall positions
+// are unavailable, so these totals can include stalls outside the window.
+type CoalescedShortStalls struct {
+	Count     uint64 `json:"count"`
+	StalledNS int64  `json:"stalled_ns"`
+}
+
 // SplitWindow describes the events actually covered. Truncated is set when
 // part of [since, as_of] may be missing: a coverage gap (watcher stopped,
 // crashed, restarted, stalled or never recorded), evicted history, or a span
 // with coalesced short stalls whose precise positions are no longer known.
 type SplitWindow struct {
-	Since                  time.Time  `json:"since"`
-	AsOf                   time.Time  `json:"as_of"`
-	FirstTS                *time.Time `json:"first_ts"`
-	LastTS                 *time.Time `json:"last_ts"`
-	EventsInWindow         int        `json:"events_in_window"`
-	CoverageGaps           []SplitGap `json:"coverage_gaps"`
-	EvictedThrough         *time.Time `json:"evicted_through"`
-	CoverageEvictedThrough *time.Time `json:"coverage_evicted_through"`
-	Truncated              bool       `json:"truncated"`
+	Since                  time.Time            `json:"since"`
+	AsOf                   time.Time            `json:"as_of"`
+	FirstTS                *time.Time           `json:"first_ts"`
+	LastTS                 *time.Time           `json:"last_ts"`
+	EventsInWindow         int                  `json:"events_in_window"`
+	CoverageGaps           []SplitGap           `json:"coverage_gaps"`
+	CoalescedShortStalls   CoalescedShortStalls `json:"coalesced_short_stalls"`
+	EvictedThrough         *time.Time           `json:"evicted_through"`
+	CoverageEvictedThrough *time.Time           `json:"coverage_evicted_through"`
+	Truncated              bool                 `json:"truncated"`
 }
 
 // DigestSplit is the deterministic triage view of one digest window.
@@ -134,8 +142,13 @@ func (s *Store) Split(since, asOf time.Time) DigestSplit {
 	// Compaction preserves counts rather than exact timestamps. Any window
 	// touching that span may include a short stall, so remain conservative.
 	for _, span := range s.State.Coverage {
-		if span.Source == "" && span.ShortStalls > 0 && span.Start.Before(asOf) && span.End.After(since) {
-			split.Window.Truncated = true
+		if since.Before(asOf) && span.Source == "" && span.Start.Before(asOf) && span.End.After(since) {
+			total := &split.Window.CoalescedShortStalls
+			total.Count = addCount(total.Count, span.ShortStalls)
+			total.StalledNS = addNS(total.StalledNS, span.ShortStalledNS)
+			if span.ShortStalls > 0 {
+				split.Window.Truncated = true
+			}
 		}
 	}
 	sortRows := func(rows []SplitRow) {

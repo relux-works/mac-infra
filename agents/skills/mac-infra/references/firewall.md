@@ -203,14 +203,21 @@ a live health probe; a stale timestamp may mean the watcher has stopped.
 The persisted health also reports `line_queue_high_water` (`alf` and
 `netfilter`, observed buffered depths from 0 to the unchanged capacity of 64)
 and `run_loop_timing` (`save` and `classification`). Each timing has `last_ns`,
-`max_ns` and a saturating `count`, with no sample history. Classification timing
+`max_ns`, a saturating `count` and a nullable `max_at` timestamp, with no sample
+history. Queue depths keep the numeric `alf` and `netfilter` values and add
+`max_at: {alf, netfilter}` for their nullable timestamps. Timestamps record the
+first observation of a strictly higher maximum; ties leave them unchanged.
+Timing timestamps are completion times; queue timestamps are observation times.
+Old states retain unknown (`null`) timestamps until a new maximum is observed.
+Classification timing
 covers actual classifier calls (rules/kNN/backend), not parsing, signer
 inspection or deduplicated repeats. Save timing covers the whole save attempt,
 including state and daily-file writes; a flush that saves uses the same timing,
 while a skipped flush adds no sample. The completed duration is persisted by the
 next save, including failed attempts: the last save on shutdown cannot include
-its own full duration without another write. The counters and maxima accumulate
-across runs. Text status displays the same measurements as durations. In
+its own full duration without another write. Queue high-water values, timing
+counters and maxima accumulate across runs, together with their timestamps.
+Text status displays the same measurements as durations and their maxima times. In
 `state.json`, these fields live under `health.line_queue_high_water`,
 `health.save` and `health.classification`. These observations do not measure
 upstream log loss or establish the cause of stalls.
@@ -225,7 +232,7 @@ loopback rows of ssh or limactl), each with a count and its rows;
 `needs_review` holds every other `decide` event. Noise and digest events that
 are not denies appear in no bucket. The output also carries `health` (the
 `status` report) and `window`: since, as_of, first/last event time, event
-count, `coverage_gaps`, `evicted_through`, `coverage_evicted_through` and
+count, `coverage_gaps`, `coalesced_short_stalls`, `evicted_through`, `coverage_evicted_through` and
 `truncated`. `run` records coverage spans in state: a span opens when collection
 starts and ends at its last save, or when the ALF log stream ended if that came
 first. `coverage_gaps` lists disjoint intervals in [since, as_of], each with
@@ -248,7 +255,13 @@ pending-feeder history exceeds `max_entries`, recorded stalls shorter than
 short stalls no longer create individual split gaps after compaction. Detail
 is retained until this pressure occurs. A window intersecting an ALF span with
 coalesced stalls remains conservatively `truncated`, because their precise
-positions are no longer retained. Counts describe delayed collection, not
+positions are no longer retained. The split window exposes
+`coalesced_short_stalls: {count, stalled_ns}` as saturating sums of the whole
+ALF spans intersecting the window. These are per-span sums, so they may include
+stalls just outside the window; netfilter spans are excluded. A clean window
+has both counters zero. A window with only coalesced stalls has an empty
+`coverage_gaps` array, positive counters and `truncated: true`.
+Counts describe delayed collection, not
 measured loss. Both coverage spans and pending feeder records are bounded by
 `max_entries`; `max_state_bytes` still bounds persisted state. Coalescing never
 bridges a real stop or another source. If count or age retention must still
@@ -258,6 +271,15 @@ state and exposed beside `evicted_through` in the split window (`null` if no
 known eviction). Time before this watermark is conservatively
 `coverage_evicted`, even where retained spans overlap it. The watermark covers
 history discarded from either collector; split coverage itself uses ALF spans.
+Spans are kept in start-time order. Pruning drops the oldest history while
+preserving the newest span of each running source, including across compaction.
+That open span stays separate from coalesced history, so past short stalls do
+not mark later complete windows as truncated.
+If `max_entries` is smaller than the number of running sources, the hard bound
+still applies: an evicted open span is retained in its runtime tracker and
+restored and extended on the next save. Its discarded time advances the same
+watermark, so it is unknown rather than reported as a stop. The runtime snapshot
+is not persisted; a new watcher run opens new coverage as usual.
 
 When a span reaches the window, its end may trail as_of by up to
 `nettop_interval` + `save_interval`, the unchanged expected save cadence,

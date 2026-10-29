@@ -7,14 +7,21 @@ import (
 
 // TimingSummary stores nanoseconds and a saturating count, never samples.
 type TimingSummary struct {
-	LastNS int64  `json:"last_ns"`
-	MaxNS  int64  `json:"max_ns"`
-	Count  uint64 `json:"count"`
+	LastNS int64      `json:"last_ns"`
+	MaxNS  int64      `json:"max_ns"`
+	Count  uint64     `json:"count"`
+	MaxAt  *time.Time `json:"max_at"`
 }
 
 type QueueHighWater struct {
-	ALF       int `json:"alf"`
-	Netfilter int `json:"netfilter"`
+	ALF       int                 `json:"alf"`
+	Netfilter int                 `json:"netfilter"`
+	MaxAt     QueueHighWaterTimes `json:"max_at"`
+}
+
+type QueueHighWaterTimes struct {
+	ALF       *time.Time `json:"alf"`
+	Netfilter *time.Time `json:"netfilter"`
 }
 
 type RunHealth struct {
@@ -37,13 +44,15 @@ func addNS(a, b int64) int64 {
 	return a + b
 }
 
-func (s *TimingSummary) observe(d time.Duration) {
+func (s *TimingSummary) observe(d time.Duration, at time.Time) {
 	if d < 0 {
 		d = 0
 	}
 	s.LastNS = int64(d)
 	if s.LastNS > s.MaxNS {
 		s.MaxNS = s.LastNS
+		at = at.UTC()
+		s.MaxAt = &at
 	}
 	s.Count = addCount(s.Count, 1)
 }
@@ -55,10 +64,16 @@ func (s TimingSummary) valid() bool {
 // QueueDepth records the largest observed buffered depth, including a full
 // queue before backpressure. It is called only by the feeder for this source.
 func (c *SourceCoverage) QueueDepth(n int) {
+	c.queueDepthAt(n, time.Now())
+}
+
+func (c *SourceCoverage) queueDepthAt(n int, at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if n > c.queueHighWater {
 		c.queueHighWater = n
+		at = at.UTC()
+		c.queueHighWaterAt = &at
 	}
 }
 
@@ -66,6 +81,6 @@ func (s *Store) QueueDepth(n int) { s.Coverage("").QueueDepth(n) }
 
 func (s *Store) classify(it Item, classify func(Item) Decision) Decision {
 	start := time.Now()
-	defer func() { s.State.Health.Classification.observe(time.Since(start)) }()
+	defer func() { s.State.Health.Classification.observe(time.Since(start), time.Now()) }()
 	return classify(it)
 }

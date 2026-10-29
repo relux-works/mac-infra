@@ -87,15 +87,19 @@ type pendingStall struct {
 // SourceCoverage tracks the open coverage span of one collector source. The
 // feeder goroutine reports stalls and the stream's end; Save applies them.
 type SourceCoverage struct {
-	source         string
-	covering       bool
-	mu             sync.Mutex
-	stalls         []pendingStall
-	stalledAt      time.Time
-	endedAt        time.Time
-	limit          int
-	evictedThrough time.Time
-	queueHighWater int
+	source   string
+	covering bool
+	// evictedSpan is owned by the run loop, like covering. Feeders only write
+	// observations protected by mu; they never access this recovery snapshot.
+	evictedSpan      *CoverageSpan
+	mu               sync.Mutex
+	stalls           []pendingStall
+	stalledAt        time.Time
+	endedAt          time.Time
+	limit            int
+	evictedThrough   time.Time
+	queueHighWater   int
+	queueHighWaterAt *time.Time
 }
 
 type Store struct {
@@ -401,25 +405,7 @@ func (s *Store) prune(now time.Time) {
 		events = events[len(events)-s.Config.MaxEntries:]
 	}
 	s.State.Events = append([]Event(nil), events...)
-	spans := s.State.Coverage[:0]
-	for _, v := range s.State.Coverage {
-		end := coverageEnd(v)
-		if !end.Before(cutoff) {
-			spans = append(spans, v)
-		} else {
-			s.coverageEvicted(end)
-		}
-	}
-	if len(spans) > s.Config.MaxEntries {
-		spans = compactCoverage(spans)
-	}
-	if len(spans) > s.Config.MaxEntries {
-		for _, v := range spans[:len(spans)-s.Config.MaxEntries] {
-			s.coverageEvicted(coverageEnd(v))
-		}
-		spans = spans[len(spans)-s.Config.MaxEntries:]
-	}
-	s.State.Coverage = append([]CoverageSpan(nil), spans...)
+	s.pruneCoverage(cutoff)
 	// Keep executable signature cache bounded as well; evicted paths may be inspected again.
 	if len(s.State.Signers) > s.Config.MaxEntries {
 		keys := make([]string, 0, len(s.State.Signers))
@@ -536,18 +522,25 @@ func (c *SourceCoverage) EndCoverage(at time.Time) {
 // start and opens a new one at its end; the span then reaches now, but never
 // past an open stall or the collector's end.
 func (s *Store) extendCoverage(c *SourceCoverage, now time.Time) {
+	if c.evictedSpan != nil {
+		s.State.Coverage = append(s.State.Coverage, *c.evictedSpan)
+		c.evictedSpan = nil
+	}
 	c.mu.Lock()
 	stalls, stalledAt, endedAt := c.stalls, c.stalledAt, c.endedAt
-	evicted, highWater := c.evictedThrough, c.queueHighWater
+	evicted, highWater, highWaterAt := c.evictedThrough, c.queueHighWater, c.queueHighWaterAt
 	c.stalls = nil
 	c.mu.Unlock()
 	s.coverageEvicted(evicted)
 	high := &s.State.Health.LineQueueHighWater.ALF
+	highAt := &s.State.Health.LineQueueHighWater.MaxAt.ALF
 	if c.source == SourceNetfilter {
 		high = &s.State.Health.LineQueueHighWater.Netfilter
+		highAt = &s.State.Health.LineQueueHighWater.MaxAt.Netfilter
 	}
 	if highWater > *high {
 		*high = highWater
+		*highAt = highWaterAt
 	}
 	open := -1
 	for i := len(s.State.Coverage) - 1; i >= 0; i-- {
@@ -607,7 +600,7 @@ func (s *Store) Save(now time.Time) error {
 	start := time.Now()
 	// A save cannot persist its own completed duration without another write.
 	// The next save persists this result, including failed attempts.
-	defer func() { s.State.Health.Save.observe(time.Since(start)) }()
+	defer func() { s.State.Health.Save.observe(time.Since(start), time.Now()) }()
 	if e := safeDir(s.Config.StateDir); e != nil {
 		return e
 	}

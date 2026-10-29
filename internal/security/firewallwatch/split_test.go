@@ -5,12 +5,49 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// Split totals use whole intersecting ALF spans, exclude other sources/outside spans, and saturate safely.
+func TestSplitCoalescedShortStalls(t *testing.T) {
+	start := time.Now().Add(-time.Hour).UTC()
+	spans := []CoverageSpan{
+		{Start: start, End: start.Add(10 * time.Minute), ShortStalls: 2, ShortStalledNS: 40},
+		{Start: start.Add(10 * time.Minute), End: start.Add(20 * time.Minute), ShortStalls: 3, ShortStalledNS: 60},
+		{Start: start, End: start.Add(20 * time.Minute), Source: SourceNetfilter, ShortStalls: 100, ShortStalledNS: 200},
+		{Start: start.Add(20 * time.Minute), End: start.Add(30 * time.Minute)},
+	}
+	s := &Store{Config: testConfig(t), State: State{Coverage: spans}}
+	for _, tc := range []struct {
+		name      string
+		from, to  time.Duration
+		want      CoalescedShortStalls
+		truncated bool
+	}{
+		{"whole_spans", 0, 20 * time.Minute, CoalescedShortStalls{Count: 5, StalledNS: 100}, true},
+		{"partial_spans", 5 * time.Minute, 15 * time.Minute, CoalescedShortStalls{Count: 5, StalledNS: 100}, true},
+		{"one_span", 10 * time.Minute, 15 * time.Minute, CoalescedShortStalls{Count: 3, StalledNS: 60}, true},
+		{"clean", 20 * time.Minute, 30 * time.Minute, CoalescedShortStalls{}, false},
+		{"empty", 5 * time.Minute, 5 * time.Minute, CoalescedShortStalls{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := s.Split(start.Add(tc.from), start.Add(tc.to)).Window
+			if w.CoalescedShortStalls != tc.want || w.Truncated != tc.truncated || len(w.CoverageGaps) != 0 {
+				t.Fatalf("want totals=%+v truncated=%t and no gaps, got %+v", tc.want, tc.truncated, w)
+			}
+		})
+	}
+	spans[0].ShortStalls, spans[0].ShortStalledNS = math.MaxUint64, math.MaxInt64
+	w := s.Split(start, start.Add(20*time.Minute)).Window
+	if w.CoalescedShortStalls.Count != math.MaxUint64 || w.CoalescedShortStalls.StalledNS != math.MaxInt64 {
+		t.Fatal("split counters overflowed", w.CoalescedShortStalls)
+	}
+}
 
 // Split puts each in-window event in at most one bucket with precedence
 // real_deny > known_fp > needs_review. A non-nettop deny verdict (deny,

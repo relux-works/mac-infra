@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,9 @@ func TestCoverageMicroStallStorm(t *testing.T) {
 			if !w.Truncated {
 				t.Fatal("coalesced stalls hid possible incompleteness")
 			}
+			if batch == 10001 && (len(w.CoverageGaps) != 0 || w.CoalescedShortStalls.Count != 10001 || w.CoalescedShortStalls.StalledNS != 10001*int64(20*time.Millisecond)) {
+				t.Fatalf("coalesced-only storm is invisible in the split: %+v", w)
+			}
 			count, ns := uint64(0), int64(0)
 			for _, span := range s.State.Coverage {
 				count += span.ShortStalls
@@ -230,7 +234,7 @@ func TestCoverageCompleteWindowControl(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := s.Split(start, end).Window
-	if w.Truncated || len(w.CoverageGaps) != 0 || w.CoverageEvictedThrough != nil {
+	if w.Truncated || len(w.CoverageGaps) != 0 || w.CoverageEvictedThrough != nil || w.CoalescedShortStalls != (CoalescedShortStalls{}) {
 		t.Fatal(w)
 	}
 }
@@ -323,21 +327,21 @@ func TestRunHealthInstrumentation(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := loaded.State.Health
-	if health.LineQueueHighWater.ALF != 64 || health.LineQueueHighWater.Netfilter != 64 || health.Save != first || health.Classification.Count != 1 {
+	if health.LineQueueHighWater.ALF != 64 || health.LineQueueHighWater.Netfilter != 64 || !reflect.DeepEqual(health.Save, first) || health.Classification.Count != 1 || health.LineQueueHighWater.MaxAt.ALF == nil || health.LineQueueHighWater.MaxAt.Netfilter == nil || health.Classification.MaxAt == nil {
 		t.Fatalf("health not persisted: %+v", health)
 	}
 	raw, err := json.Marshal(loaded.Status())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"line_queue_high_water", "run_loop_timing", "classification", "save", "last_ns", "max_ns", "count"} {
+	for _, key := range []string{"line_queue_high_water", "run_loop_timing", "classification", "save", "last_ns", "max_ns", "count", "max_at"} {
 		if !bytes.Contains(raw, []byte(`"`+key+`"`)) {
 			t.Fatalf("status missing %s: %s", key, raw)
 		}
 	}
 	summary := TimingSummary{Count: math.MaxUint64, MaxNS: 10}
 	for i := 0; i < 10001; i++ {
-		summary.observe(5)
+		summary.observe(5, start)
 	}
 	if summary.Count != math.MaxUint64 || summary.LastNS != 5 || summary.MaxNS != 10 {
 		t.Fatal("unbounded timing", summary)
@@ -367,7 +371,7 @@ func TestCoverageCompactionBoundaries(t *testing.T) {
 				next = tc.stall.To
 			}
 			spans := []CoverageSpan{{Start: start, End: start.Add(time.Minute), StallAfter: tc.stall}, {Start: next, End: next.Add(time.Minute), Source: tc.source}}
-			compacted := compactCoverage(spans)
+			compacted := compactCoverage(spans, nil)
 			if len(compacted) != tc.want {
 				t.Fatal(compacted)
 			}
