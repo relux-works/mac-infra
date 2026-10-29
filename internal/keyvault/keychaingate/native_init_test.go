@@ -4,33 +4,121 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"go/parser"
+	"go/token"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// The sandbox starts at Go package initialization. Native code that runs
-// earlier (a C/C++ constructor, an init_priority object, a mod_init_func
-// section entry or an Objective-C +load method) is outside it and could reach
-// the Keychain unconfined. No package linked into any test binary of this
-// module may contain such an entry point; precompiled .syso objects cannot be
-// inspected and are refused. This is a source check, so it only covers native
-// code that a build in this module can see.
-var nativePreMainEntry = regexp.MustCompile(`__attribute__\s*\(\(\s*(constructor|init_priority)\b|mod_init_func\b|(?m)^\s*\+\s*\(\s*void\s*\)\s*load\b`)
+// This is a review tripwire, not enforcement: a test cannot stop native code
+// that runs before Go init. New native inputs require an explicit reviewed
+// allowlist change. Use scripts/keyvault-test-confined.sh for that boundary.
+// Inventory: git ls-files for native suffixes and Go imports of "C".
+var reviewedNativeInputs = []string{
+	"internal/audiodevice/device_darwin.go",
+	"internal/chromectl/ax_darwin.go",
+	"internal/chromectl/ax_darwin.m",
+	"internal/keyvault/keychaingate/canary_darwin.go",
+	"internal/keyvault/keychaingate/gate_darwin.go",
+	"internal/keyvault/security_darwin.c",
+	"internal/keyvault/security_darwin.go",
+	"internal/keyvault/security_darwin.h",
+	"internal/maccore/trust_acl_darwin.go",
+	"internal/maccore/vpn_core_acl_darwin.go",
+}
 
-// cgoImport matches a Go file that uses cgo, whose preamble is native code.
-var cgoImport = regexp.MustCompile(`(?m)^\s*import\s+(\(\s*)?"C"`)
+func nativeSuffix(name string) bool {
+	switch filepath.Ext(name) {
+	case ".c", ".h", ".m", ".mm", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".inc", ".s", ".S", ".sx", ".syso":
+		return true
+	}
+	return false
+}
+
+func importsC(path string) (bool, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+	if err != nil {
+		return false, err
+	}
+	for _, spec := range file.Imports {
+		name, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			return false, err
+		}
+		if name == "C" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func nativeInputs(root string) ([]string, error) {
+	var inputs []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" || entry.Name() == ".temp" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Do not silently omit source behind a symlink or another special file.
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("uninspected input: %s", path)
+		}
+		native := nativeSuffix(path)
+		if filepath.Ext(path) == ".go" {
+			native, err = importsC(path)
+			if err != nil {
+				return err
+			}
+		}
+		if native {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			inputs = append(inputs, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	slices.Sort(inputs)
+	return inputs, err
+}
+
+func checkNativeInputs(root string, allowlist []string) error {
+	inputs, err := nativeInputs(root)
+	if err != nil {
+		return err
+	}
+	for _, input := range inputs {
+		if !slices.Contains(allowlist, input) {
+			return fmt.Errorf("unreviewed native input: %s", input)
+		}
+	}
+	for _, reviewed := range allowlist {
+		if !slices.Contains(inputs, reviewed) {
+			return fmt.Errorf("stale native allowlist entry: %s", reviewed)
+		}
+	}
+	return nil
+}
 
 type listedPackage struct {
-	ImportPath, Dir                             string
-	Standard                                    bool
-	GoFiles, CgoFiles, CFiles, CXXFiles, MFiles []string
-	HFiles, SFiles, SysoFiles, IgnoredGoFiles   []string
-	IgnoredOtherFiles                           []string
+	ImportPath, Dir                            string
+	Standard                                   bool
+	CgoFiles, CFiles, CXXFiles, MFiles, HFiles []string
+	SFiles, SysoFiles                          []string
 }
 
 func moduleRoot(t *testing.T) string {
@@ -51,19 +139,44 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
-// Every non-standard package linked into any test binary of the module, including files excluded by build tags, has no native pre-main entry point.
-func TestNoNativePreMainEntryPoints(t *testing.T) {
+func dependencyNativeInputs(p listedPackage) []string {
+	var inputs []string
+	for _, files := range [][]string{p.CgoFiles, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.SysoFiles} {
+		inputs = append(inputs, files...)
+	}
+	for _, name := range p.SFiles {
+		// Go assembly (.s) in non-cgo packages is allowed: the Go assembler
+		// emits Go functions, not native linker constructor sections. Uppercase
+		// .S and .sx go through a native toolchain and are not exempt.
+		if nativeSuffix(name) && (filepath.Ext(name) != ".s" || len(p.CgoFiles) != 0) {
+			inputs = append(inputs, name)
+		}
+	}
+	return inputs
+}
+
+// The entire module tree, including tag-excluded files and subdirectory headers,
+// must match the reviewed native inventory. This does not enforce confinement.
+func TestNativeInputTripwire(t *testing.T) {
+	if err := checkNativeInputs(moduleRoot(t), reviewedNativeInputs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Default-build non-standard dependencies outside the module must not add native
+// inputs. Other build graphs need their own review; the wrapper enforces startup.
+func TestDependencyNativeInputTripwire(t *testing.T) {
+	root := moduleRoot(t)
 	cmd := exec.Command("go", "list", "-deps", "-test", "-json", "./...")
-	cmd.Dir = moduleRoot(t)
-	cmd.Env = append(os.Environ(), "GOWORK=off")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("go list: %v\n%s", err, stderr.Bytes())
 	}
-	seen := map[string]bool{}
-	var offenders []string
+	moduleSeen := false
 	dec := json.NewDecoder(bytes.NewReader(out))
 	for {
 		var p listedPackage
@@ -72,55 +185,86 @@ func TestNoNativePreMainEntryPoints(t *testing.T) {
 		} else if err != nil {
 			t.Fatal(err)
 		}
-		if p.Standard || seen[p.Dir] {
+		if p.Standard {
 			continue
 		}
-		seen[p.Dir] = true
-		for _, name := range p.SysoFiles {
-			offenders = append(offenders, filepath.Join(p.Dir, name)+" (precompiled object)")
+		if p.Dir == "" {
+			t.Fatalf("go list returned no directory for %q", p.ImportPath)
 		}
-		var files []string
-		for _, list := range [][]string{p.GoFiles, p.CgoFiles, p.IgnoredGoFiles, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.SFiles, p.IgnoredOtherFiles} {
-			files = append(files, list...)
+		rel, err := filepath.Rel(root, p.Dir)
+		if err != nil {
+			t.Fatal(err)
 		}
-		for _, name := range files {
-			path := filepath.Join(p.Dir, name)
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.HasSuffix(name, ".go") && !cgoImport.Match(data) {
-				continue
-			}
-			if nativePreMainEntry.Match(data) {
-				offenders = append(offenders, path)
-			}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			moduleSeen = true
+			continue
+		}
+		inputs := dependencyNativeInputs(p)
+		if len(inputs) != 0 {
+			t.Errorf("unreviewed external native dependency %s: %v", p.ImportPath, inputs)
 		}
 	}
-	if len(seen) == 0 {
-		t.Fatal("go list returned no module packages; the check inspected nothing")
-	}
-	if len(offenders) != 0 {
-		t.Fatalf("native code that runs before the Keychain gate:\n%s", strings.Join(offenders, "\n"))
+	if !moduleSeen {
+		t.Fatal("go list returned no module packages; dependency inventory is incomplete")
 	}
 }
 
-// The matcher rejects each native pre-main form, including the r2 reviewer's posix_spawn probe, and accepts ordinary cgo.
-func TestNativePreMainMatcher(t *testing.T) {
-	for _, c := range []struct {
-		name, source string
-		want         bool
-	}{
-		{"r2 reviewer probe", "/*\n__attribute__((constructor)) static void reviewer_native_init(void) {\n  posix_spawn(&pid, argv[0], &actions, NULL, argv, environ);\n}\n*/\nimport \"C\"\n", true},
-		{"spaced constructor with priority", "__attribute__ ((constructor(101))) static void early(void) {}\n", true},
-		{"C++ init_priority", "Early early __attribute__((init_priority(101)));\n", true},
-		{"mod_init_func section", "__attribute__((used, section(\"__DATA,__mod_init_func\"))) static void (*p)(void) = early;\n", true},
-		{"Objective-C +load", "@implementation Early\n+ (void)load { }\n@end\n", true},
-		{"ordinary cgo backend", "/*\n#include <Security/Security.h>\nstatic int list(void) { return 0; }\n*/\nimport \"C\"\n", false},
-		{"ordinary Objective-C method", "@implementation Early\n- (void)loadView { }\n@end\n", false},
-	} {
-		if got := nativePreMainEntry.MatchString(c.source); got != c.want {
-			t.Errorf("%s: matched=%v, want %v", c.name, got, c.want)
+// Scan-only controls plant native inputs without compiling or executing them.
+// Detection proves review admission, not prevention of native startup.
+func TestNativeInputTripwireControls(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, source string) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
 		}
+		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("ordinary.go", "package ordinary\n")
+	write(".temp/ignored.c", "ignored scratch")
+	write(".git/ignored.h", "ignored metadata")
+	if err := checkNativeInputs(root, nil); err != nil {
+		t.Fatalf("pure Go control: %v", err)
+	}
+	for _, name := range []string{"excluded.c", "include/startup.h", "excluded.cc", "excluded.go", "excluded.syso", "other.m", "other.mm", "other.cpp", "other.cxx", "other.hh", "other.hpp", "other.inc", "other.s", "other.S", "other.sx"} {
+		t.Run(name, func(t *testing.T) {
+			source := "//go:build never_enabled_tripwire_fixture\n\n"
+			if filepath.Ext(name) == ".go" {
+				source += "package fixture\nimport (\n_ \"fmt\"\n`C`\n)\n"
+			}
+			write(name, source)
+			if err := checkNativeInputs(root, nil); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("planted input was not rejected: %v", err)
+			}
+			if err := checkNativeInputs(root, []string{name}); err != nil {
+				t.Fatalf("explicit review control: %v", err)
+			}
+			if err := os.Remove(filepath.Join(root, name)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if err := checkNativeInputs(root, []string{"missing.c"}); err == nil {
+		t.Fatal("stale allowlist was accepted")
+	}
+}
+
+// External native fields are refused; pure Go assembly remains allowed.
+func TestDependencyNativeInputControls(t *testing.T) {
+	for _, p := range []listedPackage{
+		{CgoFiles: []string{"native.go"}}, {CFiles: []string{"native.c"}},
+		{CXXFiles: []string{"native.cc"}}, {MFiles: []string{"native.m"}},
+		{HFiles: []string{"native.h"}}, {SFiles: []string{"native.S"}},
+		{SFiles: []string{"native.sx"}}, {SysoFiles: []string{"native.syso"}},
+	} {
+		if inputs := dependencyNativeInputs(p); len(inputs) == 0 {
+			t.Errorf("native dependency accepted: %+v", p)
+		}
+	}
+	if inputs := dependencyNativeInputs(listedPackage{SFiles: []string{"go_asm.s"}}); len(inputs) != 0 {
+		t.Fatalf("Go assembly control rejected: %v", inputs)
 	}
 }

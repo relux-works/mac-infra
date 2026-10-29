@@ -21,8 +21,8 @@ func TestSandboxLeafPackage(t *testing.T) {
 	if len(items) != 0 || !errors.As(err, &status) || status.Status != -50 {
 		t.Fatalf("expected no items and sandbox OSStatus -50, got %d items, %v", len(items), err)
 	}
-	t.Logf("in-process=%t; read-only List refused: %v; no write attempted", keychaingate.Applied(), err)
-	if !keychaingate.Applied() {
-		t.Fatal("in-process sandbox was not installed")
+	t.Logf("in-process=%t; external=%t; read-only List refused: %v; no write attempted", keychaingate.Applied(), keychaingate.Confined(), err)
+	if !keychaingate.Applied() && !keychaingate.Confined() {
+		t.Fatal("neither confinement layer was verified")
 	}
 }

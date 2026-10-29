@@ -12,5 +12,5 @@ import (
 func TestSandboxNonTestHelper(t *testing.T) {
 	requireSandboxRegression(t)
 	items, err := sandboxHiddenBackend().List()
-	assertSandboxListRefused(t, items, err, keychaingate.Applied())
+	assertSandboxListRefused(t, items, err, keychaingate.Applied() || keychaingate.Confined())
 }

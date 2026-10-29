@@ -53,25 +53,32 @@ still run. To run the real tests on demand, unset the variable and run
 `go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault` in your own
 attended sitting: these tests create and delete test-namespace Keychain items
 and may compile the Swift helper and require owner interaction. The gate is
-test-only and does not change installed commands. On macOS with cgo, an imported
-package applies an in-process sandbox before keyvault and test-file initialization
-when the gate is set. It denies Keychain/token daemon lookup and writes under
-`~/Library/Keychains`; failure to install it terminates the test binary. Children
-inherit the sandbox even if they remove the gate. Read-only sandbox regression
-probes exercise refused backend calls. Certificate trust evaluation
-through trustd remains available for fake TLS tests. Real binaries never apply
-this sandbox. Under `sandbox-exec` with the external Keychain-denying profile,
-macOS refuses the second `sandbox_init`, so gated tests launched there fail
-before tests run (a re-exec that inherits this package's own profile reapplies
-it). The sandbox starts at Go package initialization: native code that runs
-earlier (cgo or native constructors, `init_priority`, `mod_init_func`,
-Objective-C `+load`) would be outside it, so `keychaingate`'s
-`TestNoNativePreMainEntryPoints` rejects any such entry point in every
-non-standard package linked into the module's test binaries, including files
-excluded by build tags, and refuses `.syso` objects. The reserved
-`keyvault_gate_regression` build tag adds a non-test helper probe; verify it with
-the gate set and
-`go test -tags=keyvault_gate_regression -run TestSandbox ./internal/keyvault/... ./cmd/mac-keyvault`.
+test-only and does not change installed commands. On macOS with cgo, a gated
+plain `go test` installs an in-process sandbox at Go initialization, covering
+keyvault's Go initialization, subsequent Go code and children, even if children
+remove the gate. It denies Keychain/token daemon lookup and writes under
+`~/Library/Keychains`; trustd remains available for fake TLS tests. If installation
+fails, a read-only lookup for a nonexistent item must return sandbox denial
+(OSStatus -50), confirming existing confinement; otherwise the process exits
+non-zero before tests. `Applied()` records installation and `Confined()` records
+that fallback verification. Real binaries never install this sandbox.
+
+Native code running before Go init is outside the in-process layer. The native
+input allowlist in `keychaingate` is a review tripwire, not enforcement: it scans
+the module tree regardless of build tags, and checks the default test dependency
+graph for external native inputs. Adding native code requires allowlist review;
+the check cannot prevent its startup. For full coverage including native startup,
+reviewers and agents should use the shipped external wrapper (macOS):
+
+```sh
+./scripts/keyvault-test-confined.sh -count=1 ./internal/keyvault/... ./cmd/mac-keyvault
+```
+
+The wrapper sets the gate by default, takes HOME as a sandbox profile parameter,
+and forwards all `go test` arguments. Its process tree is confined from exec;
+failed nested installation continues only after the canary confirms denial.
+The reserved `keyvault_gate_regression` tag adds read-only sandbox probes:
+`./scripts/keyvault-test-confined.sh -count=1 -tags=keyvault_gate_regression -run '^TestSandbox' ./internal/keyvault/... ./cmd/mac-keyvault`.
 
 Setup no longer installs global agent skills. Use Curator profiles backed by
 the [relux-works/skill-mac-infra mirror](https://github.com/relux-works/skill-mac-infra).

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -23,7 +24,13 @@ func init() {
 		return
 	}
 	if err := confine(); err != nil {
-		fmt.Fprintf(os.Stderr, "keychaingate: %v; refusing to run unsandboxed\n", err)
+		service := fmt.Sprintf("works.relux.mac-keyvault.sandbox-canary.nonexistent.%d.%d", os.Getpid(), time.Now().UnixNano())
+		status := canaryFindNonexistent(service)
+		if status == -50 {
+			confined = true
+			return
+		}
+		fmt.Fprintf(os.Stderr, "keychaingate: %v; read-only canary OSStatus %d; refusing to run unsandboxed\n", err, status)
 		os.Exit(1)
 	}
 	applied = true

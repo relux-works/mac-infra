@@ -10,26 +10,26 @@ import (
 	"github.com/relux-works/mac-infra/internal/keyvault/keychaingate"
 )
 
-var initSandboxApplied bool
+var initSandboxProtected bool
 var initSandboxItems []Item
 var initSandboxError error
 
 func init() {
 	if os.Getenv(keychaingate.SkipEnv) != "" {
-		initSandboxApplied = keychaingate.Applied()
+		initSandboxProtected = keychaingate.Applied() || keychaingate.Confined()
 		initSandboxItems, initSandboxError = NewSecurityStore().List()
 	}
 }
 
-func assertSandboxListRefused(t *testing.T, items []Item, err error, applied bool) {
+func assertSandboxListRefused(t *testing.T, items []Item, err error, protected bool) {
 	t.Helper()
 	var status *StatusError
 	if len(items) != 0 || !errors.As(err, &status) || status.Status != -50 {
 		t.Fatalf("expected no items and sandbox OSStatus -50, got %d items, %v", len(items), err)
 	}
-	t.Logf("in-process=%t; read-only List refused: %v; no write attempted", applied, err)
-	if !applied {
-		t.Fatal("in-process sandbox was not installed before backend access")
+	t.Logf("confinement verified=%t; read-only List refused: %v; no write attempted", protected, err)
+	if !protected {
+		t.Fatal("neither confinement layer was verified before backend access")
 	}
 }
 
@@ -43,7 +43,7 @@ func requireSandboxRegression(t *testing.T) {
 // The imported sandbox is installed before a test-file init's first Security.framework contact.
 func TestSandboxInitBeforeBackend(t *testing.T) {
 	requireSandboxRegression(t)
-	assertSandboxListRefused(t, initSandboxItems, initSandboxError, initSandboxApplied)
+	assertSandboxListRefused(t, initSandboxItems, initSandboxError, initSandboxProtected)
 }
 
 // A nil receiver and captured method value cannot bypass the process sandbox.
@@ -53,5 +53,5 @@ func TestSandboxNilMethodValue(t *testing.T) {
 	store, _ := value.(*SecurityStore)
 	list := store.List
 	items, err := list()
-	assertSandboxListRefused(t, items, err, keychaingate.Applied())
+	assertSandboxListRefused(t, items, err, keychaingate.Applied() || keychaingate.Confined())
 }

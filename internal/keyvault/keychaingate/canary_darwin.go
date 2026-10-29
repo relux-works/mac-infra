@@ -1,4 +1,4 @@
-//go:build darwin && cgo && keyvault_gate_regression
+//go:build darwin && cgo
 
 package keychaingate
 
@@ -8,7 +8,7 @@ package keychaingate
 #include <Security/Security.h>
 #include <stdlib.h>
 
-// This reserved-tag probe only queries; it never creates or changes an item.
+// This probe only queries; it never creates or changes an item.
 static int canary_find_nonexistent(const char *service) {
     CFStringRef name = CFStringCreateWithCString(kCFAllocatorDefault, service, kCFStringEncodingUTF8);
     const void *keys[] = { kSecClass, kSecAttrService, kSecAttrAccount, kSecReturnAttributes, kSecMatchLimit };

@@ -27,9 +27,9 @@ func requireSandboxRegression(t *testing.T) {
 
 func assertSandboxInstalled(t *testing.T) {
 	t.Helper()
-	t.Logf("in-process=%t", keychaingate.Applied())
-	if !keychaingate.Applied() {
-		t.Fatal("in-process sandbox was not installed")
+	t.Logf("in-process=%t; external=%t", keychaingate.Applied(), keychaingate.Confined())
+	if !keychaingate.Applied() && !keychaingate.Confined() {
+		t.Fatal("neither confinement layer was verified")
 	}
 }
 

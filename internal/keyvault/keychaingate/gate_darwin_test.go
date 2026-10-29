@@ -9,14 +9,14 @@ import (
 	"time"
 )
 
-// The init sandbox is active before a read-only SecItemCopyMatching for a nonexistent item returns -50.
+// Either confinement layer is recorded before this read-only lookup returns -50.
 func TestSandboxCanary(t *testing.T) {
 	if os.Getenv(SkipEnv) == "" {
 		t.Fatal("canary requires the gate to be set")
 	}
-	t.Logf("keychaingate.Applied()=%t before the first Security.framework query", Applied())
-	if !Applied() {
-		t.Fatal("in-process sandbox was not installed")
+	t.Logf("keychaingate.Applied()=%t keychaingate.Confined()=%t before the test lookup", Applied(), Confined())
+	if !Applied() && !Confined() {
+		t.Fatal("neither confinement layer was verified")
 	}
 	service := fmt.Sprintf("works.relux.mac-keyvault.sandbox-canary.nonexistent.%d.%d", os.Getpid(), time.Now().UnixNano())
 	status := canaryFindNonexistent(service)
