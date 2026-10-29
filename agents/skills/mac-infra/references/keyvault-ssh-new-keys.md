@@ -360,8 +360,15 @@ initialization failure exits non-zero before tests run. Children inherit the
 restrictions even with the gate removed. Read-only regression probes deliberately
 exercise denied backend calls; they must return no items and OSStatus -50.
 trustd remains available for certificate verification in fake TLS tests.
-macOS refuses nested `sandbox_init`: running gated tests under an existing
-process sandbox fails before tests run rather than continuing unsandboxed.
+Under `sandbox-exec` with the external Keychain-denying profile, macOS refuses
+the second `sandbox_init`, so gated tests launched there fail before tests run
+rather than continuing unsandboxed; a re-exec that inherits this package's own
+profile reapplies it. The sandbox starts at Go package initialization. Native
+code that runs earlier (cgo or native constructors, `init_priority`,
+`mod_init_func`, Objective-C `+load`) would be outside it, so
+`TestNoNativePreMainEntryPoints` in `keychaingate` rejects such entry points in
+every non-standard package linked into the module's test binaries, including
+files excluded by build tags, and refuses `.syso` objects.
 For the full suite without real Keychain access, use:
 
 ```sh
@@ -373,7 +380,7 @@ and run `go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault` in your
 own attended sitting. They create and delete test-namespace login Keychain
 items and can compile and invoke the Swift Secure Enclave helper; owner
 interaction may be required. The shared test helper skips these integrations
-cleanly; the init sandbox enforces confinement for any missed gate, including
+cleanly; the init sandbox enforces confinement for any missed gate in Go code, including
 init-time calls, captured factories, nil receivers and standalone leaf packages.
 Real binaries never install it (`testing.Testing()` is false). The CLI tests
 also reject accidental use of production backend wiring while the gate is set.

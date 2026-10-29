@@ -60,8 +60,15 @@ when the gate is set. It denies Keychain/token daemon lookup and writes under
 inherit the sandbox even if they remove the gate. Read-only sandbox regression
 probes exercise refused backend calls. Certificate trust evaluation
 through trustd remains available for fake TLS tests. Real binaries never apply
-this sandbox. macOS refuses nested `sandbox_init`, so gated tests launched under
-an existing process sandbox fail before tests run. The reserved
+this sandbox. Under `sandbox-exec` with the external Keychain-denying profile,
+macOS refuses the second `sandbox_init`, so gated tests launched there fail
+before tests run (a re-exec that inherits this package's own profile reapplies
+it). The sandbox starts at Go package initialization: native code that runs
+earlier (cgo or native constructors, `init_priority`, `mod_init_func`,
+Objective-C `+load`) would be outside it, so `keychaingate`'s
+`TestNoNativePreMainEntryPoints` rejects any such entry point in every
+non-standard package linked into the module's test binaries, including files
+excluded by build tags, and refuses `.syso` objects. The reserved
 `keyvault_gate_regression` build tag adds a non-test helper probe; verify it with
 the gate set and
 `go test -tags=keyvault_gate_regression -run TestSandbox ./internal/keyvault/... ./cmd/mac-keyvault`.
