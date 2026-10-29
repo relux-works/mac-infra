@@ -426,3 +426,38 @@ func TestSampleTickSavesBeforeMaintenance(t *testing.T) {
 		t.Fatalf("failed sample: %v %v", calls, e)
 	}
 }
+
+// BUG-261030-v6ahj5: save_interval runs from the end of the last save. A save
+// slower than the interval does not make the next silent flush save again at
+// once; a flush after the interval has passed since completion still saves
+// (the positive control). Real time is used because the save's own duration is
+// measured with the wall clock.
+func TestSaveIntervalRunsFromCompletion(t *testing.T) {
+	s := pruneFixture(t, 20)
+	s.Config.SaveInterval = "50ms"
+	writes := 0
+	s.atomicWrite = func(path string, b []byte) error {
+		if filepath.Base(path) == "state.json" {
+			writes++
+			time.Sleep(80 * time.Millisecond) // slower than save_interval
+		}
+		return atomicWrite(path, b)
+	}
+	if e := s.Save(time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	s.dirty = true
+	if e := s.Flush(time.Now(), false, false); e != nil {
+		t.Fatal(e)
+	}
+	if writes != 1 {
+		t.Fatalf("state written %d times; a silent flush right after a slow save must wait", writes)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if e := s.Flush(time.Now(), false, false); e != nil {
+		t.Fatal(e)
+	}
+	if writes != 2 {
+		t.Fatalf("state written %d times; the flush after the interval must save", writes)
+	}
+}

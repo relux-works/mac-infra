@@ -810,7 +810,9 @@ func (s *Store) Save(now time.Time) error {
 		}
 	}
 	s.dirty = false
-	s.lastSave = now
+	// The save interval runs from completion: a save slower than the interval
+	// must not make the next silent flush save again at once (BUG-261030-v6ahj5).
+	s.lastSave = now.Add(time.Since(start))
 	return nil
 }
 

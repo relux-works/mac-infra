@@ -459,7 +459,9 @@ daily projections are rewritten atomically only when their events changed,
 recovering projections after an interrupted write. ALF and netfilter new-key,
 spike and escalation events save immediately. Those of a nettop sample save once
 when the sample ends, before backend health maintenance. During a slow sample,
-an emitted row also saves once `save_interval` has passed since the last save,
+an emitted row also saves once `save_interval` has passed since the last save
+completed (the interval runs from completion, so a slow save is not followed
+at once by another),
 because every save rewrites the whole state; the save timer does not interrupt
 a classification in progress. Before each nettop row is classified, the sample
 handles the ALF and netfilter lines already queued, at most one queue's worth
