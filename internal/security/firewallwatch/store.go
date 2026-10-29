@@ -154,6 +154,35 @@ func safeDir(dir string) error {
 	}
 	return nil
 }
+
+// openPrivate opens an existing state artifact for reading, without following
+// a symlink, and checks the opened file: a private regular file of the
+// caller with at most one link. It returns nil, nil if the file does not
+// exist. Checking the open file, not the path, keeps a reader consistent
+// while the watcher renames state.json or unlinks the journal: the reader
+// holds the file it opened, which may have just lost its last link (PR69,
+// a reader racing a rotation failed the path check).
+func openPrivate(path string) (*os.File, error) {
+	f, e := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(e, os.ErrNotExist) {
+		return nil, nil
+	}
+	if e != nil {
+		return nil, e
+	}
+	info, e := f.Stat()
+	if e != nil {
+		f.Close()
+		return nil, e
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !ok || int(st.Uid) != os.Getuid() || st.Nlink > 1 {
+		f.Close()
+		return nil, errors.New("state artifacts must be private regular files, without links")
+	}
+	return f, nil
+}
+
 func safeExisting(path string) error {
 	s, e := os.Lstat(path)
 	if errors.Is(e, os.ErrNotExist) {
@@ -189,11 +218,10 @@ func OpenStore(c Config) (*Store, error) {
 	if afterJournalOpen != nil {
 		afterJournalOpen()
 	}
-	path := filepath.Join(c.StateDir, "state.json")
-	if e := safeExisting(path); e != nil {
-		return nil, e
+	f, e := openPrivate(filepath.Join(c.StateDir, "state.json"))
+	if e == nil && f == nil {
+		e = os.ErrNotExist
 	}
-	f, e := os.Open(path)
 	if e == nil {
 		raw, readErr := io.ReadAll(io.LimitReader(f, c.MaxStateBytes+1))
 		closeErr := f.Close()

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -583,5 +584,51 @@ func TestJournalReaderRotationBetweenOpens(t *testing.T) {
 	t.Cleanup(func() { afterJournalOpen = nil })
 	if got := reopen(t, c); len(got.State.Events) != 3 {
 		t.Fatalf("%d events across the rotation; want 3", len(got.State.Events))
+	}
+}
+
+// openPrivate checks the opened file, not the path: a symlink, a second hard
+// link or a mode other than 0600 is refused, a missing file is no error, and
+// a file unlinked after it was opened stays readable, which is what a reader
+// racing the watcher's rename or journal removal holds (PR69 module run).
+func TestOpenPrivate(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good")
+	if e := os.WriteFile(good, []byte("x"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	f, e := openPrivate(good)
+	if e != nil || f == nil {
+		t.Fatal("private file refused:", e)
+	}
+	if e = os.Remove(good); e != nil {
+		t.Fatal(e)
+	}
+	if raw, e := io.ReadAll(f); e != nil || string(raw) != "x" {
+		t.Fatal("unlinked open file unreadable", e)
+	}
+	f.Close()
+	if f, e := openPrivate(filepath.Join(dir, "missing")); f != nil || e != nil {
+		t.Fatal("missing file", f, e)
+	}
+	target := filepath.Join(dir, "target")
+	if e = os.WriteFile(target, []byte("x"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	wide := filepath.Join(dir, "wide")
+	if e = os.WriteFile(wide, []byte("x"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Symlink(target, filepath.Join(dir, "link")); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Link(target, filepath.Join(dir, "hard")); e != nil {
+		t.Fatal(e)
+	}
+	for _, name := range []string{"link", "hard", "wide"} {
+		if f, e := openPrivate(filepath.Join(dir, name)); e == nil {
+			f.Close()
+			t.Errorf("%s admitted", name)
+		}
 	}
 }

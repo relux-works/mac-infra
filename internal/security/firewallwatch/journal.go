@@ -261,14 +261,7 @@ func syncDir(dir string) error {
 // to the new snapshot's journal_seq are skipped. It returns nil when there is
 // no journal.
 func openJournal(path string) (*os.File, error) {
-	if e := safeExisting(path); e != nil {
-		return nil, e
-	}
-	f, e := os.Open(path)
-	if errors.Is(e, os.ErrNotExist) {
-		return nil, nil
-	}
-	return f, e
+	return openPrivate(path)
 }
 
 // replayJournal applies the journal's records after journal_seq, read-only.
