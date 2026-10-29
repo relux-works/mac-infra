@@ -36,10 +36,26 @@ func runJSCOutput(t *testing.T, program string) (string, error) {
 	if err := os.WriteFile(path, []byte(program), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testHangGuard(t))
 	defer cancel()
 	out, err := exec.CommandContext(ctx, jscPath, path).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// testHangGuard bounds a helper process in a test only to catch a real hang.
+// macOS assesses each newly written executable on its first exec, queued
+// system-wide, so under full-suite load a healthy helper can take far longer
+// than a fixed wall time (BUG-261029-zl7l9q). The bound follows the test
+// binary's own -timeout and keeps a 30s margin for reporting.
+func testHangGuard(t *testing.T) time.Duration {
+	deadline, ok := t.Deadline()
+	if !ok {
+		return 5 * time.Minute
+	}
+	if left := time.Until(deadline) - 30*time.Second; left > 10*time.Second {
+		return left
+	}
+	return 10 * time.Second
 }
 
 // Claim: the fallback adds no dynamic code evaluation and places the source once, after the origin refusal.

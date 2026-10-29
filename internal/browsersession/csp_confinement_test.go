@@ -168,7 +168,7 @@ func TestCSPCheckerExactFrameAndCleanup(t *testing.T) {
 			if err := os.WriteFile(checkerPath, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			checker := expressionSyntaxChecker{path: checkerPath, timeout: 5 * time.Second}
+			checker := expressionSyntaxChecker{path: checkerPath, timeout: testHangGuard(t)}
 			const source = "document.title // no newline"
 			checked := ""
 			wrapped, err := wrapJavaScript(source, "https://example.com", func(frame string) error { checked = frame; return checker.check(frame) })
