@@ -228,17 +228,28 @@ func TestSetupScopedInstall(t *testing.T) {
 				if err := os.Mkdir(buildDir, 0700); err != nil {
 					t.Fatal(err)
 				}
+				// Each case has exactly one guarded target, so one guard cannot
+				// stand in for the other: "build" has only the build binary,
+				// "installed-link" only the installed target (the build guard
+				// then decides to build and the link guard must refuse).
 				if target == "build" {
 					writeProvenanceFile(t, filepath.Join(buildDir, "mac-keyvault"), "trusted binary")
+				} else {
+					writeProvenanceFile(t, filepath.Join(f.bin, "mac-keyvault"), "installed trusted binary")
 				}
-				installed := filepath.Join(f.bin, "mac-keyvault")
-				writeProvenanceFile(t, installed, "installed trusted binary")
 				tools := t.TempDir()
-				f.env = append(f.env, "KEYVAULT_GUARD_LSOF="+fakeTool(t, tools, "lsof-denied", "echo denied >&2; exit 1"))
+				// A stub go records any invocation and fails, so a regressed
+				// guard can never reach real package listing, tests or builds.
+				goCalls := filepath.Join(tools, "go-calls")
+				fakeTool(t, tools, "go", "echo \"$@\" >> '"+goCalls+"'; exit 77")
+				f.env = append(f.env, "PATH="+tools+":"+os.Getenv("PATH"), "KEYVAULT_GUARD_LSOF="+fakeTool(t, tools, "lsof-denied", "echo denied >&2; exit 1"))
 				beforeBuild, beforeLinks := setupTree(t, buildDir), setupTree(t, f.bin)
 				out, code := f.run(t, "--only", "mac-keyvault", "--rebuild-keyvault", "--allow-unprovable")
 				if code != 1 || !strings.Contains(out, "cannot tell whether a process uses it") || strings.Contains(out, "Testing Go packages") {
 					t.Fatalf("guard bypassed: exit %d\n%s", code, out)
+				}
+				if calls, err := os.ReadFile(goCalls); err == nil {
+					t.Fatalf("go ran before the guard refused: %q", calls)
 				}
 				if !reflect.DeepEqual(beforeBuild, setupTree(t, buildDir)) || !reflect.DeepEqual(beforeLinks, setupTree(t, f.bin)) {
 					t.Fatal("guard refusal changed installed files")
