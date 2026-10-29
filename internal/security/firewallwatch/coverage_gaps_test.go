@@ -259,7 +259,7 @@ func TestCoverageOldFormatState(t *testing.T) {
 	}
 	start := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)
 	requireGap(t, s.Split(start, start.Add(time.Hour)).Window, GapLegacyUnknown, start.Add(10*time.Minute), start.Add(11*time.Minute))
-	if s.State.Health != (RunHealth{}) || !s.State.CoverageEvictedThrough.IsZero() {
+	if !reflect.DeepEqual(s.State.Health, RunHealth{}) || !s.State.CoverageEvictedThrough.IsZero() {
 		t.Fatal("new fields did not default safely")
 	}
 	if err = s.Save(start.Add(time.Hour)); err != nil {
@@ -396,6 +396,11 @@ func TestCoverageHealthStateBounds(t *testing.T) {
 		func() { s.State.Health.Save.LastNS = -1 },
 		func() { s.State.Health.Classification = TimingSummary{LastNS: 2, MaxNS: 1, Count: 1} },
 		func() { s.State.Health.Maintenance = TimingSummary{LastNS: 2, MaxNS: 1, Count: 1} },
+		func() { s.State.Health.SlowOps = []SlowOp{{Kind: "sample", At: start, NS: 1}} },
+		func() { s.State.Health.SlowOps = []SlowOp{{Kind: SlowSave, At: start, NS: -1}} },
+		func() { s.State.Health.SlowOps = []SlowOp{{Kind: SlowSave, At: start, NS: 1, Items: -1}} },
+		func() { s.State.Health.SlowOps = []SlowOp{{Kind: SlowSave, NS: 1}} },
+		func() { s.State.Health.SlowOps = make([]SlowOp, SlowOpLimit+1) },
 		func() { s.State.Coverage[0].ShortStalledNS = -1 },
 		func() { s.State.Coverage[0].StallAfter = &CoverageStall{From: start, To: start.Add(2 * time.Minute)} },
 		func() { s.State.Coverage = make([]CoverageSpan, c.MaxEntries+1) },
@@ -406,6 +411,12 @@ func TestCoverageHealthStateBounds(t *testing.T) {
 		if s.validateState() == nil {
 			t.Fatal("malformed state admitted")
 		}
+	}
+	// Positive control: a valid slow-operation record is admitted.
+	s.State.Health = RunHealth{SlowOps: []SlowOp{{Kind: SlowNettopSample, At: start, NS: int64(SlowOpThreshold), Items: 3}}}
+	s.State.Coverage = []CoverageSpan{base}
+	if err = s.validateState(); err != nil {
+		t.Fatal("valid slow op rejected:", err)
 	}
 	s.State.Health = RunHealth{}
 	s.State.Coverage = []CoverageSpan{base}

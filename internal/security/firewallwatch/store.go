@@ -232,7 +232,7 @@ func (s *Store) validateState() error {
 		return bad()
 	}
 	h := st.Health
-	if h.LineQueueHighWater.ALF < 0 || h.LineQueueHighWater.ALF > 64 || h.LineQueueHighWater.Netfilter < 0 || h.LineQueueHighWater.Netfilter > 64 || !h.Save.valid() || !h.Classification.valid() || !h.Maintenance.valid() {
+	if h.LineQueueHighWater.ALF < 0 || h.LineQueueHighWater.ALF > 64 || h.LineQueueHighWater.Netfilter < 0 || h.LineQueueHighWater.Netfilter > 64 || !h.Save.valid() || !h.Classification.valid() || !h.Maintenance.valid() || !h.slowOpsValid() {
 		return bad()
 	}
 	for _, v := range st.Coverage {
@@ -698,7 +698,11 @@ func (s *Store) Save(now time.Time) error {
 	start := time.Now()
 	// A save cannot persist its own completed duration without another write.
 	// The next save persists this result, including failed attempts.
-	defer func() { s.State.Health.Save.observe(time.Since(start), time.Now()) }()
+	defer func() {
+		d, now := time.Since(start), time.Now()
+		s.State.Health.Save.observe(d, now)
+		s.State.Health.recordSlow(SlowSave, d, now, 0)
+	}()
 	if e := safeDir(s.Config.StateDir); e != nil {
 		return e
 	}

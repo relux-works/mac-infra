@@ -438,6 +438,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	}
 	drain := func() error { return drainQueued(ctx, lines, &netLines, onALF, onNetfilter) }
 	sample := func() (bool, error) {
+		start := time.Now()
 		sampleCtx, stop := context.WithTimeout(ctx, duration(c.NettopInterval))
 		defer stop()
 		nettop := collectorCommand(sampleCtx, "nettop")
@@ -450,14 +451,18 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		s.State.NettopError = ""
 		items, unknown := ParseNettop(output.String())
 		s.State.NettopUnrecognized += unknown
-		return collectSample(items, collect, flush, drain)
+		emitted, e := collectSample(items, collect, flush, drain)
+		s.State.Health.recordSlow(SlowNettopSample, time.Since(start), time.Now(), len(items))
+		return emitted, e
 	}
 	maintain := func() {
-		start := time.Now()
-		if ctx.Err() == nil && !cl.CheckHealth(ctx) {
-			_ = cl.Init(ctx)
+		start, pool := time.Now(), 0
+		if ctx.Err() == nil && !cl.CheckHealth(ctx) && cl.Init(ctx) == nil {
+			pool = len(cl.pool)
 		}
-		s.State.Health.Maintenance.observe(time.Since(start), time.Now())
+		d, now := time.Since(start), time.Now()
+		s.State.Health.Maintenance.observe(d, now)
+		s.State.Health.recordSlow(SlowMaintenance, d, now, pool)
 	}
 	tick := time.NewTicker(duration(c.NettopInterval))
 	defer tick.Stop()

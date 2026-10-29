@@ -71,6 +71,46 @@ type SplitWindow struct {
 	EvictedThrough         *time.Time           `json:"evicted_through"`
 	CoverageEvictedThrough *time.Time           `json:"coverage_evicted_through"`
 	Truncated              bool                 `json:"truncated"`
+	SlowOps                WindowSlowOps        `json:"slow_ops"`
+}
+
+// WindowSlowOps holds the slow-operation records that completed in
+// [since, as_of] and each kind's count and maximum there. An operation counts
+// in the window of its completion, even if it started earlier. DroppedThrough
+// is set when the record's bound dropped operations that completed at or after
+// since, so the window may lack some.
+type WindowSlowOps struct {
+	Records        []SlowOp                  `json:"records"`
+	Kinds          map[string]WindowSlowKind `json:"kinds"`
+	DroppedThrough *time.Time                `json:"dropped_through"`
+}
+
+// WindowSlowKind is one kind's count and maximum within a window.
+type WindowSlowKind struct {
+	Count int       `json:"count"`
+	MaxNS int64     `json:"max_ns"`
+	MaxAt time.Time `json:"max_at"`
+}
+
+func windowSlowOps(h RunHealth, since, asOf time.Time) WindowSlowOps {
+	w := WindowSlowOps{Records: []SlowOp{}, Kinds: map[string]WindowSlowKind{}}
+	for _, op := range h.SlowOps {
+		if op.At.Before(since) || op.At.After(asOf) {
+			continue
+		}
+		w.Records = append(w.Records, op)
+		k := w.Kinds[op.Kind]
+		k.Count++
+		if k.Count == 1 || op.NS > k.MaxNS {
+			k.MaxNS, k.MaxAt = op.NS, op.At
+		}
+		w.Kinds[op.Kind] = k
+	}
+	if d := h.SlowOpsDroppedThrough; d != nil && !d.Before(since) {
+		at := *d
+		w.DroppedThrough = &at
+	}
+	return w
 }
 
 // DigestSplit is the deterministic triage view of one digest window.
@@ -95,7 +135,7 @@ type DigestSplit struct {
 // Events after asOf are outside the window.
 func (s *Store) Split(since, asOf time.Time) DigestSplit {
 	split := DigestSplit{
-		Window:      SplitWindow{Since: since, AsOf: asOf, CoverageGaps: s.coverageGaps(since, asOf)},
+		Window:      SplitWindow{Since: since, AsOf: asOf, CoverageGaps: s.coverageGaps(since, asOf), SlowOps: windowSlowOps(s.State.Health, since, asOf)},
 		Health:      s.Status(),
 		RealDeny:    []SplitRow{},
 		KnownFP:     map[string]SplitGroup{},

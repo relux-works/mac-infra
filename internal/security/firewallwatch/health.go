@@ -32,6 +32,71 @@ type RunHealth struct {
 	// Maintenance times the nettop tick's backend health check, including an
 	// Init after a failed check.
 	Maintenance TimingSummary `json:"maintenance"`
+	// SlowOps keeps the newest SlowOpLimit operations that took at least
+	// SlowOpThreshold, in completion order. SlowOpsDroppedThrough is the
+	// latest completion time among records the bound dropped.
+	SlowOps               []SlowOp   `json:"slow_ops"`
+	SlowOpsDroppedThrough *time.Time `json:"slow_ops_dropped_through"`
+}
+
+// The slow-operation record keeps run-loop operations of at least two seconds,
+// the newest 512 (BUG-261029-kpyw8s).
+const (
+	SlowOpThreshold = 2 * time.Second
+	SlowOpLimit     = 512
+)
+
+// Slow-operation kinds.
+const (
+	SlowSave           = "save"
+	SlowClassification = "classification"
+	SlowMaintenance    = "maintenance"
+	SlowNettopSample   = "nettop_sample"
+)
+
+// slowOpThreshold is SlowOpThreshold; tests lower it.
+var slowOpThreshold = SlowOpThreshold
+
+// SlowOp is metadata about one slow run-loop operation: no item text, hosts,
+// apps or paths. At is its completion time. Items counts the nettop rows of a
+// sample and the labelled pool rows of a maintenance whose Init succeeded.
+type SlowOp struct {
+	Kind  string    `json:"kind"`
+	At    time.Time `json:"at"`
+	NS    int64     `json:"duration_ns"`
+	Items int       `json:"items,omitempty"`
+}
+
+func slowKind(kind string) bool {
+	return kind == SlowSave || kind == SlowClassification || kind == SlowMaintenance || kind == SlowNettopSample
+}
+
+// recordSlow keeps an operation of at least slowOpThreshold, dropping the
+// oldest record beyond SlowOpLimit.
+func (h *RunHealth) recordSlow(kind string, d time.Duration, at time.Time, items int) {
+	if d < slowOpThreshold {
+		return
+	}
+	if len(h.SlowOps) >= SlowOpLimit {
+		dropped := h.SlowOps[0].At
+		if h.SlowOpsDroppedThrough == nil || dropped.After(*h.SlowOpsDroppedThrough) {
+			h.SlowOpsDroppedThrough = &dropped
+		}
+		h.SlowOps = append(h.SlowOps[:0], h.SlowOps[1:]...)
+	}
+	h.SlowOps = append(h.SlowOps, SlowOp{Kind: kind, At: at.UTC(), NS: int64(d), Items: items})
+}
+
+func (h RunHealth) slowOpsValid() bool {
+	if len(h.SlowOps) > SlowOpLimit {
+		return false
+	}
+	for _, op := range h.SlowOps {
+		if !slowKind(op.Kind) || op.At.IsZero() || op.NS < 0 || op.Items < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // DroppedLines counts collector lines discarded during run-loop teardown.
@@ -99,6 +164,10 @@ func (s *Store) QueueDepth(n int) { s.Coverage("").QueueDepth(n) }
 
 func (s *Store) classify(it Item, classify func(Item) Decision) Decision {
 	start := time.Now()
-	defer func() { s.State.Health.Classification.observe(time.Since(start), time.Now()) }()
+	defer func() {
+		d, now := time.Since(start), time.Now()
+		s.State.Health.Classification.observe(d, now)
+		s.State.Health.recordSlow(SlowClassification, d, now, 0)
+	}()
 	return classify(it)
 }

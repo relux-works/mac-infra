@@ -241,6 +241,15 @@ Text status displays the same measurements as durations and their maxima times. 
 `state.json`, these fields live under `health.line_queue_high_water`,
 `health.save`, `health.classification` and `health.maintenance`. These observations do not measure
 upstream log loss or establish the cause of stalls.
+`health.slow_ops` keeps the newest 512 run-loop operations that took at least
+two seconds, in completion order: `kind` (`save`, `classification`,
+`maintenance` or `nettop_sample`), `at` (completion time), `duration_ns`, and
+`items` when known (the rows of a nettop sample, including the time spent on
+collector lines drained during it, or the labelled pool rows of a maintenance
+whose Init succeeded). Records hold no item text, hosts, apps or paths. When the
+bound drops a record, `health.slow_ops_dropped_through` keeps the latest dropped
+completion time. Like the timings, a save's own record persists with the next
+save.
 `digest` reads retained new-item events grouped by proposed label and app.
 `digest --json --split` (`--split` requires `--json`) instead puts each event
 in the window into at most one bucket, precedence first:
@@ -252,8 +261,12 @@ loopback rows of ssh or limactl), each with a count and its rows;
 `needs_review` holds every other `decide` event. Noise and digest events that
 are not denies appear in no bucket. The output also carries `health` (the
 `status` report) and `window`: since, as_of, first/last event time, event
-count, `coverage_gaps`, `coalesced_short_stalls`, `evicted_through`, `coverage_evicted_through` and
-`truncated`. `run` records coverage spans in state: a span opens when collection
+count, `coverage_gaps`, `coalesced_short_stalls`, `evicted_through`, `coverage_evicted_through`,
+`truncated` and `slow_ops`. `slow_ops` holds the `records` that completed in
+[since, as_of] (an operation counts where it completed, even if it started
+earlier), per-kind `kinds` with `count`, `max_ns` and `max_at` in that window,
+and `dropped_through` when the bound dropped records completed at or after
+since; it does not affect `truncated`. `run` records coverage spans in state: a span opens when collection
 starts and ends at its last save, or when the ALF log stream ended if that came
 first. `coverage_gaps` lists disjoint intervals in [since, as_of], each with
 `from`, `to` and `kind`:
