@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/relux-works/mac-infra/internal/keyvault/testguard"
 )
 
 // GuardedStore wraps a Backend and fails the test process before any Create,
@@ -67,6 +69,7 @@ func (g *GuardedStore) Sign(label string, digest []byte) ([]byte, error) {
 
 func newGuardedSecurityStore(t *testing.T) *GuardedStore {
 	t.Helper()
+	testguard.Require(t)
 	store := &GuardedStore{Backend: NewSecurityStore()}
 	t.Cleanup(func() {
 		for _, label := range store.touched {

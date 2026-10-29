@@ -349,6 +349,25 @@ From the repository root (no live keychain access):
 MAC_KEYVAULT_SKIP_KEYCHAIN=1 go test -race ./internal/keyvault ./cmd/mac-keyvault -run 'TestSSH|TestRunSSH'
 ```
 
+`MAC_KEYVAULT_SKIP_KEYCHAIN` set to any non-empty value skips all tests that
+use the real Security.framework backend, login Keychain or Secure Enclave
+helper, before constructing a backend or compiling a helper. Fake-backed
+tests, including Enclave store tests, continue to run. For the full suite
+without real Keychain access, use:
+
+```sh
+MAC_KEYVAULT_SKIP_KEYCHAIN=1 go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault
+```
+
+To run the real integrations on demand, unset `MAC_KEYVAULT_SKIP_KEYCHAIN`
+and run `go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault` in your
+own attended sitting. They create and delete test-namespace login Keychain
+items and can compile and invoke the Swift Secure Enclave helper; owner
+interaction may be required. Test-only source guards check all build tags
+before the suites run: real backend references belong only in registered
+helpers whose first operation is the shared gate. The CLI tests also reject
+accidental use of production backend wiring while the gate is set.
+
 The suite uses fake backends and synthetic P-256 keys. It covers a deterministic
 OpenSSH SSHSIG golden, a modified-message negative, actual Git SSH signing and
 modified-commit rejection, actual local git push through OpenSSH, protocol

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/relux-works/mac-infra/internal/keyvault/signerclient"
+	"github.com/relux-works/mac-infra/internal/keyvault/testguard"
 )
 
 // TestMain hands the process to fakeServer (fake_test.go) when
@@ -32,7 +33,7 @@ func TestMain(m *testing.M) {
 	if scenario := os.Getenv("SIGNERCLIENT_FAKE_SERVER"); scenario != "" {
 		os.Exit(fakeServer(scenario))
 	}
-	os.Exit(m.Run())
+	os.Exit(testguard.Main(m))
 }
 
 // envelopeShape is one combination of {ok, result present, error member}
@@ -716,6 +717,7 @@ func selfSign(t *testing.T, signer crypto.Signer) []byte {
 // drives the real executable, not the package.
 func buildBinary(t *testing.T) string {
 	t.Helper()
+	testguard.Require(t)
 	binary := filepath.Join(t.TempDir(), "mac-keyvault")
 	build := exec.Command("go", "build", "-o", binary, "../../../cmd/mac-keyvault")
 	if out, err := build.CombinedOutput(); err != nil {
@@ -731,6 +733,7 @@ func fingerprintOf(spki []byte) string {
 
 func runCLI(t *testing.T, binary string, args ...string) (int, map[string]any) {
 	t.Helper()
+	testguard.Require(t)
 	cmd := exec.Command(binary, append([]string{"--json"}, args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -762,9 +765,6 @@ func runCLI(t *testing.T, binary string, args ...string) (int, map[string]any) {
 // code yet, so this Go client is the only consumer the contract is
 // proven against.
 func TestClientAgainstBuiltBinaryAndLoginKeychain(t *testing.T) {
-	if os.Getenv("MAC_KEYVAULT_SKIP_KEYCHAIN") != "" {
-		t.Skip("MAC_KEYVAULT_SKIP_KEYCHAIN set")
-	}
 	binary := buildBinary(t)
 	purpose := fmt.Sprintf("signerclient-e2e-%d", os.Getpid())
 	address := "test/" + purpose

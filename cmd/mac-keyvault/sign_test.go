@@ -609,10 +609,7 @@ func TestRunSignSecurityFailure(t *testing.T) {
 // past refuses with expired, both without a bridge signature. Every label
 // is under service test and deleted in cleanup.
 func TestRunSignVerifyAgainstLoginKeychain(t *testing.T) {
-	if os.Getenv("MAC_KEYVAULT_SKIP_KEYCHAIN") != "" {
-		t.Skip("MAC_KEYVAULT_SKIP_KEYCHAIN set")
-	}
-	guard := &guardedBackend{t: t, inner: keyvault.NewSecurityStore()}
+	guard := &guardedBackend{t: t, inner: newTestSecurityStore(t)}
 	useStore(t, guard)
 	t.Cleanup(func() {
 		for _, label := range guard.touched {

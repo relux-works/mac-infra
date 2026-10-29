@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/relux-works/mac-infra/internal/keyvault/testguard"
 )
 
 // realEnclave builds mac-keyvault-enclave from source and returns a manager
@@ -19,6 +21,7 @@ import (
 // written to any keychain; the keys exist only as blobs in the temp dir.
 func realEnclave(t *testing.T) (*Manager, *EnclaveStore) {
 	t.Helper()
+	testguard.Require(t)
 	swiftc, err := exec.LookPath("swiftc")
 	if err != nil {
 		t.Skip("swiftc not found")

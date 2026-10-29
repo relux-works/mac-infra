@@ -26,7 +26,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `mac-keyvault ssh-agent` | Serve explicitly pinned P-256 vault keys through the OpenSSH agent protocol, optionally with per-signature or unlock confirmation, an expiring unlock, git-namespace-only signing and a per-request audit log | `mac-keyvault ssh-agent --socket /absolute/private/agent.sock --key new-service/auth@1 --key new-service/signing@1 [--confirm-exec ~/.local/bin/mac-keyvault --confirm-arg confirm-dialog] [--confirm-when sign\|unlock\|both] [--unlock-for 8h] [--sign-namespace git] [--audit-log /absolute/audit.jsonl]`; public output: `mac-keyvault pub new-service/auth --version 1 --format ssh` | `0600` socket in an owned `0700` directory; [new-key onboarding and manual LaunchAgent guide](agents/skills/mac-infra/references/keyvault-ssh-new-keys.md); existing SSH keys stay unchanged; only new keys use keyvault |
 | `/usr/bin/textutil` | Extract text from HTML, RTF, DOC, and DOCX inputs for sanitization | invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
 | `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
-| `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
+| `go test` | Verify Go command planning and CLI behavior | `MAC_KEYVAULT_SKIP_KEYCHAIN=1 go test ./...` | test cache and temporary test fixtures |
 | Apple clang / cgo | Build the native macOS extended ACL checks used by the privileged installer and daemon | `CGO_ENABLED=1 go build -o .temp/mac-infra-core ./cmd/mac-infra-core` (requires Xcode or Command Line Tools) | `.temp/mac-infra-core`; `scripts/setup.sh` builds its normal `bin/mac-infra-core` artifact with the configured Go cgo setting |
 | `scripts/setup.sh` | Refuses worktree, dirty or unprovable builds unless `--allow-unprovable` is set for a developer checkout. Build the CLIs (and, with `--rebuild-keyvault`, the Swift Secure Enclave helper `bin/mac-keyvault-enclave` via `swiftc`) and link the selected tools. `--only NAME[,NAME...]` tests the selected commands and their in-module dependencies and builds/publishes/links only those tools; without it, setup tests all packages and installs all tools. Skills arrive through Curator profiles and the [published mirror](https://github.com/relux-works/skill-mac-infra). An existing `bin/mac-keyvault` is kept, because keyvault keys trust exactly that binary; `--rebuild-keyvault` (planned owner sitting only) rebuilds it and refuses while lsof shows a process using it, while any `mac-keyvault` process runs, while a `works.relux.mac-keyvault.*` LaunchAgent is loaded, or when those tools cannot answer (`scripts/keyvault-build-guard.sh`); an existing `~/.local/bin/mac-keyvault` link to another checkout is kept | `./scripts/setup.sh [--only NAME[,NAME...]] [--rebuild-keyvault] [--allow-unprovable]` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-firewall`, `bin/mac-keyvault`, `~/.local/bin/*` (only selected tools when `--only` is supplied) |
 | `scripts/provenance-guard.sh` | Offline source and structured Go buildinfo admission, then staged publication (refusal exit 3) | `./scripts/provenance-guard.sh preflight ROOT`, `./scripts/provenance-guard.sh verify ROOT BIN...`, `./scripts/provenance-guard.sh publish ROOT STAGE_DIR DEST_DIR [--allow-unprovable] NAME...` | diagnostics on stderr; publish atomically moves verified files into DEST_DIR |
@@ -45,6 +45,15 @@ only with `mac-chrome-session`, and the Swift helper only with a keyvault
 build. Unknown names are usage errors (exit 2). Selecting `mac-keyvault`
 requires `--rebuild-keyvault` and all existing rebuild guards still apply.
 Without `--only`, setup retains the full `go test ./...` and full installation.
+
+For Go verification, set `MAC_KEYVAULT_SKIP_KEYCHAIN` to any non-empty value
+to skip every test using the real Security.framework backend, login Keychain
+or Secure Enclave helper (including helper compilation). Fake-backed tests
+still run. To run the real tests on demand, unset the variable and run
+`go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault` in your own
+attended sitting: these tests create and delete test-namespace Keychain items
+and may compile the Swift helper and require owner interaction. The gate is
+test-only and does not change installed commands.
 
 Setup no longer installs global agent skills. Use Curator profiles backed by
 the [relux-works/skill-mac-infra mirror](https://github.com/relux-works/skill-mac-infra).

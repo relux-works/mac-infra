@@ -1253,10 +1253,7 @@ func (g *guardedBackend) Sign(label string, digest []byte) ([]byte, error) {
 // rotate, delete unconfirmed, delete both generations, delete twice. All
 // labels are test prefixed (service test) and removed in cleanup.
 func TestRunAgainstLoginKeychain(t *testing.T) {
-	if os.Getenv("MAC_KEYVAULT_SKIP_KEYCHAIN") != "" {
-		t.Skip("MAC_KEYVAULT_SKIP_KEYCHAIN set")
-	}
-	guard := &guardedBackend{t: t, inner: keyvault.NewSecurityStore()}
+	guard := &guardedBackend{t: t, inner: newTestSecurityStore(t)}
 	useStore(t, guard)
 	t.Cleanup(func() {
 		for _, label := range guard.touched {
