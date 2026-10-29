@@ -190,6 +190,7 @@ func TestWatchHealthOutput(t *testing.T) {
 	s.State.Health = firewallwatch.RunHealth{
 		LineQueueHighWater: firewallwatch.QueueHighWater{ALF: 64, Netfilter: 32, MaxAt: firewallwatch.QueueHighWaterTimes{ALF: &maxAt, Netfilter: &maxAt}},
 		Classification:     firewallwatch.TimingSummary{LastNS: 1000000, MaxNS: 2000000, Count: 3, MaxAt: &maxAt},
+		Maintenance:        firewallwatch.TimingSummary{LastNS: 3000000, MaxNS: 4000000, Count: 2, MaxAt: &maxAt},
 	}
 	if err = s.Save(time.Now()); err != nil {
 		t.Fatal(err)
@@ -210,12 +211,13 @@ func TestWatchHealthOutput(t *testing.T) {
 			}
 			queue := status["line_queue_high_water"].(map[string]any)
 			timing := status["run_loop_timing"].(map[string]any)["classification"].(map[string]any)
+			maintenance := status["run_loop_timing"].(map[string]any)["maintenance"].(map[string]any)
 			times := queue["max_at"].(map[string]any)
-			if queue["alf"] != float64(64) || queue["netfilter"] != float64(32) || timing["count"] != float64(3) || times["alf"] != maxAt.Format(time.RFC3339) || times["netfilter"] != maxAt.Format(time.RFC3339) || timing["max_at"] != maxAt.Format(time.RFC3339) {
+			if queue["alf"] != float64(64) || queue["netfilter"] != float64(32) || timing["count"] != float64(3) || times["alf"] != maxAt.Format(time.RFC3339) || times["netfilter"] != maxAt.Format(time.RFC3339) || timing["max_at"] != maxAt.Format(time.RFC3339) || maintenance["count"] != float64(2) || maintenance["max_at"] != maxAt.Format(time.RFC3339) {
 				t.Fatal(status)
 			}
 		} else {
-			for _, want := range []string{"line queue high-water: alf=64 netfilter=32", "save: last=", "classification: last=1ms max=2ms count=3", "maxima at: line queue alf=2026-10-29T00:15:00Z netfilter=2026-10-29T00:15:00Z; save=unknown classification=2026-10-29T00:15:00Z"} {
+			for _, want := range []string{"line queue high-water: alf=64 netfilter=32", "save: last=", "classification: last=1ms max=2ms count=3", "maintenance: last=3ms max=4ms count=2", "maxima at: line queue alf=2026-10-29T00:15:00Z netfilter=2026-10-29T00:15:00Z; save=unknown classification=2026-10-29T00:15:00Z maintenance=2026-10-29T00:15:00Z"} {
 				if !strings.Contains(out.String(), want) {
 					t.Fatalf("missing %s: %s", want, out.String())
 				}

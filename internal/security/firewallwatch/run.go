@@ -246,9 +246,15 @@ func (s *Store) collect(ctx context.Context, cl *Classifier, it Item) bool {
 // an emitted row saves only once save_interval has passed since the last save,
 // not every time, because every save rewrites the whole state
 // (BUG-261029-do8v1i). The save timer does not interrupt a classification.
-func collectSample(items []Item, collect func(Item) bool, flush func(emitted bool) error) (bool, error) {
+// drain runs before each item and handles collector lines already queued, so a
+// sample of many slow classifications does not stall the ALF and netfilter
+// feeders (BUG-261029-kpyw8s).
+func collectSample(items []Item, collect func(Item) bool, flush func(emitted bool) error, drain func() error) (bool, error) {
 	emitted := false
 	for _, it := range items {
+		if e := drain(); e != nil {
+			return emitted, e
+		}
 		if collect(it) {
 			emitted = true
 			if e := flush(false); e != nil {
@@ -257,6 +263,28 @@ func collectSample(items []Item, collect func(Item) bool, flush func(emitted boo
 		}
 	}
 	return emitted, nil
+}
+
+// drainQueued handles the collector lines already queued, at most one queue's
+// worth per source, without waiting. After cancellation it does nothing: the
+// sample then finishes with backend_shutdown rows as before. onNetfilter may
+// set *netfilter to nil when that stream ends; a nil queue is never selected.
+func drainQueued(ctx context.Context, alf <-chan []byte, netfilter *chan []byte, onALF func([]byte, bool) (bool, error), onNetfilter func([]byte, bool) error) error {
+	for n := cap(alf) + cap(*netfilter); n > 0 && ctx.Err() == nil; n-- {
+		select {
+		case line, ok := <-alf:
+			if done, e := onALF(line, ok); done || e != nil {
+				return e
+			}
+		case line, ok := <-*netfilter:
+			if e := onNetfilter(line, ok); e != nil {
+				return e
+			}
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 // sampleTick runs one nettop tick. Backend maintenance (health check, Init)
@@ -373,6 +401,42 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		}
 		return e
 	}
+	// onALF handles one receive from the ALF queue. A closed queue ends the run:
+	// cleanly after cancellation, with an error otherwise.
+	onALF := func(line []byte, ok bool) (bool, error) {
+		if !ok {
+			if ctx.Err() != nil {
+				return true, nil
+			}
+			return true, errors.New("ALF log stream ended")
+		}
+		s.dirty = true
+		emitted := false
+		if it := s.State.Parser.Parse(line); it != nil {
+			emitted = collect(*it)
+		}
+		return false, flush(emitted)
+	}
+	onNetfilter := func(line []byte, ok bool) error {
+		if !ok {
+			netLines = nil
+			s.State.NetfilterError = "netfilter log stream ended"
+			return save()
+		}
+		s.dirty = true
+		emitted := false
+		it, action := s.State.Netfilter.ParseRecord(line)
+		if it != nil {
+			emitted = collect(*it)
+		}
+		if action != nil {
+			if _, err := ReconcileAction(netJournal, *action, time.Now()); err != nil {
+				s.State.NetfilterError = "reconcile: " + Sanitize(err.Error())
+			}
+		}
+		return flush(emitted)
+	}
+	drain := func() error { return drainQueued(ctx, lines, &netLines, onALF, onNetfilter) }
 	sample := func() (bool, error) {
 		sampleCtx, stop := context.WithTimeout(ctx, duration(c.NettopInterval))
 		defer stop()
@@ -386,7 +450,14 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		s.State.NettopError = ""
 		items, unknown := ParseNettop(output.String())
 		s.State.NettopUnrecognized += unknown
-		return collectSample(items, collect, flush)
+		return collectSample(items, collect, flush, drain)
+	}
+	maintain := func() {
+		start := time.Now()
+		if ctx.Err() == nil && !cl.CheckHealth(ctx) {
+			_ = cl.Init(ctx)
+		}
+		s.State.Health.Maintenance.observe(time.Since(start), time.Now())
 	}
 	tick := time.NewTicker(duration(c.NettopInterval))
 	defer tick.Stop()
@@ -399,49 +470,15 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 				return e
 			}
 		case line, ok := <-lines:
-			if !ok {
-				if ctx.Err() != nil {
-					return nil
-				}
-				return errors.New("ALF log stream ended")
-			}
-			s.dirty = true
-			emitted := false
-			if it := s.State.Parser.Parse(line); it != nil {
-				emitted = collect(*it)
-			}
-			if e = flush(emitted); e != nil {
+			if done, e := onALF(line, ok); done || e != nil {
 				return e
 			}
 		case line, ok := <-netLines:
-			if !ok {
-				netLines = nil
-				s.State.NetfilterError = "netfilter log stream ended"
-				if e = save(); e != nil {
-					return e
-				}
-				continue
-			}
-			s.dirty = true
-			emitted := false
-			it, action := s.State.Netfilter.ParseRecord(line)
-			if it != nil {
-				emitted = collect(*it)
-			}
-			if action != nil {
-				if _, err := ReconcileAction(netJournal, *action, time.Now()); err != nil {
-					s.State.NetfilterError = "reconcile: " + Sanitize(err.Error())
-				}
-			}
-			if e = flush(emitted); e != nil {
+			if e = onNetfilter(line, ok); e != nil {
 				return e
 			}
 		case <-tick.C:
-			if e = sampleTick(sample, save, func() {
-				if ctx.Err() == nil && !cl.CheckHealth(ctx) {
-					_ = cl.Init(ctx)
-				}
-			}); e != nil {
+			if e = sampleTick(sample, save, maintain); e != nil {
 				return e
 			}
 		}

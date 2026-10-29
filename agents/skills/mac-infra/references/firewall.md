@@ -220,7 +220,7 @@ are outside these counters. No configuration fields are added.
 a live health probe; a stale timestamp may mean the watcher has stopped.
 The persisted health also reports `line_queue_high_water` (`alf` and
 `netfilter`, observed buffered depths from 0 to the unchanged capacity of 64)
-and `run_loop_timing` (`save` and `classification`). Each timing has `last_ns`,
+and `run_loop_timing` (`save`, `classification` and `maintenance`). Each timing has `last_ns`,
 `max_ns`, a saturating `count` and a nullable `max_at` timestamp, with no sample
 history. Queue depths keep the numeric `alf` and `netfilter` values and add
 `max_at: {alf, netfilter}` for their nullable timestamps. Timestamps record the
@@ -231,13 +231,15 @@ Classification timing
 covers actual classifier calls (rules/kNN/backend), not parsing, signer
 inspection or deduplicated repeats. Save timing covers the whole save attempt,
 including state and daily-file writes; a flush that saves uses the same timing,
-while a skipped flush adds no sample. The completed duration is persisted by the
+while a skipped flush adds no sample. Maintenance timing covers each nettop
+tick's backend health check, including a classifier Init after a failed check;
+old states read it as zero. The completed duration is persisted by the
 next save, including failed attempts: the last save on shutdown cannot include
 its own full duration without another write. Queue high-water values, timing
 counters and maxima accumulate across runs, together with their timestamps.
 Text status displays the same measurements as durations and their maxima times. In
 `state.json`, these fields live under `health.line_queue_high_water`,
-`health.save` and `health.classification`. These observations do not measure
+`health.save`, `health.classification` and `health.maintenance`. These observations do not measure
 upstream log loss or establish the cause of stalls.
 `digest` reads retained new-item events grouped by proposed label and app.
 `digest --json --split` (`--split` requires `--json`) instead puts each event
@@ -445,7 +447,11 @@ spike and escalation events save immediately. Those of a nettop sample save once
 when the sample ends, before backend health maintenance. During a slow sample,
 an emitted row also saves once `save_interval` has passed since the last save,
 because every save rewrites the whole state; the save timer does not interrupt
-a classification in progress. An observation decides only its own key's
+a classification in progress. Before each nettop row is classified, the sample
+handles the ALF and netfilter lines already queued, at most one queue's worth
+per source and without waiting, so a sample of many slow classifications does
+not hold the feeders in a stall. After cancellation the sample drains nothing.
+Backend maintenance and the tick's saves still block the run loop. An observation decides only its own key's
 retention: an entry last seen before the cutoff counts as new. Entries, events
 and coverage spans nobody observes expire at the next save. When an
 observation takes entries, events or signers over `max_entries`, the full

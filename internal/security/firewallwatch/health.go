@@ -29,6 +29,9 @@ type RunHealth struct {
 	ShutdownDroppedLines DroppedLines   `json:"shutdown_dropped_lines"`
 	Save                 TimingSummary  `json:"save"`
 	Classification       TimingSummary  `json:"classification"`
+	// Maintenance times the nettop tick's backend health check, including an
+	// Init after a failed check.
+	Maintenance TimingSummary `json:"maintenance"`
 }
 
 // DroppedLines counts collector lines discarded during run-loop teardown.

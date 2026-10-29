@@ -346,7 +346,7 @@ func TestCollectSampleSavesOncePerSample(t *testing.T) {
 		s, writes, clock := setup(t)
 		collect := func(it Item) bool { return len(s.Observe(it, *clock, ruleClassify)) > 0 }
 		flush := func(emitted bool) error { return s.Flush(*clock, emitted, false) }
-		if emitted, e := collectSample(items, collect, flush); e != nil || !emitted {
+		if emitted, e := collectSample(items, collect, flush, noDrain); e != nil || !emitted {
 			t.Fatal(emitted, e)
 		}
 		if writes["state.json"] != 0 {
@@ -373,7 +373,7 @@ func TestCollectSampleSavesOncePerSample(t *testing.T) {
 			return len(s.Observe(it, *clock, ruleClassify)) > 0
 		}
 		flush := func(emitted bool) error { return s.Flush(*clock, emitted, false) }
-		if _, e := collectSample(items, collect, flush); e != nil {
+		if _, e := collectSample(items, collect, flush, noDrain); e != nil {
 			t.Fatal(e)
 		}
 		reopened, e := OpenStore(s.Config)
@@ -394,7 +394,7 @@ func TestCollectSampleSavesOncePerSample(t *testing.T) {
 			}
 			return nil
 		}
-		if _, e := collectSample(items, collect, flush); !errors.Is(e, failed) || collected != 2 {
+		if _, e := collectSample(items, collect, flush, noDrain); !errors.Is(e, failed) || collected != 2 {
 			t.Fatalf("error %v after %d items; want disk full after 2", e, collected)
 		}
 	})

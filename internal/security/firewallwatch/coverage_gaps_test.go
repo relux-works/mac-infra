@@ -334,7 +334,7 @@ func TestRunHealthInstrumentation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"line_queue_high_water", "run_loop_timing", "classification", "save", "last_ns", "max_ns", "count", "max_at"} {
+	for _, key := range []string{"line_queue_high_water", "run_loop_timing", "classification", "save", "maintenance", "last_ns", "max_ns", "count", "max_at"} {
 		if !bytes.Contains(raw, []byte(`"`+key+`"`)) {
 			t.Fatalf("status missing %s: %s", key, raw)
 		}
@@ -395,6 +395,7 @@ func TestCoverageHealthStateBounds(t *testing.T) {
 		func() { s.State.Health.LineQueueHighWater.ALF = 65 },
 		func() { s.State.Health.Save.LastNS = -1 },
 		func() { s.State.Health.Classification = TimingSummary{LastNS: 2, MaxNS: 1, Count: 1} },
+		func() { s.State.Health.Maintenance = TimingSummary{LastNS: 2, MaxNS: 1, Count: 1} },
 		func() { s.State.Coverage[0].ShortStalledNS = -1 },
 		func() { s.State.Coverage[0].StallAfter = &CoverageStall{From: start, To: start.Add(2 * time.Minute)} },
 		func() { s.State.Coverage = make([]CoverageSpan, c.MaxEntries+1) },

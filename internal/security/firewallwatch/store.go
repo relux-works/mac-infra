@@ -232,7 +232,7 @@ func (s *Store) validateState() error {
 		return bad()
 	}
 	h := st.Health
-	if h.LineQueueHighWater.ALF < 0 || h.LineQueueHighWater.ALF > 64 || h.LineQueueHighWater.Netfilter < 0 || h.LineQueueHighWater.Netfilter > 64 || !h.Save.valid() || !h.Classification.valid() {
+	if h.LineQueueHighWater.ALF < 0 || h.LineQueueHighWater.ALF > 64 || h.LineQueueHighWater.Netfilter < 0 || h.LineQueueHighWater.Netfilter > 64 || !h.Save.valid() || !h.Classification.valid() || !h.Maintenance.valid() {
 		return bad()
 	}
 	for _, v := range st.Coverage {
@@ -853,7 +853,7 @@ func (s *Store) Status() map[string]any {
 		"line_queue_high_water":     s.State.Health.LineQueueHighWater,
 		"shutdown_dropped_lines":    s.State.Health.ShutdownDroppedLines,
 		"run_loop_timing": map[string]TimingSummary{"save": s.State.Health.Save,
-			"classification": s.State.Health.Classification},
+			"classification": s.State.Health.Classification, "maintenance": s.State.Health.Maintenance},
 	}
 }
 func (s *Store) String() string {
