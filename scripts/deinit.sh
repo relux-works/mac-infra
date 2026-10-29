@@ -10,7 +10,7 @@ usage() {
   cat <<EOF
 Usage: ./scripts/deinit.sh
 
-Removes user-level mac-infra binary symlinks and global skill copies.
+Removes user-level mac-infra binary symlinks and retired global skill copies.
 Managed browser heartbeats are stopped before their executable is removed.
 The current-user display-sleep-prevention and fseventsd-watchdog LaunchAgents are disabled when possible.
 Run 'mac-infra-core uninstall' separately if the privileged daemon is installed.
@@ -60,6 +60,8 @@ if [[ -x "$BIN_DIR/mac-infra-core" ]]; then
 fi
 
 rm -f "$BIN_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-sweep" "$BIN_DIR/mac-load-profile" "$BIN_DIR/mac-video-profile" "$BIN_DIR/mac-disk-profile" "$BIN_DIR/mac-cleanup" "$BIN_DIR/mac-infra-core" "$BIN_DIR/mac-safari-session" "$BIN_DIR/mac-chrome-session" "$BIN_DIR/mac-browser-site" "$BIN_DIR/mac-document-sanitize" "$BIN_DIR/mac-keyvault" "$BIN_DIR/mac-security" "$BIN_DIR/mac-netnone" "$BIN_DIR/mac-firewall"
+# One-time migration cleanup for installs predating Curator distribution.
+# Current setup.sh no longer creates these retired global skill paths.
 rm -f "$HOME/.codex/skills/$SKILL_NAME" "$HOME/.claude/skills/$SKILL_NAME"
 rm -rf "$HOME/.agents/skills/$SKILL_NAME"
 

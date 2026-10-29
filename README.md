@@ -28,13 +28,27 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
 | `go test` | Verify Go command planning and CLI behavior | `go test ./...` | test cache only |
 | Apple clang / cgo | Build the native macOS extended ACL checks used by the privileged installer and daemon | `CGO_ENABLED=1 go build -o .temp/mac-infra-core ./cmd/mac-infra-core` (requires Xcode or Command Line Tools) | `.temp/mac-infra-core`; `scripts/setup.sh` builds its normal `bin/mac-infra-core` artifact with the configured Go cgo setting |
-| `scripts/setup.sh` | Refuses worktree, dirty or unprovable builds unless `--allow-unprovable` is set for a developer checkout. Build the CLIs (and, with `--rebuild-keyvault`, the Swift Secure Enclave helper `bin/mac-keyvault-enclave` via `swiftc`) and install global skill symlinks. An existing `bin/mac-keyvault` is kept, because keyvault keys trust exactly that binary; `--rebuild-keyvault` (planned owner sitting only) rebuilds it and refuses while lsof shows a process using it, while any `mac-keyvault` process runs, while a `works.relux.mac-keyvault.*` LaunchAgent is loaded, or when those tools cannot answer (`scripts/keyvault-build-guard.sh`); an existing `~/.local/bin/mac-keyvault` link to another checkout is kept | `./scripts/setup.sh [--rebuild-keyvault] [--allow-unprovable]` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-firewall`, `bin/mac-keyvault`, `~/.local/bin/*`, `~/.agents/skills/mac-infra`, `~/.codex/skills/mac-infra`, `~/.claude/skills/mac-infra` |
+| `scripts/setup.sh` | Refuses worktree, dirty or unprovable builds unless `--allow-unprovable` is set for a developer checkout. Build the CLIs (and, with `--rebuild-keyvault`, the Swift Secure Enclave helper `bin/mac-keyvault-enclave` via `swiftc`) and link the selected tools. `--only NAME[,NAME...]` tests the selected commands and their in-module dependencies and builds/publishes/links only those tools; without it, setup tests all packages and installs all tools. Skills arrive through Curator profiles and the [published mirror](https://github.com/relux-works/skill-mac-infra). An existing `bin/mac-keyvault` is kept, because keyvault keys trust exactly that binary; `--rebuild-keyvault` (planned owner sitting only) rebuilds it and refuses while lsof shows a process using it, while any `mac-keyvault` process runs, while a `works.relux.mac-keyvault.*` LaunchAgent is loaded, or when those tools cannot answer (`scripts/keyvault-build-guard.sh`); an existing `~/.local/bin/mac-keyvault` link to another checkout is kept | `./scripts/setup.sh [--only NAME[,NAME...]] [--rebuild-keyvault] [--allow-unprovable]` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-firewall`, `bin/mac-keyvault`, `~/.local/bin/*` (only selected tools when `--only` is supplied) |
 | `scripts/provenance-guard.sh` | Offline source and structured Go buildinfo admission, then staged publication (refusal exit 3) | `./scripts/provenance-guard.sh preflight ROOT`, `./scripts/provenance-guard.sh verify ROOT BIN...`, `./scripts/provenance-guard.sh publish ROOT STAGE_DIR DEST_DIR [--allow-unprovable] NAME...` | diagnostics on stderr; publish atomically moves verified files into DEST_DIR |
 | `python3` | Parse one structured Go buildinfo object and check publication filesystem identity | invoked by `scripts/provenance-guard.sh` with `python3 -I -c` | diagnostics on stderr; no files written |
-| `scripts/deinit.sh` | Remove user-level installation without stranding managed jobs | `./scripts/deinit.sh` | stops all `works.relux.mac-infra-browser-heartbeat.*` LaunchAgents and removes the stable launcher plus legacy pinned copies before removing binary symlinks and the runtime skill copy |
+| `scripts/deinit.sh` | Remove user-level installation without stranding managed jobs | `./scripts/deinit.sh` | stops all `works.relux.mac-infra-browser-heartbeat.*` LaunchAgents and removes the stable launcher plus legacy pinned copies before removing binary symlinks; also cleans up retired global skill paths from pre-Curator installations |
 | `/usr/bin/codesign` | Give the shared heartbeat launcher a complete stable designated identity so macOS Automation consent can retain it across rebuilds | invoked by `scripts/setup.sh`; verify with `codesign --verify --strict "$HOME/Library/Application Support/mac-infra/browser-session/bin/mac-browser-heartbeat-launcher"` | signs the staged `mac-chrome-session`; setup atomically installs those signed bytes at the single managed launcher path |
 
 ## Setup
+
+For a scoped update, use `./scripts/setup.sh --only mac-load-profile` (or a
+comma-separated list of tool names). Setup runs `go test` for those commands
+and their in-module dependencies discovered with `go list -deps`, then builds,
+signs where applicable, publishes and links only those tools. Unselected
+binaries and links are preserved; the stable heartbeat launcher is updated
+only with `mac-chrome-session`, and the Swift helper only with a keyvault
+build. Unknown names are usage errors (exit 2). Selecting `mac-keyvault`
+requires `--rebuild-keyvault` and all existing rebuild guards still apply.
+Without `--only`, setup retains the full `go test ./...` and full installation.
+
+Setup no longer installs global agent skills. Use Curator profiles backed by
+the [relux-works/skill-mac-infra mirror](https://github.com/relux-works/skill-mac-infra).
+Deinit retains one-time cleanup of the retired global paths for older installs.
 
 Run `./scripts/setup.sh` from a clean standalone clone. Setup refuses worktree,
 dirty or unprovable Go builds. It builds and signs in a fresh `bin/.staging.*`
@@ -333,7 +347,7 @@ mac-infra-core sleep-prevention disable
 
 These mutations route through the root LaunchDaemon and can execute only `/usr/bin/pmset -a disablesleep 1` or `/usr/bin/pmset -a disablesleep 0`. The setting remains in effect after the command exits until it is explicitly changed; it is not a temporary `caffeinate` assertion. Neither action changes ordinary `sleep` timers, standby, `hibernatemode`, or `displaysleep`. The display can still turn off while system sleep prevention is enabled.
 
-`scripts/setup.sh` installs the user-level binary and skill but does not restart an already running privileged daemon. After the first setup and after every `mac-infra-core` binary update, install/reinstall the daemon before using `enable` or `disable`:
+`scripts/setup.sh` installs the selected user-level binaries but does not restart an already running privileged daemon. After the first setup and after every `mac-infra-core` binary update, install/reinstall the daemon before using `enable` or `disable`:
 
 ```bash
 ./scripts/setup.sh
