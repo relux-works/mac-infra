@@ -103,7 +103,6 @@ type journalDelta struct {
 // unchanged: time, key fields, count, label and reason kind. Two events with
 // the same identity are interchangeable for removal.
 func eventID(e Event) string {
-	eventIDCalls++
 	kind, _ := e.Reason.(string)
 	if kind == "" {
 		raw, _ := json.Marshal(e.Reason)
@@ -121,9 +120,6 @@ func eventID(e Event) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:12])
 }
-
-// eventIDCalls counts identity computations; replay cost tests read it.
-var eventIDCalls int
 
 func (s *Store) eventRemoved(e Event) {
 	s.delta.removedEvents = append(s.delta.removedEvents, eventID(e))
@@ -362,6 +358,13 @@ func openJournal(path string) (*os.File, error) {
 // JSON is a torn tail: ignored and reported. Anything else malformed, a seq
 // gap or an unknown record type refuses the journal.
 func (s *Store) replayJournal(f io.Reader) (torn bool, err error) {
+	// Every successful exit, a torn tail included, applies the removals of
+	// the records replayed (PR69 review r4).
+	defer func() {
+		if err == nil {
+			s.dropEvents()
+		}
+	}()
 	raw, e := io.ReadAll(io.LimitReader(f, s.Config.MaxStateBytes+1))
 	if e != nil {
 		return false, e
@@ -399,7 +402,6 @@ func (s *Store) replayJournal(f io.Reader) (torn bool, err error) {
 		}
 		s.seq = r.Seq
 	}
-	s.dropEvents()
 	return torn, nil
 }
 
@@ -410,6 +412,7 @@ func (s *Store) dropEvents() {
 	}
 	kept := s.State.Events[:0]
 	for _, e := range s.State.Events {
+		s.replayIDs++
 		if id := eventID(e); s.replayDrop[id] > 0 {
 			s.replayDrop[id]--
 			continue

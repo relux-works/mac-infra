@@ -517,8 +517,8 @@ func TestJournalHeartbeatCoverageReplay(t *testing.T) {
 	if e := s.Checkpoint(beat); e != nil {
 		t.Fatal(e)
 	}
-	// Opening prunes, which orders spans by start (stable): compare in that
-	// canonical order.
+	// Opening leaves coverage exact; replay appends each source's tail after
+	// the snapshot's spans, so compare in canonical start order.
 	canonical := slices.Clone(s.State.Coverage)
 	sort.SliceStable(canonical, func(i, j int) bool { return canonical[i].Start.Before(canonical[j].Start) })
 	want, _ := json.Marshal(canonical)
@@ -846,7 +846,7 @@ func TestJournalReplayFutureObservation(t *testing.T) {
 }
 
 // A watcher opening the store after a crash must not extend the crashed run's
-// span: the active sources a heartbeat recorded only shape the open-time prune,
+// span: opening restores the spans exactly, with no running-collector state,
 // so the startup snapshot leaves the crash a not_running gap.
 func TestJournalCrashedSpanNotExtended(t *testing.T) {
 	s, c := journalStore(t)
@@ -893,10 +893,9 @@ func TestJournalReplayRemovalCost(t *testing.T) {
 	if s.journalRecords < 150 {
 		t.Fatalf("fixture: %d journal records; want one per new event", s.journalRecords)
 	}
-	eventIDCalls = 0
 	got := reopen(t, c)
-	if added := 150; eventIDCalls > 100+added {
-		t.Fatalf("replay computed %d identities for %d records; want at most %d", eventIDCalls, s.journalRecords, 100+added)
+	if added := 150; got.replayIDs > 100+added {
+		t.Fatalf("replay computed %d identities for %d records; want at most %d", got.replayIDs, s.journalRecords, 100+added)
 	}
 	if apps := eventApps(got.State.Events); len(apps) != 100 || apps[0] != "app150" || apps[99] != "app249" {
 		t.Fatalf("replayed events %d, first %v; want app150..app249", len(apps), apps[:1])

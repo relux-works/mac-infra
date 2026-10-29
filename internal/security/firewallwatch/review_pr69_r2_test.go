@@ -181,7 +181,8 @@ func TestR2ByteBoundEveryAppend(t *testing.T) {
 }
 
 // A coverage tail with an open source evicted at snapshot is restored by
-// heartbeat, then the reader's canonical prune retains equivalent coverage.
+// heartbeat, and the reader holds exactly the watcher's coverage (keeper's
+// note: readers no longer prune coverage, r3 finding 1).
 func TestR2EvictedSourceAndPendingCoalescing(t *testing.T) {
 	for _, cap := range []int{1, 3} {
 		t.Run(fmt.Sprint(cap), func(t *testing.T) {

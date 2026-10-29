@@ -136,8 +136,10 @@ type Store struct {
 	journalBytes   int64
 	journalBroken  bool
 	snapOpen       map[string]time.Time
-	// replayDrop collects the event removals of the records replayed so far.
+	// replayDrop collects the event removals of the records replayed so far;
+	// replayIDs counts the identities replay computed (a cost test reads it).
 	replayDrop map[string]int
+	replayIDs  int
 	// journalWrite replaces the append's single write in tests.
 	journalWrite func(*os.File, []byte) error
 }
