@@ -136,6 +136,9 @@ type Store struct {
 	journalBytes   int64
 	journalBroken  bool
 	snapOpen       map[string]time.Time
+	// replayActive is the last replayed heartbeat's active sources, used by
+	// OpenStore's prune only.
+	replayActive []string
 	// journalWrite replaces the append's single write in tests.
 	journalWrite func(*os.File, []byte) error
 }
@@ -289,7 +292,15 @@ func OpenStore(c Config) (*Store, error) {
 		}
 		s.State.CoverageVersion = coverageVersion
 	}
+	// Replayed coverage is pruned as the watcher's next snapshot would:
+	// sources active at the last heartbeat keep their newest span separate.
+	// The stand-in trackers exist only for this prune; a watcher opening the
+	// store must not extend a crashed run's spans.
+	for _, source := range s.replayActive {
+		s.Coverage(source).covering = true
+	}
 	s.prune(time.Now())
+	s.coverage, s.replayActive = nil, nil
 	if e := s.validateState(); e != nil {
 		return nil, fmt.Errorf("corrupt state journal: %w", e)
 	}
@@ -615,6 +626,7 @@ func (s *Store) pruneItems(refs expiryRefs) {
 		if e.TS.After(s.State.EvictedThrough) {
 			s.State.EvictedThrough = e.TS
 		}
+		s.eventRemoved(e)
 	}
 	events := s.State.Events[:0]
 	for _, e := range s.State.Events {

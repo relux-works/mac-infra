@@ -503,10 +503,12 @@ tail, together with the folded journal.
 After a crash the journal restores the watcher's state as of its last append:
 every emitted event and deny-window change, signer results, and every other
 change up to the last heartbeat, at most `save_interval` old, as full saves
-did before the journal. The only effect on emission is the one a lost
-`save_interval` always had: a key whose latest last-seen refresh was not yet
-appended can expire, or lose a count-pressure eviction choice, earlier than it
-would have, and emit again if it reappears.
+did before the journal. The effect on emission is bounded by the operator's
+acceptance (sysadmin decision, 2026-10-29): after a crash, a key whose latest
+refresh was not yet appended (at most save_interval old) can re-emit once,
+through early expiry or through count-pressure eviction choice; the same
+exposure as before the journal. `TestJournalOnlyReEmitIsUnappendedRefresh`
+and `TestR2UnappendedCapRefresh` pin both paths.
 A shutdown takes a snapshot and removes the journal, so an older binary reads
 the full state after a clean stop. After a crash, run this binary once before
 rolling back, or the older binary misses the journaled records.

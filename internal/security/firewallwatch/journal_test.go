@@ -843,3 +843,29 @@ func TestJournalReplayFutureObservation(t *testing.T) {
 		t.Fatalf("replayed events %v; want app3", apps)
 	}
 }
+
+// A watcher opening the store after a crash must not extend the crashed run's
+// span: the active sources a heartbeat recorded only shape the open-time prune,
+// so the startup snapshot leaves the crash a not_running gap.
+func TestJournalCrashedSpanNotExtended(t *testing.T) {
+	s, c := journalStore(t)
+	t0 := time.Now().Add(-time.Hour).Round(0)
+	s.BeginCoverage(t0)
+	if e := s.Save(t0.Add(time.Second)); e != nil {
+		t.Fatal(e)
+	}
+	s.dirty = true
+	if e := s.Checkpoint(t0.Add(2 * time.Second)); e != nil {
+		t.Fatal(e)
+	}
+	// Crash; the next watcher opens and takes its startup snapshot later.
+	w := reopen(t, c)
+	restart := t0.Add(time.Minute)
+	if e := w.Save(restart); e != nil {
+		t.Fatal(e)
+	}
+	gaps := reopen(t, c).coverageGaps(t0, restart)
+	if len(gaps) != 1 || gaps[0].Kind != GapNotRunning || !gaps[0].From.Equal(t0.Add(2*time.Second)) {
+		t.Fatalf("gaps %+v; want one not_running gap from the last heartbeat", gaps)
+	}
+}

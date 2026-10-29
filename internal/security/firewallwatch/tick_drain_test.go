@@ -22,7 +22,8 @@ func TestCollectSampleDrainsBeforeEachItem(t *testing.T) {
 	flush := func(bool) error { calls = append(calls, "flush"); return nil }
 	drain := func() error { calls = append(calls, "drain"); return nil }
 	emitted, e := collectSample(items, collect, flush, drain)
-	want := []string{"drain", "collect a", "drain", "collect b", "flush", "drain", "collect c"}
+	// flush runs after every row, emitting or not (PR69 review r2).
+	want := []string{"drain", "collect a", "flush", "drain", "collect b", "flush", "drain", "collect c", "flush"}
 	if e != nil || !emitted || !reflect.DeepEqual(calls, want) {
 		t.Fatalf("emitted=%t err=%v calls=%v; want %v", emitted, e, calls, want)
 	}
@@ -36,7 +37,7 @@ func TestCollectSampleDrainsBeforeEachItem(t *testing.T) {
 		}
 		return nil
 	}
-	if _, e := collectSample(items, collect, flush, drain); !errors.Is(e, failed) || !reflect.DeepEqual(calls, []string{"collect a"}) {
+	if _, e := collectSample(items, collect, flush, drain); !errors.Is(e, failed) || !reflect.DeepEqual(calls, []string{"collect a", "flush"}) {
 		t.Fatalf("err=%v calls=%v; want the drain error after one item", e, calls)
 	}
 }

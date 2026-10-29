@@ -251,24 +251,23 @@ func (s *Store) collect(ctx context.Context, cl *Classifier, it Item) bool {
 }
 
 // collectSample observes one nettop sample and reports whether it emitted.
-// sampleTick saves it afterwards. During a long sample (slow classification),
-// an emitted row saves only once save_interval has passed since the last save,
-// not every time, because every save rewrites the whole state
-// (BUG-261029-do8v1i). The save timer does not interrupt a classification.
-// drain runs before each item and handles collector lines already queued, so a
-// sample of many slow classifications does not stall the ALF and netfilter
-// feeders (BUG-261029-kpyw8s).
+// sampleTick checkpoints it afterwards. flush runs after every row, emitting or
+// not: it appends at once whatever the row made urgent (an emitted event, a
+// deny-window change, a changed signer result; PR69 review r2) and a heartbeat
+// once save_interval has passed, and does nothing otherwise. The save timer
+// does not interrupt a classification. drain runs before each item and handles
+// collector lines already queued, so a sample of many slow classifications
+// does not stall the ALF and netfilter feeders (BUG-261029-kpyw8s).
 func collectSample(items []Item, collect func(Item) bool, flush func(emitted bool) error, drain func() error) (bool, error) {
 	emitted := false
 	for _, it := range items {
 		if e := drain(); e != nil {
 			return emitted, e
 		}
-		if collect(it) {
-			emitted = true
-			if e := flush(false); e != nil {
-				return emitted, e
-			}
+		row := collect(it)
+		emitted = emitted || row
+		if e := flush(row); e != nil {
+			return emitted, e
 		}
 	}
 	return emitted, nil

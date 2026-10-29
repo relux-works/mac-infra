@@ -2,6 +2,8 @@ package firewallwatch
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,11 +48,13 @@ type journalRecord struct {
 	RemovedEntries []string               `json:"removed_entries,omitempty"`
 	Signers        map[string]SignerEntry `json:"signers,omitempty"`
 	RemovedSigners []string               `json:"removed_signers,omitempty"`
-	// Events were added since the previous append; EventsLen is the
-	// watcher's event count after them. Pruning only ever drops the oldest
-	// events, so replay keeps the newest EventsLen.
+	// Events were added since the previous append. RemovedEvents identify,
+	// by eventID, the events the watcher's prunes dropped since then: replay
+	// adds, then removes. Retention compares monotonic and wall readings
+	// (PR66), so the dropped events are not always the oldest by wall time
+	// (PR69 review r2).
 	Events         []Event    `json:"events,omitempty"`
-	EventsLen      int        `json:"events_len"`
+	RemovedEvents  []string   `json:"removed_events,omitempty"`
 	LastEvent      time.Time  `json:"last_event"`
 	EvictedThrough time.Time  `json:"evicted_through"`
 	Heartbeat      *heartbeat `json:"heartbeat,omitempty"`
@@ -74,6 +78,10 @@ type heartbeat struct {
 	CoverageEvictedThrough time.Time       `json:"coverage_evicted_through"`
 	Health                 RunHealth       `json:"health"`
 	Coverage               []coverageTail  `json:"coverage"`
+	// Active lists the sources collecting at the heartbeat. A reader prunes
+	// replayed coverage as the watcher's next snapshot would: an active
+	// source's newest span stays separate (PR69 review r2).
+	Active []string `json:"active,omitempty"`
 }
 
 // coverageTail replaces a source's spans that start at or after From.
@@ -90,7 +98,34 @@ type journalDelta struct {
 	entries, removedEntries map[string]bool
 	signers, removedSigners map[string]bool
 	events                  []Event
+	removedEvents           []string
 	urgent                  bool
+}
+
+// eventID identifies an event by the fields that survive a JSON round trip
+// unchanged: time, key fields, count, label and reason kind. Two events with
+// the same identity are interchangeable for removal.
+func eventID(e Event) string {
+	kind, _ := e.Reason.(string)
+	if kind == "" {
+		raw, _ := json.Marshal(e.Reason)
+		var v struct {
+			Kind string `json:"kind"`
+		}
+		_ = json.Unmarshal(raw, &v)
+		kind = v.Kind
+	}
+	port := -1
+	if e.Port != nil {
+		port = *e.Port
+	}
+	raw, _ := json.Marshal([]any{e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.App, e.Signer, e.Verdict, port, e.RemoteClass, e.Bucket, e.Kind, e.Host, e.Counts, e.Label, kind, e.Mode})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:12])
+}
+
+func (s *Store) eventRemoved(e Event) {
+	s.delta.removedEvents = append(s.delta.removedEvents, eventID(e))
 }
 
 func mark(set *map[string]bool, k string) {
@@ -130,6 +165,11 @@ func (s *Store) heartbeat(now time.Time) (*heartbeat, bool) {
 	st := &s.State
 	st.Updated = now
 	h := &heartbeat{Parser: st.Parser, Netfilter: st.Netfilter, NetfilterError: st.NetfilterError, NettopUnrecognized: st.NettopUnrecognized, BackendHealthy: st.BackendHealthy, Updated: st.Updated, NettopError: st.NettopError, CoverageVersion: st.CoverageVersion, CoverageEvictedThrough: st.CoverageEvictedThrough, Health: st.Health}
+	for _, source := range sortedCoverageSources(s.coverage) {
+		if s.coverage[source].covering {
+			h.Active = append(h.Active, source)
+		}
+	}
 	spans := 0
 	for _, source := range s.coverageSources() {
 		tail := coverageTail{Source: source, From: s.snapOpen[source], Spans: []CoverageSpan{}}
@@ -199,7 +239,7 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 		s.State.Health.recordSlow(SlowJournal, d, at, 0)
 	}()
 	st := &s.State
-	r := journalRecord{Seq: s.seq + 1, Type: recordDelta, Events: s.delta.events, EventsLen: len(st.Events), LastEvent: st.LastEvent, EvictedThrough: st.EvictedThrough}
+	r := journalRecord{Seq: s.seq + 1, Type: recordDelta, Events: s.delta.events, RemovedEvents: s.delta.removedEvents, LastEvent: st.LastEvent, EvictedThrough: st.EvictedThrough}
 	for k := range s.delta.entries {
 		if r.Entries == nil {
 			r.Entries = map[string]*Entry{}
@@ -370,9 +410,6 @@ func (s *Store) applyRecord(r journalRecord) error {
 	if r.Type != recordDelta {
 		return fmt.Errorf("unknown record type %q", r.Type)
 	}
-	if r.EventsLen < 0 {
-		return errors.New("negative events_len")
-	}
 	st := &s.State
 	for _, k := range r.RemovedEntries {
 		delete(st.Entries, k)
@@ -390,16 +427,28 @@ func (s *Store) applyRecord(r journalRecord) error {
 		st.Signers[k] = v
 	}
 	st.Events = append(st.Events, r.Events...)
-	if len(st.Events) > r.EventsLen {
-		// The watcher dropped its oldest events; keep the newest, as it did.
-		sort.SliceStable(st.Events, func(i, j int) bool { return st.Events[i].TS.Before(st.Events[j].TS) })
-		st.Events = append([]Event(nil), st.Events[len(st.Events)-r.EventsLen:]...)
+	if len(r.RemovedEvents) > 0 {
+		// Each removal drops one event with that identity, as the watcher did.
+		drop := map[string]int{}
+		for _, id := range r.RemovedEvents {
+			drop[id]++
+		}
+		kept := st.Events[:0]
+		for _, e := range st.Events {
+			if id := eventID(e); drop[id] > 0 {
+				drop[id]--
+				continue
+			}
+			kept = append(kept, e)
+		}
+		st.Events = kept
 	}
 	st.LastEvent, st.EvictedThrough = r.LastEvent, r.EvictedThrough
 	if h := r.Heartbeat; h != nil {
 		st.Parser, st.Netfilter, st.NetfilterError, st.NettopUnrecognized = h.Parser, h.Netfilter, h.NetfilterError, h.NettopUnrecognized
 		st.BackendHealthy, st.Updated, st.NettopError = h.BackendHealthy, h.Updated, h.NettopError
 		st.CoverageVersion, st.CoverageEvictedThrough, st.Health = h.CoverageVersion, h.CoverageEvictedThrough, h.Health
+		s.replayActive = h.Active
 		for _, tail := range h.Coverage {
 			kept := st.Coverage[:0]
 			for _, span := range st.Coverage {
