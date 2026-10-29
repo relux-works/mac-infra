@@ -87,3 +87,43 @@ func TestNoDataAPIs(t *testing.T) {
 		}
 	}
 }
+
+// SecKeychainItemSetAccess is called exactly once in the shipped sources, in native_darwin.m, directly behind the !allowUI refusal (incident 2026-10-29 11:30Z).
+func TestSetAccessOnlyInAttendedRegion(t *testing.T) {
+	const call = "SecKeychainItemSetAccess("
+	const guard = "if (!allowUI) s=errSecInteractionNotAllowed;"
+	calls := 0
+	for _, dir := range []string{".", "../toolsecretprobe", "../../cmd/mac-tool-secret", "../../cmd/mac-tool-secret-probe"} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || strings.HasSuffix(name, "_test.go") || !(strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".m") || strings.HasSuffix(name, ".c") || strings.HasSuffix(name, ".h")) {
+				continue
+			}
+			src, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := strings.Count(string(src), call)
+			calls += n
+			if n > 0 && filepath.Join(dir, name) != "native_darwin.m" {
+				t.Errorf("%s calls SecKeychainItemSetAccess outside the attended region", filepath.Join(dir, name))
+			}
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("SecKeychainItemSetAccess calls in shipped sources: %d, want exactly 1", calls)
+	}
+	native, err := os.ReadFile("native_darwin.m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(native)
+	g, c := strings.Index(src, guard), strings.Index(src, call)
+	if g < 0 || c < g || c-g > 400 {
+		t.Fatalf("SetAccess call is not directly behind the !allowUI refusal (guard at %d, call at %d)", g, c)
+	}
+}

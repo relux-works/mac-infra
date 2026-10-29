@@ -277,10 +277,20 @@ static OSStatus applyPlan(SecKeychainItemRef item, NSDictionary *plan, BOOL allo
         if (!s && ![*prepared isEqual:plan[@"after"]]) s=errSecDecode;
     }
     if (!s && !prepareOnly) {
-        // The ONLY UI-enabled region. One call, no retry on cancellation/refusal.
-        if (allowUI && (!isatty(3) || !isatty(4))) s=errSecInteractionNotAllowed;
+        // The ONLY region that may call SecKeychainItemSetAccess, and only with UI
+        // allowed. On macOS 26.5.1 SetAccess raises a SecurityAgent dialog even
+        // after SecKeychainSetUserInteractionAllowed(false), and that dialog can
+        // outlive this process and block securityd host-wide (incident
+        // 2026-10-29 11:30Z). So without allowUI this layer refuses before the
+        // call and never relies on the CLI gate alone.
+        // fds 3 and 4 are the Go parent's own stdin and stdout, passed through
+        // exec.Cmd.ExtraFiles (native.go) only when AllowUI is set. Both must be
+        // terminals: the owner's attended session, never a pipe or a file.
+        // One call, no retry on cancellation or refusal.
+        if (!allowUI) s=errSecInteractionNotAllowed;
+        else if (!isatty(3) || !isatty(4)) s=errSecInteractionNotAllowed;
         else {
-            s=SecKeychainSetUserInteractionAllowed(allowUI);
+            s=SecKeychainSetUserInteractionAllowed(true);
             if (!s) { TS_TRACE("set-access"); s=SecKeychainItemSetAccess(item,access); TS_TRACE("set-access-returned"); }
             SecKeychainSetUserInteractionAllowed(false);
         }
