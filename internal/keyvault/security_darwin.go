@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"unsafe"
+
+	_ "github.com/relux-works/mac-infra/internal/keyvault/keychaingate"
 )
 
 // SecurityStore is the production Backend over the login keychain through the

@@ -3,8 +3,7 @@ package keyvault
 import (
 	"os"
 	"testing"
-
-	"github.com/relux-works/mac-infra/internal/keyvault/testguard"
 )
 
-func TestMain(m *testing.M) { os.Exit(testguard.Main(m)) }
+// Confinement is installed by keychaingate before keyvault initializes.
+func TestMain(m *testing.M) { os.Exit(m.Run()) }

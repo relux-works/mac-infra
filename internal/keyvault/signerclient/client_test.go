@@ -33,7 +33,7 @@ func TestMain(m *testing.M) {
 	if scenario := os.Getenv("SIGNERCLIENT_FAKE_SERVER"); scenario != "" {
 		os.Exit(fakeServer(scenario))
 	}
-	os.Exit(testguard.Main(m))
+	os.Exit(m.Run())
 }
 
 // envelopeShape is one combination of {ok, result present, error member}

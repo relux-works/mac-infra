@@ -47,13 +47,24 @@ requires `--rebuild-keyvault` and all existing rebuild guards still apply.
 Without `--only`, setup retains the full `go test ./...` and full installation.
 
 For Go verification, set `MAC_KEYVAULT_SKIP_KEYCHAIN` to any non-empty value
-to skip every test using the real Security.framework backend, login Keychain
+to skip integration tests using the real Security.framework backend, login Keychain
 or Secure Enclave helper (including helper compilation). Fake-backed tests
 still run. To run the real tests on demand, unset the variable and run
 `go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault` in your own
 attended sitting: these tests create and delete test-namespace Keychain items
 and may compile the Swift helper and require owner interaction. The gate is
-test-only and does not change installed commands.
+test-only and does not change installed commands. On macOS with cgo, an imported
+package applies an in-process sandbox before keyvault and test-file initialization
+when the gate is set. It denies Keychain/token daemon lookup and writes under
+`~/Library/Keychains`; failure to install it terminates the test binary. Children
+inherit the sandbox even if they remove the gate. Read-only sandbox regression
+probes exercise refused backend calls. Certificate trust evaluation
+through trustd remains available for fake TLS tests. Real binaries never apply
+this sandbox. macOS refuses nested `sandbox_init`, so gated tests launched under
+an existing process sandbox fail before tests run. The reserved
+`keyvault_gate_regression` build tag adds a non-test helper probe; verify it with
+the gate set and
+`go test -tags=keyvault_gate_regression -run TestSandbox ./internal/keyvault/... ./cmd/mac-keyvault`.
 
 Setup no longer installs global agent skills. Use Curator profiles backed by
 the [relux-works/skill-mac-infra mirror](https://github.com/relux-works/skill-mac-infra).

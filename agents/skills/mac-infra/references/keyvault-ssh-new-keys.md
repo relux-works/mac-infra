@@ -349,11 +349,20 @@ From the repository root (no live keychain access):
 MAC_KEYVAULT_SKIP_KEYCHAIN=1 go test -race ./internal/keyvault ./cmd/mac-keyvault -run 'TestSSH|TestRunSSH'
 ```
 
-`MAC_KEYVAULT_SKIP_KEYCHAIN` set to any non-empty value skips all tests that
+`MAC_KEYVAULT_SKIP_KEYCHAIN` set to any non-empty value skips integrations that
 use the real Security.framework backend, login Keychain or Secure Enclave
 helper, before constructing a backend or compiling a helper. Fake-backed
-tests, including Enclave store tests, continue to run. For the full suite
-without real Keychain access, use:
+tests, including Enclave store tests, continue to run. On macOS with cgo,
+keyvault imports a sandbox package that initializes before keyvault and its
+test files. With the gate set in a test binary it denies Keychain/token daemon
+lookup and file writes under the runtime HOME's `Library/Keychains`. Sandbox
+initialization failure exits non-zero before tests run. Children inherit the
+restrictions even with the gate removed. Read-only regression probes deliberately
+exercise denied backend calls; they must return no items and OSStatus -50.
+trustd remains available for certificate verification in fake TLS tests.
+macOS refuses nested `sandbox_init`: running gated tests under an existing
+process sandbox fails before tests run rather than continuing unsandboxed.
+For the full suite without real Keychain access, use:
 
 ```sh
 MAC_KEYVAULT_SKIP_KEYCHAIN=1 go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault
@@ -363,10 +372,26 @@ To run the real integrations on demand, unset `MAC_KEYVAULT_SKIP_KEYCHAIN`
 and run `go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault` in your
 own attended sitting. They create and delete test-namespace login Keychain
 items and can compile and invoke the Swift Secure Enclave helper; owner
-interaction may be required. Test-only source guards check all build tags
-before the suites run: real backend references belong only in registered
-helpers whose first operation is the shared gate. The CLI tests also reject
-accidental use of production backend wiring while the gate is set.
+interaction may be required. The shared test helper skips these integrations
+cleanly; the init sandbox enforces confinement for any missed gate, including
+init-time calls, captured factories, nil receivers and standalone leaf packages.
+Real binaries never install it (`testing.Testing()` is false). The CLI tests
+also reject accidental use of production backend wiring while the gate is set.
+The reserved `keyvault_gate_regression` tag includes a read-only canary and an
+intentionally ungated non-`_test.go` helper. For initial validation, run only the
+canary in its standalone package, outside an existing process sandbox:
+
+```sh
+MAC_KEYVAULT_SKIP_KEYCHAIN=1 go test -count=1 -v -tags=keyvault_gate_regression -run '^TestSandboxCanary$' ./internal/keyvault/keychaingate
+```
+
+Require `keychaingate.Applied()=true` before the first query and OSStatus -50
+from the read-only lookup for a nonexistent item. Stop if either check fails.
+After that proof, exercise the complete read-only regression set:
+
+```sh
+MAC_KEYVAULT_SKIP_KEYCHAIN=1 go test -count=1 -tags=keyvault_gate_regression -run TestSandbox ./internal/keyvault/... ./cmd/mac-keyvault
+```
 
 The suite uses fake backends and synthetic P-256 keys. It covers a deterministic
 OpenSSH SSHSIG golden, a modified-message negative, actual Git SSH signing and

@@ -16,7 +16,7 @@ func TestMain(m *testing.M) {
 			panic("test must inject a fake backend while " + testguard.SkipEnv + " is set")
 		}
 	}
-	os.Exit(testguard.Main(m))
+	os.Exit(m.Run())
 }
 
 func newTestSecurityStore(t *testing.T) keyvault.Backend {
