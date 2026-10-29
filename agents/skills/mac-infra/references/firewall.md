@@ -245,6 +245,12 @@ first. `coverage_gaps` lists disjoint intervals in [since, as_of], each with
   possible but unmeasured. This is not evidence of a watcher restart.
 - `coverage_evicted`: coverage history was dropped; the interval is unknown,
   rather than evidence that the watcher stopped.
+- `legacy_unknown`: both bounding ALF spans contain pre-marker history whose
+  stall causes were not reliably recorded. Consumers must treat this as
+  unknown history; it is not evidence of a watcher stop or restart.
+
+Precedence is `coverage_evicted` > `stall` > covered > `legacy_unknown` >
+`not_running`.
 
 Exact stalls are persisted as the preceding coverage span's optional
 `stall_after: {from, to}`, including open stalls up to the save or collector
@@ -289,11 +295,17 @@ When a span reaches the window, its end may trail as_of by up to
 without an unrecorded tail gap. A watcher that died within that interval is
 not detected, and a save delayed longer can add a spurious tail gap. Explicit
 stalls never receive this grace. Without a span reaching the window, all
-unrecorded time is a gap whatever its length. Existing state files load with
-new fields defaulting to zero/absent. The old format recorded spans but did
-not persist stall causes or an eviction watermark: pre-upgrade gaps cannot be
-reliably distinguished from stops and retain the `not_running` default. No
-historical cause or watermark is inferred.
+unrecorded time is a gap whatever its length. When a state file without
+`coverage_version` loads, all existing spans are marked `legacy: true` and
+the in-memory version becomes 1; the next save persists both. Newly collected
+spans are not legacy. Gaps bounded by two legacy ALF spans are
+`legacy_unknown`, including when the bounds lie outside the digest window.
+The gap from legacy history to the first new-format run remains `not_running`
+because that boundary records a real restart. Compaction preserves `legacy`
+if either merged span has it; pruning preserves retained flags and marks
+discarded history with the eviction watermark. No historical cause or
+watermark is inferred. Saving and reloading versioned state preserves the
+flags without marking new spans legacy. No configuration fields change.
 
 `evicted_through` keeps its existing meaning: the newest timestamp of any event
 pruned by `retention_days` or `max_entries`. `truncated` is set for any coverage

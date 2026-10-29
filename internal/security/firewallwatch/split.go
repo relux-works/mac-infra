@@ -39,6 +39,7 @@ const (
 	GapNotRunning      = "not_running"
 	GapStall           = "stall"
 	GapCoverageEvicted = "coverage_evicted"
+	GapLegacyUnknown   = "legacy_unknown"
 )
 
 // SplitGap is a part of the window with unavailable or unknown coverage.
@@ -172,11 +173,11 @@ func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 		return gaps
 	}
 	type boundary struct {
-		at               time.Time
-		covered, stalled int
+		at                       time.Time
+		covered, stalled, legacy int
 	}
 	points := []boundary{{at: since}, {at: asOf}}
-	add := func(from, to time.Time, covered, stalled int) {
+	add := func(from, to time.Time, covered, stalled, legacy int) {
 		if from.Before(since) {
 			from = since
 		}
@@ -186,15 +187,17 @@ func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 		if !from.Before(to) {
 			return
 		}
-		points = append(points, boundary{from, covered, stalled}, boundary{to, -covered, -stalled})
+		points = append(points, boundary{from, covered, stalled, legacy}, boundary{to, -covered, -stalled, -legacy})
 	}
 	touched := false
 	var lastEnd time.Time
+	alf := make([]CoverageSpan, 0, len(s.State.Coverage))
 	for _, span := range s.State.Coverage {
 		if span.Source != "" {
 			continue
 		}
-		add(span.Start, span.End, 1, 0)
+		alf = append(alf, span)
+		add(span.Start, span.End, 1, 0, 0)
 		if !span.End.Before(since) && !span.Start.After(asOf) {
 			touched = true
 			if span.End.After(lastEnd) {
@@ -202,7 +205,37 @@ func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 			}
 		}
 		if stall := span.StallAfter; stall != nil {
-			add(stall.From, stall.To, 0, 1)
+			add(stall.From, stall.To, 0, 1, 0)
+		}
+	}
+	// Use the actual ALF coverage boundaries, including those outside the
+	// window. Overlaps cannot invent a gap or let another source bound one.
+	// At tied boundaries any legacy history keeps the cause unknown.
+	sort.Slice(alf, func(i, j int) bool { return alf[i].Start.Before(alf[j].Start) })
+	type interval struct {
+		start, end             time.Time
+		startLegacy, endLegacy bool
+	}
+	intervals := []interval{}
+	for _, span := range alf {
+		if len(intervals) == 0 || span.Start.After(intervals[len(intervals)-1].end) {
+			intervals = append(intervals, interval{span.Start, span.End, span.Legacy, span.Legacy})
+			continue
+		}
+		prev := &intervals[len(intervals)-1]
+		if span.Start.Equal(prev.start) {
+			prev.startLegacy = prev.startLegacy || span.Legacy
+		}
+		if span.End.After(prev.end) {
+			prev.end, prev.endLegacy = span.End, span.Legacy
+		} else if span.End.Equal(prev.end) {
+			prev.endLegacy = prev.endLegacy || span.Legacy
+		}
+	}
+	for i := 1; i < len(intervals); i++ {
+		left, right := intervals[i-1], intervals[i]
+		if left.endLegacy && right.startLegacy {
+			add(left.end, right.start, 0, 0, 1)
 		}
 	}
 	evicted := s.State.CoverageEvictedThrough
@@ -210,13 +243,14 @@ func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 		points = append(points, boundary{at: evicted})
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i].at.Before(points[j].at) })
-	covered, stalled := 0, 0
+	covered, stalled, legacy := 0, 0, 0
 	grace := duration(s.Config.NettopInterval) + duration(s.Config.SaveInterval)
 	for i := 0; i < len(points); {
 		from := points[i].at
 		for i < len(points) && points[i].at.Equal(from) {
 			covered += points[i].covered
 			stalled += points[i].stalled
+			legacy += points[i].legacy
 			i++
 		}
 		if i == len(points) {
@@ -230,6 +264,8 @@ func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 		case stalled > 0:
 			kind = GapStall
 		case covered > 0:
+		case legacy > 0:
+			kind = GapLegacyUnknown
 		case touched && !from.Before(lastEnd) && asOf.Sub(lastEnd) <= grace:
 		default:
 			kind = GapNotRunning

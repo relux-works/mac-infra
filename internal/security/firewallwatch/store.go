@@ -50,6 +50,9 @@ type State struct {
 	// Coverage records when a watcher was running: a span opens at run start
 	// and its end advances on every save, so a stop or crash leaves a gap.
 	Coverage []CoverageSpan `json:"coverage"`
+	// CoverageVersion distinguishes migrated history from spans whose gaps
+	// record stall causes. Zero is the pre-marker format.
+	CoverageVersion int `json:"coverage_version"`
 	// EvictedThrough is the newest timestamp of any event pruned from Events.
 	EvictedThrough         time.Time `json:"evicted_through"`
 	CoverageEvictedThrough time.Time `json:"coverage_evicted_through"`
@@ -64,6 +67,9 @@ type CoverageSpan struct {
 	Start  time.Time `json:"start"`
 	End    time.Time `json:"end"`
 	Source string    `json:"source,omitempty"`
+	// Legacy marks history loaded before coverage_version was recorded.
+	// Compacted spans retain it if either input contains legacy history.
+	Legacy bool `json:"legacy,omitempty"`
 	// StallAfter records the exact unavailable interval following this span.
 	StallAfter     *CoverageStall `json:"stall_after,omitempty"`
 	ShortStalls    uint64         `json:"short_stalls,omitempty"`
@@ -77,6 +83,8 @@ type CoverageStall struct {
 
 // Short stalls retain exact intervals until the span bound requires compaction.
 const shortStallThreshold = time.Second
+
+const coverageVersion = 1
 
 type pendingStall struct {
 	Start, End     time.Time
@@ -173,6 +181,12 @@ func OpenStore(c Config) (*Store, error) {
 		s.State.Entries = map[string]*Entry{}
 		s.State.Signers = map[string]SignerEntry{}
 	}
+	if s.State.CoverageVersion == 0 {
+		for i := range s.State.Coverage {
+			s.State.Coverage[i].Legacy = true
+		}
+		s.State.CoverageVersion = coverageVersion
+	}
 	s.prune(time.Now())
 	return s, nil
 }
@@ -181,6 +195,9 @@ func OpenStore(c Config) (*Store, error) {
 func (s *Store) validateState() error {
 	st := s.State
 	bad := func() error { return errors.New("invalid structure, count or field") }
+	if st.CoverageVersion < 0 || st.CoverageVersion > coverageVersion {
+		return bad()
+	}
 	if st.Entries == nil || st.Signers == nil || len(st.Entries) > s.Config.MaxEntries || len(st.Events) > s.Config.MaxEntries || len(st.Signers) > s.Config.MaxEntries || len(st.Coverage) > s.Config.MaxEntries || len(st.Parser.Samples) > SampleLimit {
 		return bad()
 	}

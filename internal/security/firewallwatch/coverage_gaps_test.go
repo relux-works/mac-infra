@@ -239,7 +239,7 @@ func TestCoverageCompleteWindowControl(t *testing.T) {
 	}
 }
 
-// An actual pre-change JSON layout loads unchanged; untyped historical gaps gain the default not_running kind.
+// An actual pre-change JSON layout still loads; untyped historical gaps remain unknown.
 func TestCoverageOldFormatState(t *testing.T) {
 	c := testConfig(t)
 	c.RetentionDays = 3650
@@ -258,7 +258,7 @@ func TestCoverageOldFormatState(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)
-	requireGap(t, s.Split(start, start.Add(time.Hour)).Window, GapNotRunning, start.Add(10*time.Minute), start.Add(11*time.Minute))
+	requireGap(t, s.Split(start, start.Add(time.Hour)).Window, GapLegacyUnknown, start.Add(10*time.Minute), start.Add(11*time.Minute))
 	if s.State.Health != (RunHealth{}) || !s.State.CoverageEvictedThrough.IsZero() {
 		t.Fatal("new fields did not default safely")
 	}

@@ -101,6 +101,7 @@ func compactCoverage(spans []CoverageSpan, active map[string]*SourceCoverage) []
 			if stall != nil && stall.From.Equal(prev.End) && stall.To.Equal(v.Start) && stall.To.Sub(stall.From) < shortStallThreshold {
 				prev.End = v.End
 				prev.StallAfter = v.StallAfter
+				prev.Legacy = prev.Legacy || v.Legacy
 				prev.ShortStalls = addCount(addCount(prev.ShortStalls, v.ShortStalls), 1)
 				prev.ShortStalledNS = addNS(addNS(prev.ShortStalledNS, v.ShortStalledNS), int64(stall.To.Sub(stall.From)))
 				continue
