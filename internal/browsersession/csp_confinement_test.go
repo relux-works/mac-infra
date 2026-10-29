@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/relux-works/mac-infra/internal/testhang"
 )
 
 const reviewEscape = `0); })(), (++globalThis.__runs), (() => { const location={origin:"https://example.com"}; const __macGuard="works.relux.mac-infra/browser-session-guard/v1"; const __macValue=(42`
@@ -168,7 +170,7 @@ func TestCSPCheckerExactFrameAndCleanup(t *testing.T) {
 			if err := os.WriteFile(checkerPath, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			checker := expressionSyntaxChecker{path: checkerPath, timeout: testHangGuard(t)}
+			checker := expressionSyntaxChecker{path: checkerPath, timeout: testhang.For(t, cspCheckerDrain)}
 			const source = "document.title // no newline"
 			checked := ""
 			wrapped, err := wrapJavaScript(source, "https://example.com", func(frame string) error { checked = frame; return checker.check(frame) })

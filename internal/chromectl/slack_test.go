@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/relux-works/mac-infra/internal/browsersession"
+	"github.com/relux-works/mac-infra/internal/testhang"
 )
 
 func TestDecodeSlackReadRequestUsesCompiledReadAllowlistAndBoundedArguments(t *testing.T) {
@@ -543,6 +545,7 @@ func TestSlackReadProductionPathAtResponseCeilingMeetsCostBound(t *testing.T) {
 	}
 
 	osa := writeSlackFakeOsa(t, slackEnvelope(t, "started", ""), slackEnvelope(t, "ok", response), t.TempDir())
+	warmFreshExecutable(t, osa)
 	request := SlackReadRequest{Version: SlackReadVersion, Method: "auth.test", Args: json.RawMessage(`{}`)}
 	type outcome struct {
 		result SlackReadResult
@@ -591,6 +594,7 @@ func TestSlackReadProductionPathSanitizesKeyAtResponseCeilingWithinCostBound(t *
 	}
 
 	osa := writeSlackFakeOsa(t, slackEnvelope(t, "started", ""), slackEnvelope(t, "ok", response), t.TempDir())
+	warmFreshExecutable(t, osa)
 	request := SlackReadRequest{Version: SlackReadVersion, Method: "auth.test", Args: json.RawMessage(`{}`)}
 	type outcome struct {
 		result SlackReadResult
@@ -743,6 +747,22 @@ func slackEnvelope(t *testing.T, outcome, response string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// warmFreshExecutable runs a just-written fake once, outside any cost bound.
+// macOS assesses a new executable on its first exec, queued system-wide, which
+// under full-suite load can take seconds (BUG-261029-zl7l9q); a cost bound must
+// measure the code under test, not that assessment. The run's output is ignored.
+func warmFreshExecutable(t *testing.T, path string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testhang.For(t, 0))
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path)
+	cmd.Stdin = strings.NewReader("")
+	_ = cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("warming %s hung", path)
+	}
 }
 
 func writeSlackFakeOsa(t *testing.T, start, poll, captureDir string) string {

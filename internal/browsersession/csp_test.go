@@ -9,7 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/relux-works/mac-infra/internal/testhang"
 )
 
 const jscPath = "/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc"
@@ -36,26 +37,32 @@ func runJSCOutput(t *testing.T, program string) (string, error) {
 	if err := os.WriteFile(path, []byte(program), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), testHangGuard(t))
+	ctx, cancel := context.WithTimeout(context.Background(), testhang.For(t, cspCheckerDrain))
 	defer cancel()
 	out, err := exec.CommandContext(ctx, jscPath, path).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 
-// testHangGuard bounds a helper process in a test only to catch a real hang.
-// macOS assesses each newly written executable on its first exec, queued
-// system-wide, so under full-suite load a healthy helper can take far longer
-// than a fixed wall time (BUG-261029-zl7l9q). The bound follows the test
-// binary's own -timeout and keeps a 30s margin for reporting.
-func testHangGuard(t *testing.T) time.Duration {
-	deadline, ok := t.Deadline()
-	if !ok {
-		return 5 * time.Minute
+// cspCheckerDrain is the time reserved after stopping a checker: the jsc
+// checker and the fake checkers start no child that keeps their pipes open.
+const cspCheckerDrain = 0
+
+// A hanging syntax checker in a test binary with -timeout 4s is reported by the test, not by the binary's timeout panic.
+func TestCSPCheckerHangReportedBeforeBinaryDeadline(t *testing.T) {
+	if os.Getenv("BROWSERSESSION_HANG_CHILD") == "1" {
+		path := filepath.Join(t.TempDir(), "checker")
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nwhile :; do :; done\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := (expressionSyntaxChecker{path: path, timeout: testhang.For(t, cspCheckerDrain)}).check("1")
+		t.Fatalf("browser checker stopped by the hang guard: %v", err)
 	}
-	if left := time.Until(deadline) - 30*time.Second; left > 10*time.Second {
-		return left
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCSPCheckerHangReportedBeforeBinaryDeadline$", "-test.timeout=4s", "-test.count=1")
+	cmd.Env = append(os.Environ(), "BROWSERSESSION_HANG_CHILD=1")
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "browser checker stopped by the hang guard") || strings.Contains(string(out), "panic: test timed out") {
+		t.Fatalf("hang near the binary deadline was not reported by the test:\n%s", out)
 	}
-	return 10 * time.Second
 }
 
 // Claim: the fallback adds no dynamic code evaluation and places the source once, after the origin refusal.

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/relux-works/mac-infra/internal/testhang"
 )
 
 // F1: the reviewer's heredoc body cannot forge an approved stage; a real pinned stage still works.
@@ -341,8 +343,7 @@ exec /usr/bin/find "$@"
 `, 0700)
 	// Substitute only fixed absolute guest paths, never interpolate fixture input into shell code.
 	script = strings.NewReplacer("/src", filepath.Join(root, "src"), "/work", filepath.Join(root, "work"), "/tmp", filepath.Join(root, "tmp"), "/out", filepath.Join(root, "out")).Replace(script)
-	deadline, hasDeadline := t.Deadline()
-	guard := fixtureHangGuard(deadline, hasDeadline, time.Now())
+	guard := testhang.For(t, fixtureWaitDelay)
 	start := time.Now()
 	out, hung, err := runGuestFixture(guard, script, append(os.Environ(), "PATH="+filepath.Join(root, "bin")+":/usr/bin:/bin", "FAKE_MODE="+mode,
 		"FAKE_SRC="+filepath.Join(root, "src"), "FAKE_WORK="+filepath.Join(root, "work")))
@@ -352,77 +353,31 @@ exec /usr/bin/find "$@"
 	return root, string(out), err
 }
 
-// fixtureHangGuard is how long one guest fixture script may run. It only
-// catches a real hang. macOS assesses each newly written shim script on its
-// first exec (about 0.3s on an idle host, queued system-wide), so under
-// full-suite load a healthy script can take far longer than any fixed wall
-// time. The bound therefore follows the test binary's own -timeout, keeping a
-// margin so this test, not the test-binary panic, reports the hang.
-func fixtureHangGuard(deadline time.Time, hasDeadline bool, now time.Time) time.Duration {
-	const (
-		noDeadline = 5 * time.Minute
-		margin     = 30 * time.Second
-		floor      = 10 * time.Second
-	)
-	if !hasDeadline {
-		return noDeadline
-	}
-	if left := deadline.Sub(now) - margin; left > floor {
-		return left
-	}
-	return floor
-}
+// fixtureWaitDelay bounds how long a stopped fixture's children may hold its
+// output pipe; testhang.For reserves it inside the test binary's deadline.
+const fixtureWaitDelay = 2 * time.Second
 
 // runGuestFixture runs a guest fixture script under /bin/sh with the given
-// hang guard and reports whether the guard stopped it. WaitDelay keeps a
-// stopped script's children from holding the output pipe open indefinitely.
+// hang guard and reports whether the guard stopped it.
 func runGuestFixture(guard time.Duration, script string, env []string) ([]byte, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), guard)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script, "fixture", "test")
 	cmd.Env = env
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = fixtureWaitDelay
 	out, err := cmd.CombinedOutput()
 	return out, ctx.Err() != nil, err
 }
 
-// The guard follows the test binary's deadline instead of a fixed wall time:
-// it is never the old 10s bound while the binary has more than 40s left, it
-// keeps a 30s reporting margin, and it falls back to 5m or a 10s floor.
-func TestFixtureHangGuardFollowsTestDeadline(t *testing.T) {
-	now := time.Date(2026, 10, 29, 8, 0, 0, 0, time.UTC)
-	for _, c := range []struct {
-		name        string
-		left        time.Duration
-		hasDeadline bool
-		want        time.Duration
-	}{
-		{"go test default 10m", 10 * time.Minute, true, 9*time.Minute + 30*time.Second},
-		{"just above the floor", 41 * time.Second, true, 11 * time.Second},
-		{"nearly out of time", 20 * time.Second, true, 10 * time.Second},
-		{"already past the deadline", -time.Second, true, 10 * time.Second},
-		{"no deadline (-timeout 0)", 0, false, 5 * time.Minute},
-	} {
-		if got := fixtureHangGuard(now.Add(c.left), c.hasDeadline, now); got != c.want {
-			t.Errorf("%s: guard %s, want %s", c.name, got, c.want)
-		}
-	}
-}
-
-// BUG-261029-zl7l9q witness: a healthy fixture slower than the old fixed 10s
-// bound (as under full-suite load) finishes under the deadline-based guard.
-// Limit: the slowness is simulated by sleep, not by real exec assessment.
+// BUG-261029-zl7l9q witness: a healthy fixture slower than the old fixed 10s bound finishes (slowness simulated by sleep).
 func TestGuestFixtureSlowScriptFinishes(t *testing.T) {
-	deadline, hasDeadline := t.Deadline()
-	out, hung, err := runGuestFixture(fixtureHangGuard(deadline, hasDeadline, time.Now()), "sleep 11; echo finished", os.Environ())
+	out, hung, err := runGuestFixture(testhang.For(t, fixtureWaitDelay), "sleep 11; echo finished", os.Environ())
 	if hung || err != nil || strings.TrimSpace(string(out)) != "finished" {
 		t.Fatalf("slow healthy fixture was stopped: hung=%v err=%v out=%q", hung, err, out)
 	}
 }
 
-// A real hang is still stopped and reported promptly, including when a child
-// of the stopped shell holds the output pipe; a quick script under the same
-// short guard is the control that the guard does not stop everything.
+// A hang is stopped promptly even when a child holds the pipe; a quick script under the same guard is not stopped.
 func TestGuestFixtureHangIsStopped(t *testing.T) {
 	start := time.Now()
 	_, hung, _ := runGuestFixture(300*time.Millisecond, "sleep 30; echo unreachable", os.Environ())
@@ -432,6 +387,21 @@ func TestGuestFixtureHangIsStopped(t *testing.T) {
 	out, hung, err := runGuestFixture(300*time.Millisecond, "echo quick", os.Environ())
 	if hung || err != nil || strings.TrimSpace(string(out)) != "quick" {
 		t.Fatalf("quick fixture stopped by the guard: hung=%v err=%v out=%q", hung, err, out)
+	}
+}
+
+// A hanging fixture in a test binary with -timeout 6s is reported by the fixture, not by the binary's timeout panic.
+func TestGuestFixtureHangReportedBeforeBinaryDeadline(t *testing.T) {
+	if os.Getenv("NETNONE_HANG_CHILD") == "1" {
+		shellFixtureRoot(t, "sleep 30\n", "")
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGuestFixtureHangReportedBeforeBinaryDeadline$", "-test.timeout=6s", "-test.count=1")
+	cmd.Env = append(os.Environ(), "NETNONE_HANG_CHILD=1")
+	cmd.WaitDelay = fixtureWaitDelay
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "guest fixture hung: stopped by the") || strings.Contains(string(out), "panic: test timed out") {
+		t.Fatalf("hang near the binary deadline was not reported by the fixture:\n%s", out)
 	}
 }
 
