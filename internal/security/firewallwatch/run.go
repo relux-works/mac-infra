@@ -241,6 +241,21 @@ func (s *Store) collect(ctx context.Context, cl *Classifier, it Item) bool {
 	}, func() bool { return cl.shuttingDown(ctx) })) > 0
 }
 
+// collectSample observes one nettop sample. The tick saves once after it;
+// emitted rows of a long sample (slow classification) are saved at
+// save_interval meanwhile, not once per row, because every save rewrites the
+// whole state (BUG-261029-do8v1i).
+func collectSample(items []Item, collect func(Item) bool, flush func(emitted bool) error) error {
+	for _, it := range items {
+		if collect(it) {
+			if e := flush(false); e != nil {
+				return e
+			}
+		}
+	}
+	return nil
+}
+
 func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	if e := safeDir(c.StateDir); e != nil {
 		return e
@@ -351,14 +366,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		s.State.NettopError = ""
 		items, unknown := ParseNettop(output.String())
 		s.State.NettopUnrecognized += unknown
-		for _, it := range items {
-			if collect(it) {
-				if e := save(); e != nil {
-					return e
-				}
-			}
-		}
-		return nil
+		return collectSample(items, collect, flush)
 	}
 	tick := time.NewTicker(duration(c.NettopInterval))
 	defer tick.Stop()

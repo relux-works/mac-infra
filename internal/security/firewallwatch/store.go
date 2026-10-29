@@ -317,7 +317,7 @@ func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []
 // review r1). nil means never shutting down.
 func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, shuttingDown func() bool) []Event {
 	it = cleanItem(it)
-	s.prune(now)
+	s.pruneObservations(now)
 	k := key(it)
 	entry, exists := s.State.Entries[k]
 	if !exists {
@@ -387,17 +387,39 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 		it.Spike = true
 		add(it, s.classify(it, classify))
 	}
-	s.prune(now)
+	s.pruneObservations(now)
 	return events
 }
+
+// prune applies retention and max_entries to all persisted state.
 func (s *Store) prune(now time.Time) {
+	s.pruneObservations(now)
+	s.pruneCoverage(now.Add(-time.Duration(s.Config.RetentionDays) * 24 * time.Hour))
+}
+
+// pruneObservations runs before and after every observation, so at the
+// max_entries cap it must not sort or copy the whole state (BUG-261029-do8v1i):
+// one entry over the cap is evicted by a scan, and time-ordered events are
+// trimmed in place. The result equals the sorting path, which still handles
+// larger overflows and out-of-order events. Coverage spans change only in Save
+// and BeginSourceCoverage, so Save's prune bounds them.
+func (s *Store) pruneObservations(now time.Time) {
 	cutoff := now.Add(-time.Duration(s.Config.RetentionDays) * 24 * time.Hour)
 	for k, v := range s.State.Entries {
 		if v.LastSeen.Before(cutoff) {
 			delete(s.State.Entries, k)
 		}
 	}
-	if len(s.State.Entries) > s.Config.MaxEntries {
+	if len(s.State.Entries) == s.Config.MaxEntries+1 {
+		oldest, found := "", false
+		var at time.Time
+		for k, v := range s.State.Entries {
+			if !found || v.LastSeen.Before(at) || (v.LastSeen.Equal(at) && k < oldest) {
+				oldest, at, found = k, v.LastSeen, true
+			}
+		}
+		delete(s.State.Entries, oldest)
+	} else if len(s.State.Entries) > s.Config.MaxEntries {
 		keys := make([]string, 0, len(s.State.Entries))
 		for k := range s.State.Entries {
 			keys = append(keys, k)
@@ -418,23 +440,41 @@ func (s *Store) prune(now time.Time) {
 			s.State.EvictedThrough = e.TS
 		}
 	}
-	events := s.State.Events[:0]
-	for _, e := range s.State.Events {
-		if !e.TS.Before(cutoff) {
-			events = append(events, e)
-		} else {
-			evicted(e)
+	if eventsSorted(s.State.Events) {
+		// Expired and surplus events form a prefix. Reslicing keeps the backing
+		// array, which the next growing append replaces.
+		events, start := s.State.Events, 0
+		for start < len(events) && events[start].TS.Before(cutoff) {
+			evicted(events[start])
+			start++
 		}
-	}
-	sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
-	if len(events) > s.Config.MaxEntries {
-		for _, e := range events[:len(events)-s.Config.MaxEntries] {
-			evicted(e)
+		if surplus := len(events) - start - s.Config.MaxEntries; surplus > 0 {
+			for _, e := range events[start : start+surplus] {
+				evicted(e)
+			}
+			start += surplus
 		}
-		events = events[len(events)-s.Config.MaxEntries:]
+		if s.State.Events = events[start:]; len(s.State.Events) == 0 {
+			s.State.Events = nil
+		}
+	} else {
+		events := s.State.Events[:0]
+		for _, e := range s.State.Events {
+			if !e.TS.Before(cutoff) {
+				events = append(events, e)
+			} else {
+				evicted(e)
+			}
+		}
+		sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
+		if len(events) > s.Config.MaxEntries {
+			for _, e := range events[:len(events)-s.Config.MaxEntries] {
+				evicted(e)
+			}
+			events = events[len(events)-s.Config.MaxEntries:]
+		}
+		s.State.Events = append([]Event(nil), events...)
 	}
-	s.State.Events = append([]Event(nil), events...)
-	s.pruneCoverage(cutoff)
 	// Keep executable signature cache bounded as well; evicted paths may be inspected again.
 	if len(s.State.Signers) > s.Config.MaxEntries {
 		keys := make([]string, 0, len(s.State.Signers))
@@ -453,6 +493,15 @@ func (s *Store) prune(now time.Time) {
 		}
 	}
 }
+func eventsSorted(events []Event) bool {
+	for i := 1; i < len(events); i++ {
+		if events[i].TS.Before(events[i-1].TS) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Store) write(path string, data []byte) error {
 	if s.atomicWrite != nil {
 		return s.atomicWrite(path, data)

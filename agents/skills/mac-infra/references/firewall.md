@@ -440,8 +440,12 @@ Choose a short absolute path: Darwin UNIX socket path names must fit in 103 byte
 `state.json`, `events-YYYY-MM-DD.jsonl`, and `new-events.flag` are `0600`.
 Writes use same-directory temporary files and rename. State is authoritative;
 daily projections are rewritten atomically only when their events changed,
-recovering projections after an interrupted write. New-key, spike and escalation
-events save immediately. Silent updates mark state dirty, then save at
+recovering projections after an interrupted write. ALF and netfilter new-key,
+spike and escalation events save immediately. Those of a nettop sample save once
+when the sample ends, or at `save_interval` while a slow sample is still being
+classified, because every save rewrites the whole state. Retention and
+`max_entries` pruning runs around every observation without sorting or copying
+time-ordered state. Silent updates mark state dirty, then save at
 `save_interval`, the next nettop tick if earlier, and shutdown. The flag contains
 the latest event RFC3339 timestamp. A per-directory advisory lock is acquired
 before loading state and refuses concurrent collectors.
