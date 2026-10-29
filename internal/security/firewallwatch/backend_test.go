@@ -49,7 +49,7 @@ func init() {
 	if e != nil {
 		os.Exit(14)
 	}
-	if os.WriteFile(filepath.Join(dir, "child.pid"), []byte(strconv.Itoa(os.Getpid())), 0600) != nil {
+	if publishFixturePID(filepath.Join(dir, "child.pid"), os.Getpid()) != nil {
 		os.Exit(15)
 	}
 	_ = http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,6 +90,58 @@ func fixtureBackend(t *testing.T) Config {
 	}
 	return c
 }
+
+// publishFixturePID makes the fixture's PID visible only once it is complete:
+// it writes a temporary file in the same directory and renames it into place.
+// A direct os.WriteFile creates the file empty before writing it, so waitPID
+// could read and reject empty contents (BUG-261029-2s0frz).
+func publishFixturePID(path string, pid int) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".child.pid.*")
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(strconv.Itoa(pid))
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), path)
+	}
+	if err != nil {
+		os.Remove(f.Name())
+	}
+	return err
+}
+
+// BUG-261029-2s0frz witness: a reader polling during publication never sees an empty PID file
+// (with a direct os.WriteFile, about a third of 3000 rounds did).
+func TestFixturePIDPublishIsAtomic(t *testing.T) {
+	const rounds = 500
+	empty := 0
+	for range rounds {
+		path := filepath.Join(t.TempDir(), "child.pid")
+		done := make(chan error, 1)
+		go func() { done <- publishFixturePID(path, 4242424) }()
+		for {
+			if b, err := os.ReadFile(path); err == nil {
+				if string(b) != "4242424" {
+					empty++
+				}
+				break
+			}
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".child.pid.*")); len(matches) != 0 {
+			t.Fatalf("temporary PID files left behind: %v", matches)
+		}
+	}
+	if empty != 0 {
+		t.Fatalf("reader saw incomplete PID contents in %d of %d rounds", empty, rounds)
+	}
+}
+
 func waitPID(t *testing.T, dir string) int {
 	t.Helper()
 	// An upper bound only: a freshly built fixture binary can take seconds to exec
