@@ -33,6 +33,10 @@ var reviewedNativeInputs = []string{
 	"internal/keyvault/security_darwin.h",
 	"internal/maccore/trust_acl_darwin.go",
 	"internal/maccore/vpn_core_acl_darwin.go",
+	"internal/toolsecret/native_darwin.go",
+	"internal/toolsecret/native_darwin.m",
+	"internal/toolsecret/testdata/fixture.m",
+	"internal/toolsecretprobe/native_darwin.go",
 }
 
 func nativeSuffix(name string) bool {
