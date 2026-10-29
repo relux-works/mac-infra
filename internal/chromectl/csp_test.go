@@ -25,16 +25,17 @@ func TestSessionCSPRetryWithFakeOsaScript(t *testing.T) {
 				want          error
 				secondError   bool
 			}{
-				"normal":            {first: cspOK, source: "document.readyState", calls: 1},
-				"csp":               {first: cspBlocked, source: "document.readyState", calls: 2},
-				"statements":        {first: cspBlocked, source: "var x=1; x", calls: 2, want: browsersession.ErrCSPExpression, secondError: true},
-				"page-error":        {first: "PAGE_ERROR", source: "document.readyState", calls: 1},
-				"caller-eval-error": {first: "EvalError", source: "(() => { throw new EvalError(); })()", calls: 1},
-				"malformed":         {first: "bad-json", source: "document.readyState", calls: 1, want: browsersession.ErrUnreadableResponse},
-				"empty":             {source: "document.readyState", calls: 1, want: browsersession.ErrUnreadableResponse},
-				"missing-sentinel":  {first: `{"outcome":"eval-blocked"}`, source: "42", calls: 1, want: browsersession.ErrUnreadableResponse},
-				"wrong-origin":      {first: strings.Replace(cspBlocked, cspOrigin, "https://wrong.example", 1), source: "42", calls: 1, want: browsersession.ErrOriginMismatch},
-				"blocked-token":     {first: cspOK, source: "document.cookie", calls: 0, want: browsersession.ErrSensitiveJavaScript},
+				"normal":              {first: cspOK, source: "document.readyState", calls: 1},
+				"csp":                 {first: cspBlocked, source: "document.readyState", calls: 2},
+				"fallback-page-error": {first: cspBlocked, source: "42", calls: 2, want: browsersession.ErrCSPExpression, secondError: true},
+				"statements":          {first: cspBlocked, source: "var x=1; x", calls: 1, want: browsersession.ErrCSPExpression, secondError: true},
+				"page-error":          {first: "PAGE_ERROR", source: "document.readyState", calls: 1},
+				"caller-eval-error":   {first: "EvalError", source: "(() => { throw new EvalError(); })()", calls: 1},
+				"malformed":           {first: "bad-json", source: "document.readyState", calls: 1, want: browsersession.ErrUnreadableResponse},
+				"empty":               {source: "document.readyState", calls: 1, want: browsersession.ErrUnreadableResponse},
+				"missing-sentinel":    {first: `{"outcome":"eval-blocked"}`, source: "42", calls: 1, want: browsersession.ErrUnreadableResponse},
+				"wrong-origin":        {first: strings.Replace(cspBlocked, cspOrigin, "https://wrong.example", 1), source: "42", calls: 1, want: browsersession.ErrOriginMismatch},
+				"blocked-token":       {first: cspOK, source: "document.cookie", calls: 0, want: browsersession.ErrSensitiveJavaScript},
 			} {
 				t.Run(name, func(t *testing.T) {
 					dir := t.TempDir()
@@ -109,7 +110,7 @@ fi`)
 						}
 					}
 					if tc.calls == 2 && !tc.secondError {
-						if !strings.Contains(strings.ReplaceAll(string(data), `\n`, "\n"), "const __macValue = (\n"+tc.source+"\n") {
+						if !strings.Contains(strings.NewReplacer(`\n`, "\n", `\u003e`, ">").Replace(string(data)), "const __macValue = (() => { return (\n"+tc.source+"\n") {
 							t.Fatalf("fallback did not splice source: %s", data)
 						}
 					}

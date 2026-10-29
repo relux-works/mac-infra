@@ -53,6 +53,24 @@ reports the single-expression requirement and returns nonzero for syntax or
 runtime failures. Exact IDs, sentinel verification, and the secret-token guard
 apply on both routes.
 
+Before the fallback is dispatched, the system JavaScriptCore shell checks the
+exact inner-function frame in a private temporary file (0600, removed after
+checking), with a two-second timeout. Script syntax alone cannot prove
+confinement: balanced source can close a function and open another one. A local
+compile-only `Function` check therefore also parses the intended inner body;
+the resulting function is never called. No caller code runs in this checker,
+and the browser fallback contains no eval or Function constructor. A missing,
+failed, or timed-out checker refuses the fallback with `syntax check unavailable`;
+invalid source reports `source is not confined to one expression`.
+
+The origin check and result envelope stay in the outer function; caller text
+runs only inside the checked inner function after the origin check. Declarations
+cannot hoist into the guard's scope. Some text containing statements may parse
+inside that inner body, but statements following its initial return are
+unreachable; use an IIFE for intentional statements. JavaScriptCore is Safari's
+engine; for Chrome (V8) it is a conservative syntax stand-in, so V8-only syntax
+may be refused on the fallback. The eval route does not need this checker.
+
 `--file` is equivalent to `--script` and goes through the same guard:
 
 ```bash

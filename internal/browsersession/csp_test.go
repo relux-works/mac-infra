@@ -123,7 +123,7 @@ func TestJavaScriptCoreCSPRetryRunsSourceOnce(t *testing.T) {
 	}
 }
 
-// Claim: real JavaScript syntax failures on the fallback produce the expression diagnostic, with no third dispatch.
+// Claim: real syntax failures produce the expression diagnostic before any fallback dispatch.
 func TestJavaScriptCoreCSPRequiresExpression(t *testing.T) {
 	for _, source := range []string{`var x=1; x`, `document.readyState;`} {
 		t.Run(source, func(t *testing.T) {
@@ -131,12 +131,9 @@ func TestJavaScriptCoreCSPRequiresExpression(t *testing.T) {
 			_, err := ExecuteJavaScript(source, "https://example.com", func(wrapped string) (string, error) {
 				calls++
 				out, err := runJSCOutput(t, pageStub+blockedEvalStub+"\nprint("+wrapped+");")
-				if calls == 2 && (err == nil || !strings.Contains(out, "SyntaxError")) {
-					t.Fatalf("expected a parse failure, got %q, %v", out, err)
-				}
 				return out, err
 			})
-			if calls != 2 || !errors.Is(err, ErrCSPExpression) {
+			if calls != 1 || !errors.Is(err, ErrCSPExpression) {
 				t.Fatalf("calls=%d err=%v", calls, err)
 			}
 		})

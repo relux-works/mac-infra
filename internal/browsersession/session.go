@@ -102,16 +102,16 @@ func GuardJavaScript(source string) error {
 // evaluation. ParseJavaScriptResult refuses any response that does not carry the
 // matching sentinel, so an empty or malformed automation response cannot pass.
 func WrapJavaScript(source, expectedOrigin string) (string, error) {
-	return wrapJavaScript(source, expectedOrigin, false)
+	return wrapJavaScript(source, expectedOrigin, nil)
 }
 
-// WrapJavaScriptExpression embeds a single expression without string-to-code
-// evaluation. Statements must be expressed as an IIFE on this CSP-safe route.
+// WrapJavaScriptExpression validates and confines the source to an inner
+// function, without string-to-code evaluation in the dispatched page script.
 func WrapJavaScriptExpression(source, expectedOrigin string) (string, error) {
-	return wrapJavaScript(source, expectedOrigin, true)
+	return wrapJavaScript(source, expectedOrigin, checkExpressionFrame)
 }
 
-func wrapJavaScript(source, expectedOrigin string, expression bool) (string, error) {
+func wrapJavaScript(source, expectedOrigin string, checkFrame func(string) error) (string, error) {
 	if err := GuardJavaScript(source); err != nil {
 		return "", err
 	}
@@ -132,8 +132,12 @@ func wrapJavaScript(source, expectedOrigin string, expression bool) (string, err
     return JSON.stringify({__macBrowserSessionGuard:__macGuard,outcome:"eval-blocked",origin:String(location.origin || ""),readyState:String(document.readyState || ""),value:""});
   }
   const __macValue = eval(%s);`, string(sourceJSON))
-	if expression {
-		evaluation = "\n  const __macValue = (\n" + source + "\n  );"
+	if checkFrame != nil {
+		frame := expressionFrame(source)
+		if err := checkFrame(frame); err != nil {
+			return "", err
+		}
+		evaluation = "\n  const __macValue = " + frame
 	}
 	return fmt.Sprintf(`(() => {
   const __macGuard = %s;
@@ -163,6 +167,11 @@ func wrapJavaScript(source, expectedOrigin string, expression bool) (string, err
 // ExecuteJavaScript retries exactly once, only after a verified eval-blocked
 // envelope from a probe that ran no caller code. Each dispatch repeats the guard.
 func ExecuteJavaScript(source, expectedOrigin string, execute func(string) (string, error)) (ExecutionResult, error) {
+	return executeJavaScript(source, expectedOrigin, execute, checkExpressionFrame)
+}
+
+// The checker is passed per invocation for tests; production always uses JSC.
+func executeJavaScript(source, expectedOrigin string, execute func(string) (string, error), checkFrame func(string) error) (ExecutionResult, error) {
 	wrapped, err := WrapJavaScript(source, expectedOrigin)
 	if err != nil {
 		return ExecutionResult{}, err
@@ -175,7 +184,7 @@ func ExecuteJavaScript(source, expectedOrigin string, execute func(string) (stri
 	if !errors.Is(err, ErrEvalBlocked) {
 		return result, err
 	}
-	wrapped, err = WrapJavaScriptExpression(source, expectedOrigin)
+	wrapped, err = wrapJavaScript(source, expectedOrigin, checkFrame)
 	if err != nil {
 		return ExecutionResult{}, err
 	}
