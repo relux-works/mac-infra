@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -71,51 +72,41 @@ func TestReviewFallbackRenameCrash(t *testing.T) {
 // The coverage tail must retain a compaction that absorbs the snapshot's
 // anchor into a historical span starting before that anchor.
 //
-// Keeper's adaptation, after r2 finding 2: observations no longer compact
-// coverage, so between snapshots the runtime holds the exact spans, over the
-// cap. Its view after a heartbeat and a crash must equal its view after a full
-// snapshot: in every window, both directions of truncated, the gaps and the
-// coalesced counters agree, including the clean window at the running tail.
+// Keeper's adaptation, after r3 finding 1: observations never compact
+// coverage between snapshots, and readers never compact it either, so a
+// reader after a heartbeat and a crash sees exactly the running watcher's
+// coverage: in every window both directions of truncated, the gaps and the
+// coalesced counters agree, and the spans are equal in start order.
 func TestReviewHeartbeatCompaction(t *testing.T) {
-	build := func(t *testing.T) (*Store, time.Time) {
-		s := pruneFixture(t, 3)
-		t0 := time.Now().Add(-time.Hour).Round(0)
-		s.BeginCoverage(t0)
-		alf := s.Coverage("")
-		alf.StallCoverage(t0.Add(time.Second))
-		alf.ResumeCoverage(t0.Add(1100 * time.Millisecond))
-		if e := s.Save(t0.Add(2 * time.Second)); e != nil {
-			t.Fatal(e)
-		}
-		alf.StallCoverage(t0.Add(3 * time.Second))
-		alf.ResumeCoverage(t0.Add(3100 * time.Millisecond))
-		alf.StallCoverage(t0.Add(4 * time.Second))
-		alf.ResumeCoverage(t0.Add(4100 * time.Millisecond))
-		s.applyCollectors(t0.Add(5 * time.Second))
-		s.pruneItems(s.refs.with(t0.Add(5 * time.Second))) // an over-cap observation's prune
-		return s, t0
-	}
-	beat, t0 := build(t)
-	if e := beat.Checkpoint(t0.Add(6 * time.Second)); e != nil {
+	s := pruneFixture(t, 3)
+	t0 := time.Now().Add(-time.Hour).Round(0)
+	s.BeginCoverage(t0)
+	alf := s.Coverage("")
+	alf.StallCoverage(t0.Add(time.Second))
+	alf.ResumeCoverage(t0.Add(1100 * time.Millisecond))
+	if e := s.Save(t0.Add(2 * time.Second)); e != nil {
 		t.Fatal(e)
 	}
-	snap, t1 := build(t)
-	if e := snap.Save(t1.Add(6 * time.Second)); e != nil {
+	alf.StallCoverage(t0.Add(3 * time.Second))
+	alf.ResumeCoverage(t0.Add(3100 * time.Millisecond))
+	alf.StallCoverage(t0.Add(4 * time.Second))
+	alf.ResumeCoverage(t0.Add(4100 * time.Millisecond))
+	s.applyCollectors(t0.Add(5 * time.Second))
+	s.pruneItems(s.refs.with(t0.Add(5 * time.Second))) // an over-cap observation's prune
+	if e := s.Checkpoint(t0.Add(6 * time.Second)); e != nil {
 		t.Fatal(e)
 	}
-	replayed, snapshotted := reopen(t, beat.Config), reopen(t, snap.Config)
-	windows := [][2]time.Duration{{100 * time.Millisecond, 900 * time.Millisecond}, {4200 * time.Millisecond, 5800 * time.Millisecond}, {0, 6 * time.Second}}
+	replayed := reopen(t, s.Config)
+	windows := [][2]time.Duration{{100 * time.Millisecond, 900 * time.Millisecond}, {1200 * time.Millisecond, 2800 * time.Millisecond}, {4200 * time.Millisecond, 5800 * time.Millisecond}, {0, 6 * time.Second}}
 	for _, w := range windows {
-		a := replayed.Split(t0.Add(w[0]), t0.Add(w[1])).Window
-		b := snapshotted.Split(t1.Add(w[0]), t1.Add(w[1])).Window
-		if a.Truncated != b.Truncated || len(a.CoverageGaps) != len(b.CoverageGaps) || a.CoalescedShortStalls != b.CoalescedShortStalls {
-			t.Errorf("window %v: replay truncated=%t gaps=%d coalesced=%+v; snapshot truncated=%t gaps=%d coalesced=%+v", w, a.Truncated, len(a.CoverageGaps), a.CoalescedShortStalls, b.Truncated, len(b.CoverageGaps), b.CoalescedShortStalls)
+		a := s.Split(t0.Add(w[0]), t0.Add(w[1])).Window
+		b := replayed.Split(t0.Add(w[0]), t0.Add(w[1])).Window
+		if a.Truncated != b.Truncated || !reflect.DeepEqual(a.CoverageGaps, b.CoverageGaps) || a.CoalescedShortStalls != b.CoalescedShortStalls {
+			t.Errorf("window %v: runtime truncated=%t gaps=%d coalesced=%+v; replay truncated=%t gaps=%d coalesced=%+v", w, a.Truncated, len(a.CoverageGaps), a.CoalescedShortStalls, b.Truncated, len(b.CoverageGaps), b.CoalescedShortStalls)
 		}
-		for _, g := range a.CoverageGaps {
-			if g.Kind == GapNotRunning {
-				t.Errorf("window %v: replay invented a not_running gap", w)
-			}
-		}
+	}
+	if a, b := canonicalCoverage(s.State.Coverage), canonicalCoverage(replayed.State.Coverage); a != b {
+		t.Fatalf("replayed coverage %s, runtime %s", b, a)
 	}
 }
 
@@ -243,6 +234,11 @@ func TestReviewSnapshotPositiveControls(t *testing.T) {
 
 // Lost last_seen can change count-pressure eviction, causing re-emission
 // without any retention expiry. The uninterrupted execution is the control.
+//
+// Keeper's note (r3 finding 3): the refresh here comes twenty seconds after
+// the snapshot, past save_interval, so a heartbeat appends it and nothing is
+// lost; this is now the durable-refresh control. TestR2UnappendedCapRefresh
+// covers the refresh that is not yet appended.
 func TestReviewReEmitFromCapOrder(t *testing.T) {
 	run := func(crash bool) int {
 		s := pruneFixture(t, 3)

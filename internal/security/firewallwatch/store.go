@@ -136,9 +136,8 @@ type Store struct {
 	journalBytes   int64
 	journalBroken  bool
 	snapOpen       map[string]time.Time
-	// replayActive is the last replayed heartbeat's active sources, used by
-	// OpenStore's prune only.
-	replayActive []string
+	// replayDrop collects the event removals of the records replayed so far.
+	replayDrop map[string]int
 	// journalWrite replaces the append's single write in tests.
 	journalWrite func(*os.File, []byte) error
 }
@@ -279,7 +278,7 @@ func OpenStore(c Config) (*Store, error) {
 		}
 		// Bounds hold only after the prune below: coverage may have grown
 		// past max_entries since the snapshot.
-		if e = s.validateShape(false); e != nil {
+		if e = s.validateShape(false, 0); e != nil {
 			return nil, fmt.Errorf("corrupt state journal: %w", e)
 		}
 		if torn {
@@ -292,16 +291,12 @@ func OpenStore(c Config) (*Store, error) {
 		}
 		s.State.CoverageVersion = coverageVersion
 	}
-	// Replayed coverage is pruned as the watcher's next snapshot would:
-	// sources active at the last heartbeat keep their newest span separate.
-	// The stand-in trackers exist only for this prune; a watcher opening the
-	// store must not extend a crashed run's spans.
-	for _, source := range s.replayActive {
-		s.Coverage(source).covering = true
-	}
-	s.prune(time.Now())
-	s.coverage, s.replayActive = nil, nil
-	if e := s.validateState(); e != nil {
+	// Readers prune entries, events and signers but never coverage: the
+	// watcher leaves coverage exact between snapshots, and a reader must see
+	// the same spans, gaps and truncated verdicts (PR69 review r3). Replayed
+	// coverage can exceed max_entries by at most one heartbeat tail.
+	s.pruneItems(expiryRefs{}.with(time.Now()))
+	if e := s.validateShape(true, journalMaxTailSpans); e != nil {
 		return nil, fmt.Errorf("corrupt state journal: %w", e)
 	}
 	s.markSnapshot()
@@ -309,13 +304,14 @@ func OpenStore(c Config) (*Store, error) {
 }
 
 // validateState runs before pruning or dereferencing any loaded entry.
-func (s *Store) validateState() error { return s.validateShape(true) }
+func (s *Store) validateState() error { return s.validateShape(true, 0) }
 
 // validateShape checks structure and fields, and the max_entries bounds when
-// bounded. A replayed journal is checked unbounded: between snapshots the
-// watcher grows coverage without pruning it, and OpenStore prunes after
+// bounded; coverage may exceed its bound by coverageSlack spans. A replayed
+// journal is first checked unbounded: between snapshots the watcher grows
+// coverage without pruning it, and OpenStore prunes the other items after
 // replay, then checks the bounds.
-func (s *Store) validateShape(bounded bool) error {
+func (s *Store) validateShape(bounded bool, coverageSlack int) error {
 	st := s.State
 	bad := func() error { return errors.New("invalid structure, count or field") }
 	if st.CoverageVersion < 0 || st.CoverageVersion > coverageVersion {
@@ -324,7 +320,7 @@ func (s *Store) validateShape(bounded bool) error {
 	if st.Entries == nil || st.Signers == nil || len(st.Parser.Samples) > SampleLimit {
 		return bad()
 	}
-	if bounded && (len(st.Entries) > s.Config.MaxEntries || len(st.Events) > s.Config.MaxEntries || len(st.Signers) > s.Config.MaxEntries || len(st.Coverage) > s.Config.MaxEntries) {
+	if bounded && (len(st.Entries) > s.Config.MaxEntries || len(st.Events) > s.Config.MaxEntries || len(st.Signers) > s.Config.MaxEntries || len(st.Coverage) > s.Config.MaxEntries+coverageSlack) {
 		return bad()
 	}
 	for k, v := range st.Entries {

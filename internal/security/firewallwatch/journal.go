@@ -19,8 +19,9 @@ import (
 // for each change (BUG-261029-kpyw8s; sysadmin decisions 2026-10-29). Each
 // append is one JSON record on its own line in state-journal.jsonl, followed
 // by a full sync. A record carries every entry and signer that changed or was
-// removed since the previous append, the events added and the resulting event
-// count, so replay reproduces exactly what the watcher held at that append.
+// removed since the previous append, the events added and the identities of
+// the events its prunes removed, so replay reproduces exactly what the watcher
+// held at that append.
 // A snapshot (Save) folds the journal into state.json, records the last
 // folded seq as journal_seq, and only then removes the journal.
 const (
@@ -78,10 +79,6 @@ type heartbeat struct {
 	CoverageEvictedThrough time.Time       `json:"coverage_evicted_through"`
 	Health                 RunHealth       `json:"health"`
 	Coverage               []coverageTail  `json:"coverage"`
-	// Active lists the sources collecting at the heartbeat. A reader prunes
-	// replayed coverage as the watcher's next snapshot would: an active
-	// source's newest span stays separate (PR69 review r2).
-	Active []string `json:"active,omitempty"`
 }
 
 // coverageTail replaces a source's spans that start at or after From.
@@ -106,6 +103,7 @@ type journalDelta struct {
 // unchanged: time, key fields, count, label and reason kind. Two events with
 // the same identity are interchangeable for removal.
 func eventID(e Event) string {
+	eventIDCalls++
 	kind, _ := e.Reason.(string)
 	if kind == "" {
 		raw, _ := json.Marshal(e.Reason)
@@ -123,6 +121,9 @@ func eventID(e Event) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:12])
 }
+
+// eventIDCalls counts identity computations; replay cost tests read it.
+var eventIDCalls int
 
 func (s *Store) eventRemoved(e Event) {
 	s.delta.removedEvents = append(s.delta.removedEvents, eventID(e))
@@ -165,11 +166,6 @@ func (s *Store) heartbeat(now time.Time) (*heartbeat, bool) {
 	st := &s.State
 	st.Updated = now
 	h := &heartbeat{Parser: st.Parser, Netfilter: st.Netfilter, NetfilterError: st.NetfilterError, NettopUnrecognized: st.NettopUnrecognized, BackendHealthy: st.BackendHealthy, Updated: st.Updated, NettopError: st.NettopError, CoverageVersion: st.CoverageVersion, CoverageEvictedThrough: st.CoverageEvictedThrough, Health: st.Health}
-	for _, source := range sortedCoverageSources(s.coverage) {
-		if s.coverage[source].covering {
-			h.Active = append(h.Active, source)
-		}
-	}
 	spans := 0
 	for _, source := range s.coverageSources() {
 		tail := coverageTail{Source: source, From: s.snapOpen[source], Spans: []CoverageSpan{}}
@@ -403,7 +399,25 @@ func (s *Store) replayJournal(f io.Reader) (torn bool, err error) {
 		}
 		s.seq = r.Seq
 	}
+	s.dropEvents()
 	return torn, nil
+}
+
+// dropEvents removes one event per collected removal of its identity.
+func (s *Store) dropEvents() {
+	if len(s.replayDrop) == 0 {
+		return
+	}
+	kept := s.State.Events[:0]
+	for _, e := range s.State.Events {
+		if id := eventID(e); s.replayDrop[id] > 0 {
+			s.replayDrop[id]--
+			continue
+		}
+		kept = append(kept, e)
+	}
+	s.State.Events = kept
+	s.replayDrop = nil
 }
 
 func (s *Store) applyRecord(r journalRecord) error {
@@ -427,28 +441,21 @@ func (s *Store) applyRecord(r journalRecord) error {
 		st.Signers[k] = v
 	}
 	st.Events = append(st.Events, r.Events...)
-	if len(r.RemovedEvents) > 0 {
-		// Each removal drops one event with that identity, as the watcher did.
-		drop := map[string]int{}
-		for _, id := range r.RemovedEvents {
-			drop[id]++
+	// Removals are applied once, after the last record (dropEvents): events
+	// with the same identity are interchangeable, so the order in which the
+	// records removed them does not matter, and each event's identity is
+	// computed once per replay instead of once per record (PR69 review r3).
+	for _, id := range r.RemovedEvents {
+		if s.replayDrop == nil {
+			s.replayDrop = map[string]int{}
 		}
-		kept := st.Events[:0]
-		for _, e := range st.Events {
-			if id := eventID(e); drop[id] > 0 {
-				drop[id]--
-				continue
-			}
-			kept = append(kept, e)
-		}
-		st.Events = kept
+		s.replayDrop[id]++
 	}
 	st.LastEvent, st.EvictedThrough = r.LastEvent, r.EvictedThrough
 	if h := r.Heartbeat; h != nil {
 		st.Parser, st.Netfilter, st.NetfilterError, st.NettopUnrecognized = h.Parser, h.Netfilter, h.NetfilterError, h.NettopUnrecognized
 		st.BackendHealthy, st.Updated, st.NettopError = h.BackendHealthy, h.Updated, h.NettopError
 		st.CoverageVersion, st.CoverageEvictedThrough, st.Health = h.CoverageVersion, h.CoverageEvictedThrough, h.Health
-		s.replayActive = h.Active
 		for _, tail := range h.Coverage {
 			kept := st.Coverage[:0]
 			for _, span := range st.Coverage {

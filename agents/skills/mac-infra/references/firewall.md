@@ -459,7 +459,8 @@ Choose a short absolute path: Darwin UNIX socket path names must fit in 103 byte
 (`state-journal.jsonl`) holds what changed since it, one JSON record per line,
 each append followed by a full sync (BUG-261029-kpyw8s). Every append carries
 all changes since the previous one: each entry and signer that changed or was
-removed, the events added, the watcher's event count and its latest event and
+removed, the events added, the identities of the events its prunes removed
+(time, key fields, count, label and reason kind), and its latest event and
 eviction times. An append is due at once for new-key, spike and escalation
 events of every source, for any change of deny-window state (window start,
 deny count, spike or escalation marks) and for a new or changed signer
@@ -492,8 +493,10 @@ Opening the store (the watcher, `status`, `digest`) opens the journal before
 reading `state.json`, without following symlinks, and checks each opened file
 (a private regular file of the caller, at most one link), so a rotation in
 between still gives a consistent view. It then applies the records after
-`journal_seq` in order, checks the result's structure, prunes it and checks the
-bounds. Only complete lines count: a last line without a newline, or a last
+`journal_seq` in order, checks the result's structure, prunes entries, events
+and signers, and checks the bounds. It never prunes or compacts coverage, so a
+reader sees exactly the watcher's spans, gaps and truncated verdicts; replayed
+coverage may exceed `max_entries` by at most one heartbeat's 256-span tail. Only complete lines count: a last line without a newline, or a last
 line that is not valid JSON, is a torn tail, ignored and counted in
 `health.journal_torn_tail`. Any other malformed line, a seq gap or an unknown
 record type refuses the state as corrupt. Readers never write and never create

@@ -202,14 +202,11 @@ func TestR2EvictedSourceAndPendingCoalescing(t *testing.T) {
 				t.Fatal(e)
 			}
 			got := reopen(t, s.Config)
-			same := &Store{Config: s.Config, State: State{Entries: map[string]*Entry{}, Signers: map[string]SignerEntry{}}}
-			raw, _ := json.Marshal(s.State.Coverage)
-			json.Unmarshal(raw, &same.State.Coverage)
-			same.prune(time.Now())
-			a, _ := json.Marshal(same.State.Coverage)
-			b, _ := json.Marshal(got.State.Coverage)
-			if string(a) != string(b) {
-				t.Fatalf("cap=%d runtime-pruned=%s replay=%s", cap, a, b)
+			// Keeper's adaptation after r3 finding 1: readers do not prune
+			// coverage, so the replay equals the running watcher's coverage.
+			a, b := canonicalCoverage(s.State.Coverage), canonicalCoverage(got.State.Coverage)
+			if a != b {
+				t.Fatalf("cap=%d runtime=%s replay=%s", cap, a, b)
 			}
 			if _, e := os.Stat(filepath.Join(s.Config.StateDir, "state.json")); e != nil {
 				t.Fatal(e)

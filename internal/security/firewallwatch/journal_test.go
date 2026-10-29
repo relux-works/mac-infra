@@ -558,9 +558,10 @@ func TestHeartbeatCoversState(t *testing.T) {
 	}
 }
 
-// A new signer result is journaled and replayed; a re-inspection with the same
-// result is not; a changed result is. A bundle directory is re-inspected on
-// every sighting, which exercises the re-inspection path.
+// A new signer result is due for journaling at once and is replayed; a
+// re-inspection with the same result is queued for the next append but is not
+// due at once; a changed result is due at once. A bundle directory is
+// re-inspected on every sighting, which exercises the re-inspection path.
 func TestJournalSigner(t *testing.T) {
 	s, c := journalStore(t)
 	bundle := t.TempDir()
@@ -867,5 +868,37 @@ func TestJournalCrashedSpanNotExtended(t *testing.T) {
 	gaps := reopen(t, c).coverageGaps(t0, restart)
 	if len(gaps) != 1 || gaps[0].Kind != GapNotRunning || !gaps[0].From.Equal(t0.Add(2*time.Second)) {
 		t.Fatalf("gaps %+v; want one not_running gap from the last heartbeat", gaps)
+	}
+}
+
+// PR69 review r3, finding 2: at the event cap every new event removes one, so
+// a journal is mostly removal records. Replay computes each event's identity
+// once, not once per removal record: at most one call per retained or added
+// event, independent of the number of records. (The pre-fix replay made one
+// pass over all events per record: here about 150 records x 100 events.)
+func TestJournalReplayRemovalCost(t *testing.T) {
+	c := testConfig(t)
+	c.MaxEntries = 100
+	s := reopen(t, c)
+	now := time.Now()
+	for i := 0; i < 100; i++ {
+		s.Observe(newKey(i), now, ruleClassify)
+	}
+	if e := s.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	for i := 100; i < 250; i++ {
+		observeFlush(t, s, newKey(i), now.Add(time.Duration(i)*time.Millisecond))
+	}
+	if s.journalRecords < 150 {
+		t.Fatalf("fixture: %d journal records; want one per new event", s.journalRecords)
+	}
+	eventIDCalls = 0
+	got := reopen(t, c)
+	if added := 150; eventIDCalls > 100+added {
+		t.Fatalf("replay computed %d identities for %d records; want at most %d", eventIDCalls, s.journalRecords, 100+added)
+	}
+	if apps := eventApps(got.State.Events); len(apps) != 100 || apps[0] != "app150" || apps[99] != "app249" {
+		t.Fatalf("replayed events %d, first %v; want app150..app249", len(apps), apps[:1])
 	}
 }
