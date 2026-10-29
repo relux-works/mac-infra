@@ -427,14 +427,16 @@ func TestSampleTickSavesBeforeMaintenance(t *testing.T) {
 	}
 }
 
-// BUG-261030-v6ahj5: save_interval runs from the end of the last save. A save
-// slower than the interval does not make the next silent flush save again at
-// once; a flush after the interval has passed since completion still saves
-// (the positive control). Real time is used because the save's own duration is
-// measured with the wall clock.
+// BUG-261030-v6ahj5: save_interval runs from the end of the last save. After
+// a save slower than the interval, a silent flush one interval after the
+// save's start does not save again; one interval after its completion it does
+// (the positive control). The flushes use caller timestamps derived from the
+// save, so a scheduler pause in the test cannot change the verdict (PR68
+// review r1); only the save's own duration is real time.
 func TestSaveIntervalRunsFromCompletion(t *testing.T) {
 	s := pruneFixture(t, 20)
 	s.Config.SaveInterval = "50ms"
+	interval := 50 * time.Millisecond
 	writes := 0
 	s.atomicWrite = func(path string, b []byte) error {
 		if filepath.Base(path) == "state.json" {
@@ -443,21 +445,21 @@ func TestSaveIntervalRunsFromCompletion(t *testing.T) {
 		}
 		return atomicWrite(path, b)
 	}
-	if e := s.Save(time.Now()); e != nil {
+	started := time.Now()
+	if e := s.Save(started); e != nil {
 		t.Fatal(e)
 	}
 	s.dirty = true
-	if e := s.Flush(time.Now(), false, false); e != nil {
+	if e := s.Flush(started.Add(interval), false, false); e != nil {
 		t.Fatal(e)
 	}
 	if writes != 1 {
-		t.Fatalf("state written %d times; a silent flush right after a slow save must wait", writes)
+		t.Fatalf("state written %d times; a silent flush one interval after a slow save started must wait", writes)
 	}
-	time.Sleep(60 * time.Millisecond)
-	if e := s.Flush(time.Now(), false, false); e != nil {
+	if e := s.Flush(s.lastSave.Add(interval), false, false); e != nil {
 		t.Fatal(e)
 	}
 	if writes != 2 {
-		t.Fatalf("state written %d times; the flush after the interval must save", writes)
+		t.Fatalf("state written %d times; the flush one interval after completion must save", writes)
 	}
 }
