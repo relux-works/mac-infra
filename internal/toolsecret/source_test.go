@@ -121,9 +121,29 @@ func TestSetAccessOnlyInAttendedRegion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := string(native)
-	g, c := strings.Index(src, guard), strings.Index(src, call)
-	if g < 0 || c < g || c-g > 400 {
-		t.Fatalf("SetAccess call is not directly behind the !allowUI refusal (guard at %d, call at %d)", g, c)
+	// Pin the attended block's whole control flow, not the proximity of a guard
+	// string (PR61 review r2): the refusal, the terminal check chained by
+	// else-if, UI enabled only in the final else, exactly one SetAccess call,
+	// and UI disabled again afterwards. Whitespace is normalized; any other
+	// structural edit fails, which is intended for this block.
+	attended := normalizeSource(`if (!allowUI) s=errSecInteractionNotAllowed;
+        else if (!isatty(3) || !isatty(4)) s=errSecInteractionNotAllowed;
+        else {
+            s=SecKeychainSetUserInteractionAllowed(true);
+            if (!s) { TS_TRACE("set-access"); s=SecKeychainItemSetAccess(item,access); TS_TRACE("set-access-returned"); }
+            SecKeychainSetUserInteractionAllowed(false);
+        }`)
+	src := normalizeSource(string(native))
+	if strings.Count(src, attended) != 1 {
+		t.Fatal("native_darwin.m no longer contains the pinned attended block exactly once")
 	}
+	block := strings.Index(src, attended)
+	if c := strings.Index(src, call); c < block || c >= block+len(attended) {
+		t.Fatal("the SetAccess call is outside the pinned attended block")
+	}
+}
+
+// normalizeSource collapses every run of whitespace to one space.
+func normalizeSource(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
