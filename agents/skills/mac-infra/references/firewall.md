@@ -274,7 +274,10 @@ history discarded from either collector; split coverage itself uses ALF spans.
 Spans are kept in start-time order. Pruning drops the oldest history while
 preserving the newest span of each running source, including across compaction.
 That open span stays separate from coalesced history, so past short stalls do
-not mark later complete windows as truncated.
+not mark later complete windows as truncated. A compacted pending batch closes
+its counter-bearing span at the batch's last resume time; later saves extend a
+separate clean span. Windows starting at or after that boundary inherit none
+of the batch's counters.
 If `max_entries` is smaller than the number of running sources, the hard bound
 still applies: an evicted open span is retained in its runtime tracker and
 restored and extended on the next save. Its discarded time advances the same

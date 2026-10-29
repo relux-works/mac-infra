@@ -574,7 +574,11 @@ func (s *Store) extendCoverage(c *SourceCoverage, now time.Time) {
 			last := &s.State.Coverage[open]
 			last.ShortStalls = addCount(last.ShortStalls, stall.ShortStalls)
 			last.ShortStalledNS = addNS(last.ShortStalledNS, stall.ShortStalledNS)
-			extend(stall.End)
+			// Seal the counters at the batch's last resume, correcting any
+			// optimistic saved end if the feeder reported the batch late.
+			last.End = stall.End
+			s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: stall.End, End: stall.End, Source: c.source})
+			open = len(s.State.Coverage) - 1
 			continue
 		}
 		extend(stall.Start)
