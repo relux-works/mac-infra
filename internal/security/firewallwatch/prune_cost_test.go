@@ -125,6 +125,116 @@ func TestUnobservedExpiryAtSave(t *testing.T) {
 	}
 }
 
+// PR66 review r1: a backward wall-clock correction does not undo expiry an
+// earlier, later-reading observation decided. A key whose entry expired at
+// that observation is new again when seen after the correction (count 1, a
+// fresh first-seen, a row at the corrected time that the Save persists), and
+// a span that expired then is gone after a Save at the corrected time, with
+// its watermark, in memory, in Split and after reload. A rollback beyond
+// retention does not let the earlier clock expire later entries. Times
+// without a monotonic reading model loaded state and a stepped wall clock.
+func TestClockCorrectionKeepsExpiry(t *testing.T) {
+	base := time.Now().Round(0)
+	old := base.Add(-7*24*time.Hour - time.Second) // testConfig retains 7 days
+	rolled := base.Add(-2 * time.Second)
+	t.Run("observed key", func(t *testing.T) {
+		s := pruneFixture(t, 20)
+		it := Item{App: "old", Source: "nettop", Verdict: "observed", Remote: "lan"}
+		s.Observe(it, old, ruleClassify)
+		s.Observe(Item{App: "other", Source: "nettop", Verdict: "observed", Remote: "lan"}, base, ruleClassify)
+		events := s.Observe(it, rolled, ruleClassify)
+		e := s.State.Entries[key(cleanItem(it))]
+		if len(events) != 1 || e.Count != 1 || !e.FirstSeen.Equal(rolled) {
+			t.Fatalf("expired key resurrected: events %d count %d first_seen %v", len(events), e.Count, e.FirstSeen)
+		}
+		if err := s.Save(rolled); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := OpenStore(s.Config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := 0
+		for _, ev := range reopened.State.Events {
+			if ev.App == it.App && ev.TS.Equal(rolled) {
+				rows++
+			}
+		}
+		if rows != 1 {
+			t.Fatalf("new-key rows at the corrected time: %d", rows)
+		}
+	})
+	t.Run("saved coverage", func(t *testing.T) {
+		s := pruneFixture(t, 20)
+		s.State.Coverage = []CoverageSpan{{Start: old.Add(-time.Hour), End: old}}
+		s.Observe(Item{App: "other", Source: "nettop", Verdict: "observed", Remote: "lan"}, base, ruleClassify)
+		if err := s.Save(rolled); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := OpenStore(s.Config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, st := range []*Store{s, reopened} {
+			if len(st.State.Coverage) != 0 || !st.State.CoverageEvictedThrough.Equal(old) {
+				t.Fatalf("expired span resurrected: spans %d watermark %v", len(st.State.Coverage), st.State.CoverageEvictedThrough)
+			}
+		}
+		if !s.Split(old.Add(-time.Minute), old).Window.Truncated {
+			t.Fatal("split of the expired minute not truncated")
+		}
+	})
+	// A rollback longer than retention: a key first seen after it is judged
+	// by cutoffs from then on, as before, so its next sighting is a repeat.
+	t.Run("rollback beyond retention", func(t *testing.T) {
+		s := pruneFixture(t, 20)
+		s.Observe(Item{App: "other", Source: "nettop", Verdict: "observed", Remote: "lan"}, base, ruleClassify)
+		back := base.Add(-8 * 24 * time.Hour)
+		it := Item{App: "during", Source: "nettop", Verdict: "observed", Remote: "lan"}
+		s.Observe(it, back, ruleClassify)
+		events := s.Observe(it, back.Add(time.Second), ruleClassify)
+		if e := s.State.Entries[key(cleanItem(it))]; len(events) != 0 || e == nil || e.Count != 2 {
+			t.Fatalf("entry from after the rollback expired by the older clock: events %d entry %+v", len(events), e)
+		}
+	})
+	// Control: without the later observation, a Save at the corrected time
+	// keeps a span that has not expired by its own clock.
+	t.Run("no later observation", func(t *testing.T) {
+		s := pruneFixture(t, 20)
+		end := rolled.Add(-7*24*time.Hour + time.Second)
+		s.State.Coverage = []CoverageSpan{{Start: end.Add(-time.Hour), End: end}}
+		if err := s.Save(rolled); err != nil {
+			t.Fatal(err)
+		}
+		if len(s.State.Coverage) != 1 || !s.State.CoverageEvictedThrough.IsZero() {
+			t.Fatalf("unexpired span removed: %v", s.State.Coverage)
+		}
+	})
+}
+
+// A backward wall step costs one full prune: the first observation after it
+// applies the earlier decisions, later ones at the corrected clock allocate
+// far less than one copy of the state again.
+func TestClockCorrectionPrunesOnce(t *testing.T) {
+	const max = 10000
+	s, now := atCap(t, max)
+	it := Item{App: "app09999", Source: "nettop", Verdict: "observed", Remote: "lan"}
+	s.Observe(it, now.Round(0), ruleClassify)
+	rolled := now.Round(0).Add(-2 * time.Second)
+	s.Observe(it, rolled, ruleClassify)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	const runs = 20
+	for i := 0; i < runs; i++ {
+		s.Observe(it, rolled, ruleClassify)
+	}
+	runtime.ReadMemStats(&after)
+	copyBytes := uint64(max) * uint64(min(unsafe.Sizeof(Event{}), unsafe.Sizeof(CoverageSpan{})))
+	if perCall := (after.TotalAlloc - before.TotalAlloc) / runs; perCall >= copyBytes/16 {
+		t.Fatalf("observation after the step allocated %d bytes per call; one copy is %d", perCall, copyBytes)
+	}
+}
+
 // When an observation pushes a bound over max_entries it runs the full
 // prune at once: expired entries go first, so a new key at the cap with one
 // expired entry present evicts that entry and keeps every retained one.

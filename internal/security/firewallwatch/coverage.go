@@ -21,6 +21,11 @@ func (s *Store) coverageEvicted(at time.Time) {
 // pruneCoverage drops the oldest history by start time, preserving each running
 // source's newest span whenever the count bound can hold all active sources.
 func (s *Store) pruneCoverage(cutoff time.Time) {
+	s.pruneCoverageBy(func(t time.Time) bool { return t.Before(cutoff) })
+}
+
+// pruneCoverageBy is pruneCoverage with a retention predicate.
+func (s *Store) pruneCoverageBy(expired func(time.Time) bool) {
 	spans := s.State.Coverage
 	sort.SliceStable(spans, func(i, j int) bool { return spans[i].Start.Before(spans[j].Start) })
 	if len(spans) > s.Config.MaxEntries {
@@ -39,7 +44,7 @@ func (s *Store) pruneCoverage(cutoff time.Time) {
 	remove := make([]bool, len(spans))
 	left := len(spans)
 	for i, span := range spans {
-		if !isActive(i) && coverageEnd(span).Before(cutoff) {
+		if !isActive(i) && expired(coverageEnd(span)) {
 			remove[i] = true
 			left--
 		}

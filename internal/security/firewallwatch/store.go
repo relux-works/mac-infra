@@ -121,6 +121,10 @@ type Store struct {
 	atomicWrite   func(string, []byte) error
 	inspectSigner func(context.Context, string) (string, error)
 	clock         func() time.Time
+	// observedAt is the observation with the latest wall reading since the
+	// last backward wall step. Expiry it decided is applied lazily: by the
+	// observed key's own check, an over-cap prune, or the next Save.
+	observedAt time.Time
 }
 
 func safeDir(dir string) error {
@@ -319,11 +323,20 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 	it = cleanItem(it)
 	k := key(it)
 	// A full prune walks every entry, event and span, which at the max_entries
-	// cap cost the live watcher most of its CPU (BUG-261029-do8v1i). Only the
-	// observed key's own expiry must be decided here: an expired entry counts
-	// as new again. Everything else expires at the next Save, as it would if
-	// nothing were observed; the bounds are restored below whenever exceeded.
-	if entry, ok := s.State.Entries[k]; ok && entry.LastSeen.Before(now.Add(-time.Duration(s.Config.RetentionDays)*24*time.Hour)) {
+	// cap cost the live watcher most of its CPU (BUG-261029-do8v1i). Expiry is
+	// decided here only for the observed key: an expired entry counts as new
+	// again. Other items expire lazily, by the same reference times, when a
+	// bound is exceeded below or at the next Save. A backward wall step would
+	// lower the cutoff, so it first applies what the later reading already
+	// decided, once per step (PR66 review r1).
+	if !s.observedAt.IsZero() && now.Round(0).Before(s.observedAt.Round(0)) {
+		s.pruneAt(s.observedAt, now)
+		s.observedAt = time.Time{}
+	}
+	if s.observedAt.IsZero() || s.observedAt.Round(0).Before(now.Round(0)) {
+		s.observedAt = now
+	}
+	if entry, ok := s.State.Entries[k]; ok && s.expired(entry.LastSeen, s.observedAt, now) {
 		delete(s.State.Entries, k)
 	}
 	entry, exists := s.State.Entries[k]
@@ -395,14 +408,31 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 		add(it, s.classify(it, classify))
 	}
 	if len(s.State.Entries) > s.Config.MaxEntries || len(s.State.Events) > s.Config.MaxEntries || len(s.State.Signers) > s.Config.MaxEntries {
-		s.prune(now)
+		s.pruneAt(s.observedAt, now)
 	}
 	return events
 }
-func (s *Store) prune(now time.Time) {
-	cutoff := now.Add(-time.Duration(s.Config.RetentionDays) * 24 * time.Hour)
+
+// expired reports whether t falls before the retention cutoff of any
+// reference time. Times with a monotonic reading compare by it, others by the
+// wall reading, so the latest wall reading and the current time together
+// cover every cutoff an earlier observation applied.
+func (s *Store) expired(t time.Time, refs ...time.Time) bool {
+	for _, ref := range refs {
+		if !ref.IsZero() && t.Before(ref.Add(-time.Duration(s.Config.RetentionDays)*24*time.Hour)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) prune(now time.Time) { s.pruneAt(now) }
+
+// pruneAt applies retention for every reference time, and the bounds.
+func (s *Store) pruneAt(refs ...time.Time) {
+	expired := func(t time.Time) bool { return s.expired(t, refs...) }
 	for k, v := range s.State.Entries {
-		if v.LastSeen.Before(cutoff) {
+		if expired(v.LastSeen) {
 			delete(s.State.Entries, k)
 		}
 	}
@@ -429,7 +459,7 @@ func (s *Store) prune(now time.Time) {
 	}
 	events := s.State.Events[:0]
 	for _, e := range s.State.Events {
-		if !e.TS.Before(cutoff) {
+		if !expired(e.TS) {
 			events = append(events, e)
 		} else {
 			evicted(e)
@@ -443,7 +473,7 @@ func (s *Store) prune(now time.Time) {
 		events = events[len(events)-s.Config.MaxEntries:]
 	}
 	s.State.Events = append([]Event(nil), events...)
-	s.pruneCoverage(cutoff)
+	s.pruneCoverageBy(expired)
 	// Keep executable signature cache bounded as well; evicted paths may be inspected again.
 	if len(s.State.Signers) > s.Config.MaxEntries {
 		keys := make([]string, 0, len(s.State.Signers))
@@ -661,7 +691,7 @@ func (s *Store) Save(now time.Time) error {
 			s.extendCoverage(c, now)
 		}
 	}
-	s.prune(now)
+	s.pruneAt(s.observedAt, now)
 	s.State.Updated = now
 	if e := s.validateState(); e != nil {
 		return fmt.Errorf("refusing invalid state save: %w", e)
