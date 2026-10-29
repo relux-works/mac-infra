@@ -88,3 +88,21 @@ func TestHealthLegacyMaximaUnknown(t *testing.T) {
 		t.Fatal("higher maximum has no timestamp")
 	}
 }
+
+// BUG-261029-vag9nz: a first sample that measures 0 ns still records when the maximum happened; a later equal or smaller sample does not move it.
+func TestHealthZeroFirstSampleSetsMaxAt(t *testing.T) {
+	var s TimingSummary
+	first := time.Date(2026, 10, 29, 12, 3, 19, 0, time.UTC)
+	s.observe(0, first)
+	if s.MaxAt == nil || !s.MaxAt.Equal(first) || s.MaxNS != 0 || s.Count != 1 {
+		t.Fatalf("zero first sample: %+v", s)
+	}
+	s.observe(0, first.Add(time.Second))
+	if !s.MaxAt.Equal(first) || s.Count != 2 {
+		t.Fatalf("equal later sample moved MaxAt: %+v", s)
+	}
+	s.observe(5, first.Add(2*time.Second))
+	if !s.MaxAt.Equal(first.Add(2*time.Second)) || s.MaxNS != 5 {
+		t.Fatalf("larger sample did not move MaxAt: %+v", s)
+	}
+}

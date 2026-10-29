@@ -49,7 +49,9 @@ func (s *TimingSummary) observe(d time.Duration, at time.Time) {
 		d = 0
 	}
 	s.LastNS = int64(d)
-	if s.LastNS > s.MaxNS {
+	// The first sample is the maximum even when it measures 0 ns; legacy
+	// summaries (Count > 0, MaxAt unknown) keep an unknown time.
+	if s.LastNS > s.MaxNS || (s.Count == 0 && s.MaxAt == nil) {
 		s.MaxNS = s.LastNS
 		at = at.UTC()
 		s.MaxAt = &at
