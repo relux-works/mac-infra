@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -61,7 +63,8 @@ func TestDrainQueuedEmptiesReadyLines(t *testing.T) {
 }
 
 // A feeder that keeps the queue full cannot hold the sample: one drain handles
-// at most one queue's worth per source, then the sample continues.
+// at most one queue's worth, then the sample continues. Netfilter is disabled
+// here; TestDrainQueuedBoundIsPerSource covers both sources.
 func TestDrainQueuedIsBounded(t *testing.T) {
 	alf := make(chan []byte, 4)
 	var net chan []byte // netfilter disabled
@@ -112,5 +115,70 @@ func TestDrainQueuedCancellationAndClosedQueues(t *testing.T) {
 	}
 	if e := drainQueued(context.Background(), empty, &net, nil, onNet); e != nil || ends != 1 || net != nil {
 		t.Fatalf("closed netfilter: err=%v ends=%d", e, ends)
+	}
+}
+
+// PR67 review r1, finding 1: with both sources enabled, each has its own
+// budget of one queue's worth. A refilling ALF queue cannot spend the
+// netfilter budget, and both sources are still served within one drain.
+func TestDrainQueuedBoundIsPerSource(t *testing.T) {
+	alf, net := make(chan []byte, 4), make(chan []byte, 4)
+	for i := 0; i < cap(alf); i++ {
+		alf <- []byte("a")
+	}
+	net <- []byte("n1")
+	net <- []byte("n2")
+	alfHandled, netHandled := 0, 0
+	onALF := func(l []byte, ok bool) (bool, error) { alfHandled++; alf <- l; return false, nil } // refills at once
+	onNet := func([]byte, bool) error { netHandled++; return nil }
+	if e := drainQueued(context.Background(), alf, &net, onALF, onNet); e != nil || alfHandled != cap(alf) || netHandled != 2 {
+		t.Fatalf("err=%v alf=%d net=%d; want %d and 2", e, alfHandled, netHandled, cap(alf))
+	}
+
+	// Both sources refilling: each stops at its own capacity.
+	for len(net) < cap(net) {
+		net <- []byte("n")
+	}
+	alfHandled, netHandled = 0, 0
+	onNet = func(l []byte, ok bool) error { netHandled++; net <- l; return nil }
+	if e := drainQueued(context.Background(), alf, &net, onALF, onNet); e != nil || alfHandled != cap(alf) || netHandled != cap(net) {
+		t.Fatalf("err=%v alf=%d net=%d; want %d each", e, alfHandled, netHandled, cap(alf))
+	}
+}
+
+// PR67 review r1, finding 2: a nettop sample is a slow-operation candidate on
+// every exit. A failed or timed-out collector command records the sample with
+// no rows, sets nettop_error and emits nothing; a successful one records its
+// parsed row count and clears the error.
+func TestSampleNettopRecordsEveryExit(t *testing.T) {
+	saved := slowOpThreshold
+	slowOpThreshold = 0
+	t.Cleanup(func() { slowOpThreshold = saved })
+	raw, e := os.ReadFile("testdata/nettop.csv")
+	if e != nil {
+		t.Fatal(e)
+	}
+	s := pruneFixture(t, 20)
+	collect := func(Item) bool { return false }
+	flush := func(bool) error { return nil }
+
+	timeout := errors.New("signal: killed")
+	emitted, e := s.sampleNettop(func(io.Writer) error { return timeout }, collect, flush, noDrain)
+	ops := s.State.Health.SlowOps
+	if emitted || e != nil || s.State.NettopError == "" || len(ops) != 1 || ops[0].Kind != SlowNettopSample || ops[0].Items != 0 {
+		t.Fatalf("failed command: emitted=%t err=%v nettop_error=%q ops=%+v", emitted, e, s.State.NettopError, ops)
+	}
+
+	_, e = s.sampleNettop(func(w io.Writer) error { _, err := w.Write(raw); return err }, collect, flush, noDrain)
+	ops = s.State.Health.SlowOps
+	if e != nil || s.State.NettopError != "" || len(ops) != 2 || ops[1].Items != 7 {
+		t.Fatalf("successful command: err=%v nettop_error=%q ops=%+v", e, s.State.NettopError, ops)
+	}
+
+	// A drain error still records the sample with its rows.
+	failed := errors.New("ALF log stream ended")
+	_, e = s.sampleNettop(func(w io.Writer) error { _, err := w.Write(raw); return err }, collect, flush, func() error { return failed })
+	if ops = s.State.Health.SlowOps; !errors.Is(e, failed) || len(ops) != 3 || ops[2].Items != 7 {
+		t.Fatalf("drain error: err=%v ops=%+v", e, ops)
 	}
 }

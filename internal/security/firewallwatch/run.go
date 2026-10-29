@@ -269,14 +269,29 @@ func collectSample(items []Item, collect func(Item) bool, flush func(emitted boo
 // worth per source, without waiting. After cancellation it does nothing: the
 // sample then finishes with backend_shutdown rows as before. onNetfilter may
 // set *netfilter to nil when that stream ends; a nil queue is never selected.
+// Each source has its own budget; a source that spent it is not selected
+// again in this drain (PR67 review r1).
 func drainQueued(ctx context.Context, alf <-chan []byte, netfilter *chan []byte, onALF func([]byte, bool) (bool, error), onNetfilter func([]byte, bool) error) error {
-	for n := cap(alf) + cap(*netfilter); n > 0 && ctx.Err() == nil; n-- {
+	alfLeft, netLeft := cap(alf), cap(*netfilter)
+	for ctx.Err() == nil {
+		alfQueue, netQueue := alf, *netfilter
+		if alfLeft == 0 {
+			alfQueue = nil
+		}
+		if netLeft == 0 {
+			netQueue = nil
+		}
+		if alfQueue == nil && netQueue == nil {
+			return nil
+		}
 		select {
-		case line, ok := <-alf:
+		case line, ok := <-alfQueue:
+			alfLeft--
 			if done, e := onALF(line, ok); done || e != nil {
 				return e
 			}
-		case line, ok := <-*netfilter:
+		case line, ok := <-netQueue:
+			netLeft--
 			if e := onNetfilter(line, ok); e != nil {
 				return e
 			}
@@ -285,6 +300,26 @@ func drainQueued(ctx context.Context, alf <-chan []byte, netfilter *chan []byte,
 		}
 	}
 	return nil
+}
+
+// sampleNettop runs one nettop sample through run, the collector command,
+// and collects its rows. A failed or timed-out command records nettop_error
+// and emits nothing. The sample is a slow-operation candidate on every exit,
+// including a failed command, with the parsed row count (zero when the command
+// failed; PR67 review r1).
+func (s *Store) sampleNettop(run func(io.Writer) error, collect func(Item) bool, flush func(emitted bool) error, drain func() error) (bool, error) {
+	start, rows := time.Now(), 0
+	defer func() { s.State.Health.recordSlow(SlowNettopSample, time.Since(start), time.Now(), rows) }()
+	output := &cappedBuffer{limit: 4 << 20}
+	if e := run(output); e != nil {
+		s.State.NettopError = "nettop sample failed"
+		return false, nil
+	}
+	s.State.NettopError = ""
+	items, unknown := ParseNettop(output.String())
+	s.State.NettopUnrecognized += unknown
+	rows = len(items)
+	return collectSample(items, collect, flush, drain)
 }
 
 // sampleTick runs one nettop tick. Backend maintenance (health check, Init)
@@ -438,22 +473,13 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	}
 	drain := func() error { return drainQueued(ctx, lines, &netLines, onALF, onNetfilter) }
 	sample := func() (bool, error) {
-		start := time.Now()
 		sampleCtx, stop := context.WithTimeout(ctx, duration(c.NettopInterval))
 		defer stop()
-		nettop := collectorCommand(sampleCtx, "nettop")
-		output := &cappedBuffer{limit: 4 << 20}
-		nettop.Stdout = output
-		if e := nettop.Run(); e != nil {
-			s.State.NettopError = "nettop sample failed"
-			return false, nil
-		}
-		s.State.NettopError = ""
-		items, unknown := ParseNettop(output.String())
-		s.State.NettopUnrecognized += unknown
-		emitted, e := collectSample(items, collect, flush, drain)
-		s.State.Health.recordSlow(SlowNettopSample, time.Since(start), time.Now(), len(items))
-		return emitted, e
+		return s.sampleNettop(func(out io.Writer) error {
+			nettop := collectorCommand(sampleCtx, "nettop")
+			nettop.Stdout = out
+			return nettop.Run()
+		}, collect, flush, drain)
 	}
 	maintain := func() {
 		start, pool := time.Now(), 0

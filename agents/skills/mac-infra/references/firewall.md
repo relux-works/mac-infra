@@ -246,7 +246,8 @@ two seconds, in completion order: `kind` (`save`, `classification`,
 `maintenance` or `nettop_sample`), `at` (completion time), `duration_ns`, and
 `items` when known (the rows of a nettop sample, including the time spent on
 collector lines drained during it, or the labelled pool rows of a maintenance
-whose Init succeeded). Records hold no item text, hosts, apps or paths. When the
+whose Init succeeded). A failed or timed-out nettop command is recorded as a
+`nettop_sample` without `items`. Records hold no item text, hosts, apps or paths. When the
 bound drops a record, `health.slow_ops_dropped_through` keeps the latest dropped
 completion time. Like the timings, a save's own record persists with the next
 save.
@@ -462,7 +463,7 @@ an emitted row also saves once `save_interval` has passed since the last save,
 because every save rewrites the whole state; the save timer does not interrupt
 a classification in progress. Before each nettop row is classified, the sample
 handles the ALF and netfilter lines already queued, at most one queue's worth
-per source and without waiting, so a sample of many slow classifications does
+per source (each source has its own budget) and without waiting, so a sample of many slow classifications does
 not hold the feeders in a stall. After cancellation the sample drains nothing.
 Backend maintenance and the tick's saves still block the run loop. An observation decides only its own key's
 retention: an entry last seen before the cutoff counts as new. Entries, events
