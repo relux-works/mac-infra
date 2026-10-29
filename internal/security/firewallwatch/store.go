@@ -51,27 +51,51 @@ type State struct {
 	// and its end advances on every save, so a stop or crash leaves a gap.
 	Coverage []CoverageSpan `json:"coverage"`
 	// EvictedThrough is the newest timestamp of any event pruned from Events.
-	EvictedThrough time.Time `json:"evicted_through"`
+	EvictedThrough         time.Time `json:"evicted_through"`
+	CoverageEvictedThrough time.Time `json:"coverage_evicted_through"`
+	Health                 RunHealth `json:"health"`
 }
 
 // CoverageSpan is one interval in which a watcher collected one source and
 // saved state. Source is empty for the ALF log (the original source) and
-// "netfilter" for the content-filter stream.
+// "netfilter" for the content-filter stream. Under count pressure, short
+// stalls within the interval may be represented by counters instead of gaps.
 type CoverageSpan struct {
 	Start  time.Time `json:"start"`
 	End    time.Time `json:"end"`
 	Source string    `json:"source,omitempty"`
+	// StallAfter records the exact unavailable interval following this span.
+	StallAfter     *CoverageStall `json:"stall_after,omitempty"`
+	ShortStalls    uint64         `json:"short_stalls,omitempty"`
+	ShortStalledNS int64          `json:"short_stalled_ns,omitempty"`
+}
+
+type CoverageStall struct {
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+}
+
+// Short stalls retain exact intervals until the span bound requires compaction.
+const shortStallThreshold = time.Second
+
+type pendingStall struct {
+	Start, End     time.Time
+	ShortStalls    uint64
+	ShortStalledNS int64
 }
 
 // SourceCoverage tracks the open coverage span of one collector source. The
 // feeder goroutine reports stalls and the stream's end; Save applies them.
 type SourceCoverage struct {
-	source    string
-	covering  bool
-	mu        sync.Mutex
-	stalls    []CoverageSpan
-	stalledAt time.Time
-	endedAt   time.Time
+	source         string
+	covering       bool
+	mu             sync.Mutex
+	stalls         []pendingStall
+	stalledAt      time.Time
+	endedAt        time.Time
+	limit          int
+	evictedThrough time.Time
+	queueHighWater int
 }
 
 type Store struct {
@@ -181,7 +205,17 @@ func (s *Store) validateState() error {
 	if len(st.NettopError) > 1024 || len(st.NetfilterError) > 1024 {
 		return bad()
 	}
+	h := st.Health
+	if h.LineQueueHighWater.ALF < 0 || h.LineQueueHighWater.ALF > 64 || h.LineQueueHighWater.Netfilter < 0 || h.LineQueueHighWater.Netfilter > 64 || !h.Save.valid() || !h.Classification.valid() {
+		return bad()
+	}
 	for _, v := range st.Coverage {
+		if v.ShortStalledNS < 0 || (v.ShortStalls == 0 && v.ShortStalledNS != 0) {
+			return bad()
+		}
+		if stall := v.StallAfter; stall != nil && (!stall.From.Equal(v.End) || stall.To.Before(stall.From)) {
+			return bad()
+		}
 		if v.Start.IsZero() || v.End.Before(v.Start) || (v.Source != "" && v.Source != SourceNetfilter) {
 			return bad()
 		}
@@ -304,7 +338,7 @@ func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []
 		s.State.LastEvent = now
 	}
 	if !exists {
-		add(it, classify(it))
+		add(it, s.classify(it, classify))
 	} else if d, ok := Rules(it); ok && d.Label == "decide" {
 		found := false
 		for _, r := range entry.Escalated {
@@ -318,7 +352,7 @@ func (s *Store) Observe(it Item, now time.Time, classify func(Item) Decision) []
 	}
 	if spike {
 		it.Spike = true
-		add(it, classify(it))
+		add(it, s.classify(it, classify))
 	}
 	s.prune(now)
 	return events
@@ -367,14 +401,22 @@ func (s *Store) prune(now time.Time) {
 		events = events[len(events)-s.Config.MaxEntries:]
 	}
 	s.State.Events = append([]Event(nil), events...)
-	// Dropping old coverage only widens reported gaps, never hides one.
 	spans := s.State.Coverage[:0]
 	for _, v := range s.State.Coverage {
-		if !v.End.Before(cutoff) {
+		end := coverageEnd(v)
+		if !end.Before(cutoff) {
 			spans = append(spans, v)
+		} else {
+			s.coverageEvicted(end)
 		}
 	}
 	if len(spans) > s.Config.MaxEntries {
+		spans = compactCoverage(spans)
+	}
+	if len(spans) > s.Config.MaxEntries {
+		for _, v := range spans[:len(spans)-s.Config.MaxEntries] {
+			s.coverageEvicted(coverageEnd(v))
+		}
 		spans = spans[len(spans)-s.Config.MaxEntries:]
 	}
 	s.State.Coverage = append([]CoverageSpan(nil), spans...)
@@ -422,7 +464,7 @@ func (s *Store) Coverage(source string) *SourceCoverage {
 	}
 	c, ok := s.coverage[source]
 	if !ok {
-		c = &SourceCoverage{source: source}
+		c = &SourceCoverage{source: source, limit: s.Config.MaxEntries}
 		s.coverage[source] = c
 	}
 	return c
@@ -456,12 +498,24 @@ func (c *SourceCoverage) StallCoverage(at time.Time) {
 }
 
 // ResumeCoverage closes an open stall; the next Save ends the span at the
-// stall's start and opens a new span at at.
+// stall's start and opens a new span at at. Under count pressure, short stalls
+// are coalesced; long-stall history that must be dropped advances a watermark.
 func (c *SourceCoverage) ResumeCoverage(at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.stalledAt.IsZero() {
-		c.stalls = append(c.stalls, CoverageSpan{Start: c.stalledAt, End: at, Source: c.source})
+		c.stalls = append(c.stalls, pendingStall{Start: c.stalledAt, End: at})
+		if len(c.stalls) > c.limit {
+			c.stalls = compactPending(c.stalls)
+			if len(c.stalls) > c.limit {
+				for _, stall := range c.stalls[:len(c.stalls)-c.limit] {
+					if stall.End.After(c.evictedThrough) {
+						c.evictedThrough = stall.End
+					}
+				}
+				c.stalls = append([]pendingStall(nil), c.stalls[len(c.stalls)-c.limit:]...)
+			}
+		}
 		c.stalledAt = time.Time{}
 	}
 }
@@ -484,8 +538,17 @@ func (c *SourceCoverage) EndCoverage(at time.Time) {
 func (s *Store) extendCoverage(c *SourceCoverage, now time.Time) {
 	c.mu.Lock()
 	stalls, stalledAt, endedAt := c.stalls, c.stalledAt, c.endedAt
+	evicted, highWater := c.evictedThrough, c.queueHighWater
 	c.stalls = nil
 	c.mu.Unlock()
+	s.coverageEvicted(evicted)
+	high := &s.State.Health.LineQueueHighWater.ALF
+	if c.source == SourceNetfilter {
+		high = &s.State.Health.LineQueueHighWater.Netfilter
+	}
+	if highWater > *high {
+		*high = highWater
+	}
 	open := -1
 	for i := len(s.State.Coverage) - 1; i >= 0; i-- {
 		if s.State.Coverage[i].Source == c.source {
@@ -501,24 +564,50 @@ func (s *Store) extendCoverage(c *SourceCoverage, now time.Time) {
 			last.End = to
 		}
 	}
+	setStall := func(from, to time.Time) {
+		last := &s.State.Coverage[open]
+		// A feeder may timestamp a stall just before a save snapshots its
+		// mutex. Correct the previous optimistic end when that report arrives.
+		if from.Before(last.End) {
+			last.End = from
+		}
+		last.StallAfter = &CoverageStall{From: from, To: to}
+	}
+	// Any previously saved open stall is replaced by this snapshot's exact
+	// closed interval, or by a coalesced counter if compaction was required.
+	s.State.Coverage[open].StallAfter = nil
 	for _, stall := range stalls {
+		if stall.ShortStalls > 0 {
+			last := &s.State.Coverage[open]
+			last.ShortStalls = addCount(last.ShortStalls, stall.ShortStalls)
+			last.ShortStalledNS = addNS(last.ShortStalledNS, stall.ShortStalledNS)
+			extend(stall.End)
+			continue
+		}
 		extend(stall.Start)
+		setStall(stall.Start, stall.End)
 		s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: stall.End, End: stall.End, Source: c.source})
 		open = len(s.State.Coverage) - 1
 	}
 	end := now
+	if !endedAt.IsZero() && endedAt.Before(end) {
+		end = endedAt
+	}
 	if !stalledAt.IsZero() && stalledAt.Before(end) {
+		setStall(stalledAt, end)
 		end = stalledAt
 	}
 	if !endedAt.IsZero() {
-		if endedAt.Before(end) {
-			end = endedAt
-		}
 		c.covering = false
 	}
 	extend(end)
 }
+
 func (s *Store) Save(now time.Time) error {
+	start := time.Now()
+	// A save cannot persist its own completed duration without another write.
+	// The next save persists this result, including failed attempts.
+	defer func() { s.State.Health.Save.observe(time.Since(start)) }()
 	if e := safeDir(s.Config.StateDir); e != nil {
 		return e
 	}
@@ -645,7 +734,25 @@ func (s *Store) Digest(since time.Time) map[string]DigestGroup {
 	return result
 }
 func (s *Store) Status() map[string]any {
-	return map[string]any{"entries": len(s.State.Entries), "events": len(s.State.Events), "signer_cache": len(s.State.Signers), "last_event": s.State.LastEvent, "backend_healthy": s.State.BackendHealthy, "health_as_of": s.State.Updated, "unrecognized": s.State.Parser.Unrecognized + s.State.NettopUnrecognized, "invalid_json": s.State.Parser.Invalid, "unrecognized_samples": s.State.Parser.Samples, "nettop_error": s.State.NettopError, "netfilter_invalid": s.State.Netfilter.Invalid, "netfilter_rejected_sender": s.State.Netfilter.RejectedSender, "netfilter_error": s.State.NetfilterError, "mode": "shadow"}
+	return map[string]any{
+		"entries":                   len(s.State.Entries),
+		"events":                    len(s.State.Events),
+		"signer_cache":              len(s.State.Signers),
+		"last_event":                s.State.LastEvent,
+		"backend_healthy":           s.State.BackendHealthy,
+		"health_as_of":              s.State.Updated,
+		"unrecognized":              s.State.Parser.Unrecognized + s.State.NettopUnrecognized,
+		"invalid_json":              s.State.Parser.Invalid,
+		"unrecognized_samples":      s.State.Parser.Samples,
+		"nettop_error":              s.State.NettopError,
+		"netfilter_invalid":         s.State.Netfilter.Invalid,
+		"netfilter_rejected_sender": s.State.Netfilter.RejectedSender,
+		"netfilter_error":           s.State.NetfilterError,
+		"mode":                      "shadow",
+		"line_queue_high_water":     s.State.Health.LineQueueHighWater,
+		"run_loop_timing": map[string]TimingSummary{"save": s.State.Health.Save,
+			"classification": s.State.Health.Classification},
+	}
 }
 func (s *Store) String() string {
 	return fmt.Sprintf("%d entries, %d retained events", len(s.State.Entries), len(s.State.Events))

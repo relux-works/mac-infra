@@ -200,6 +200,20 @@ mac-firewall watch classify --config /ABSOLUTE/firewall-watch.json --fixtures /A
 llama-server child. Exit codes are 0 success, 1 refused/failed, 2 bad usage.
 `status` reports last persisted backend health with its observation time, not
 a live health probe; a stale timestamp may mean the watcher has stopped.
+The persisted health also reports `line_queue_high_water` (`alf` and
+`netfilter`, observed buffered depths from 0 to the unchanged capacity of 64)
+and `run_loop_timing` (`save` and `classification`). Each timing has `last_ns`,
+`max_ns` and a saturating `count`, with no sample history. Classification timing
+covers actual classifier calls (rules/kNN/backend), not parsing, signer
+inspection or deduplicated repeats. Save timing covers the whole save attempt,
+including state and daily-file writes; a flush that saves uses the same timing,
+while a skipped flush adds no sample. The completed duration is persisted by the
+next save, including failed attempts: the last save on shutdown cannot include
+its own full duration without another write. The counters and maxima accumulate
+across runs. Text status displays the same measurements as durations. In
+`state.json`, these fields live under `health.line_queue_high_water`,
+`health.save` and `health.classification`. These observations do not measure
+upstream log loss or establish the cause of stalls.
 `digest` reads retained new-item events grouped by proposed label and app.
 `digest --json --split` (`--split` requires `--json`) instead puts each event
 in the window into at most one bucket, precedence first:
@@ -211,22 +225,56 @@ loopback rows of ssh or limactl), each with a count and its rows;
 `needs_review` holds every other `decide` event. Noise and digest events that
 are not denies appear in no bucket. The output also carries `health` (the
 `status` report) and `window`: since, as_of, first/last event time, event
-count, `coverage_gaps`, `evicted_through` and `truncated`. `run` records
-coverage spans in state: a span opens when collection starts and ends at its
-last save, or when the ALF log stream ended if that came first, so a stop,
-crash, collector exit or restart leaves a gap. A full ALF line queue (the
-run loop is behind, so the collector may block or drop lines) also ends the
-span; it reopens once the queue accepts lines again. `coverage_gaps` lists the parts
-of [since, as_of] no span covers. When a span reaches the window, its end may
-trail as_of by up to `nettop_interval` + `save_interval`, the expected save
-cadence of a live watcher, without a tail gap; a watcher that died within that
-last interval is not detected, and a save delayed longer (slow classification)
-only adds a spurious gap. With no span reaching the window, the whole window
-is one gap whatever its length; state written before coverage existed has no
-spans. `evicted_through` is the newest
-timestamp of any event pruned by `retention_days` or `max_entries`.
-`truncated` is set when there is a coverage gap or `evicted_through` is at or
-after since: part of the window may be missing.
+count, `coverage_gaps`, `evicted_through`, `coverage_evicted_through` and
+`truncated`. `run` records coverage spans in state: a span opens when collection
+starts and ends at its last save, or when the ALF log stream ended if that came
+first. `coverage_gaps` lists disjoint intervals in [since, as_of], each with
+`from`, `to` and `kind`:
+
+- `not_running`: no watcher was recorded running, including a late start, a
+  real stop or restart, and a tail beyond the save grace.
+- `stall`: the collector's line queue was full. The feeder applies backpressure
+  without dropping the queued line; lines are delayed and upstream loss is
+  possible but unmeasured. This is not evidence of a watcher restart.
+- `coverage_evicted`: coverage history was dropped; the interval is unknown,
+  rather than evidence that the watcher stopped.
+
+Exact stalls are persisted as the preceding coverage span's optional
+`stall_after: {from, to}`, including open stalls up to the save or collector
+end. Long stalls and actual run boundaries stay exact. When the coverage or
+pending-feeder history exceeds `max_entries`, recorded stalls shorter than
+**one second** are coalesced into the span's `short_stalls` and
+`short_stalled_ns` counters (saturating count and total nanoseconds); these
+short stalls no longer create individual split gaps after compaction. Detail
+is retained until this pressure occurs. A window intersecting an ALF span with
+coalesced stalls remains conservatively `truncated`, because their precise
+positions are no longer retained. Counts describe delayed collection, not
+measured loss. Both coverage spans and pending feeder records are bounded by
+`max_entries`; `max_state_bytes` still bounds persisted state. Coalescing never
+bridges a real stop or another source. If count or age retention must still
+drop spans or pending records, `coverage_evicted_through` records the newest
+end of discarded history (including any following stall). It is persisted in
+state and exposed beside `evicted_through` in the split window (`null` if no
+known eviction). Time before this watermark is conservatively
+`coverage_evicted`, even where retained spans overlap it. The watermark covers
+history discarded from either collector; split coverage itself uses ALF spans.
+
+When a span reaches the window, its end may trail as_of by up to
+`nettop_interval` + `save_interval`, the unchanged expected save cadence,
+without an unrecorded tail gap. A watcher that died within that interval is
+not detected, and a save delayed longer can add a spurious tail gap. Explicit
+stalls never receive this grace. Without a span reaching the window, all
+unrecorded time is a gap whatever its length. Existing state files load with
+new fields defaulting to zero/absent. The old format recorded spans but did
+not persist stall causes or an eviction watermark: pre-upgrade gaps cannot be
+reliably distinguished from stops and retain the `not_running` default. No
+historical cause or watermark is inferred.
+
+`evicted_through` keeps its existing meaning: the newest timestamp of any event
+pruned by `retention_days` or `max_entries`. `truncated` is set for any coverage
+gap, either eviction watermark at or after since, or an intersecting span with
+coalesced short stalls: part of the window may be missing. A health timestamp
+proves only that state was saved then, not complete collection.
 Ordinary repeats update counters/last_seen silently. Rules run again on each
 repeat's latest bytes and current signer; each newly triggered `decide` rule ID
 emits one escalation per key, recorded in state across restarts. A further repeat

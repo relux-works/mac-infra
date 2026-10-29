@@ -35,24 +35,33 @@ type SplitGroup struct {
 	Rows  []SplitRow `json:"rows"`
 }
 
-// SplitGap is part of the window in which no watcher was recorded running.
+const (
+	GapNotRunning      = "not_running"
+	GapStall           = "stall"
+	GapCoverageEvicted = "coverage_evicted"
+)
+
+// SplitGap is a part of the window with unavailable or unknown coverage.
 type SplitGap struct {
+	Kind string    `json:"kind"`
 	From time.Time `json:"from"`
 	To   time.Time `json:"to"`
 }
 
 // SplitWindow describes the events actually covered. Truncated is set when
 // part of [since, as_of] may be missing: a coverage gap (watcher stopped,
-// crashed, restarted or never recorded) or a pruned event at or after since.
+// crashed, restarted, stalled or never recorded), evicted history, or a span
+// with coalesced short stalls whose precise positions are no longer known.
 type SplitWindow struct {
-	Since          time.Time  `json:"since"`
-	AsOf           time.Time  `json:"as_of"`
-	FirstTS        *time.Time `json:"first_ts"`
-	LastTS         *time.Time `json:"last_ts"`
-	EventsInWindow int        `json:"events_in_window"`
-	CoverageGaps   []SplitGap `json:"coverage_gaps"`
-	EvictedThrough *time.Time `json:"evicted_through"`
-	Truncated      bool       `json:"truncated"`
+	Since                  time.Time  `json:"since"`
+	AsOf                   time.Time  `json:"as_of"`
+	FirstTS                *time.Time `json:"first_ts"`
+	LastTS                 *time.Time `json:"last_ts"`
+	EventsInWindow         int        `json:"events_in_window"`
+	CoverageGaps           []SplitGap `json:"coverage_gaps"`
+	EvictedThrough         *time.Time `json:"evicted_through"`
+	CoverageEvictedThrough *time.Time `json:"coverage_evicted_through"`
+	Truncated              bool       `json:"truncated"`
 }
 
 // DigestSplit is the deterministic triage view of one digest window.
@@ -118,7 +127,17 @@ func (s *Store) Split(since, asOf time.Time) DigestSplit {
 	if evicted := s.State.EvictedThrough; !evicted.IsZero() {
 		split.Window.EvictedThrough = &evicted
 	}
-	split.Window.Truncated = len(split.Window.CoverageGaps) > 0 || (split.Window.EvictedThrough != nil && !split.Window.EvictedThrough.Before(since))
+	if evicted := s.State.CoverageEvictedThrough; !evicted.IsZero() {
+		split.Window.CoverageEvictedThrough = &evicted
+	}
+	split.Window.Truncated = len(split.Window.CoverageGaps) > 0 || (split.Window.EvictedThrough != nil && !split.Window.EvictedThrough.Before(since)) || (split.Window.CoverageEvictedThrough != nil && !split.Window.CoverageEvictedThrough.Before(since))
+	// Compaction preserves counts rather than exact timestamps. Any window
+	// touching that span may include a short stall, so remain conservative.
+	for _, span := range s.State.Coverage {
+		if span.Source == "" && span.ShortStalls > 0 && span.Start.Before(asOf) && span.End.After(since) {
+			split.Window.Truncated = true
+		}
+	}
 	sortRows := func(rows []SplitRow) {
 		sort.SliceStable(rows, func(i, j int) bool { return rows[i].TS.Before(rows[j].TS) })
 	}
@@ -131,46 +150,85 @@ func (s *Store) Split(since, asOf time.Time) DigestSplit {
 	return split
 }
 
-// coverageGaps lists the parts of [since, asOf] covered by no recorded ALF
-// watcher span (Source ""); other sources keep their own spans. When a span
-// reaches the window, the time after the last covered point is a gap only if
-// longer than nettop_interval + save_interval, the expected
-// save cadence of a live watcher (a save delayed longer only adds a spurious
-// gap). Without such a span the whole window is a gap whatever its length;
-// gaps between spans count whatever their length.
+// coverageGaps sweeps recorded ALF coverage and exact stalls. Evicted history
+// is unknown even if a retained span overlaps it. The existing tail grace
+// applies only to unrecorded time after coverage, never to an explicit stall.
 func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 	gaps := []SplitGap{}
-	var spans []CoverageSpan
-	for _, span := range s.State.Coverage {
-		if span.Source == "" {
-			spans = append(spans, span)
-		}
+	if !since.Before(asOf) {
+		return gaps
 	}
-	sort.SliceStable(spans, func(i, j int) bool { return spans[i].Start.Before(spans[j].Start) })
-	cursor := since
-	touched := false
-	for _, span := range spans {
-		if !cursor.Before(asOf) {
-			break
+	type boundary struct {
+		at               time.Time
+		covered, stalled int
+	}
+	points := []boundary{{at: since}, {at: asOf}}
+	add := func(from, to time.Time, covered, stalled int) {
+		if from.Before(since) {
+			from = since
 		}
-		if span.End.Before(cursor) {
+		if to.After(asOf) {
+			to = asOf
+		}
+		if !from.Before(to) {
+			return
+		}
+		points = append(points, boundary{from, covered, stalled}, boundary{to, -covered, -stalled})
+	}
+	touched := false
+	var lastEnd time.Time
+	for _, span := range s.State.Coverage {
+		if span.Source != "" {
 			continue
 		}
-		touched = true
-		if span.Start.After(cursor) {
-			to := span.Start
-			if to.After(asOf) {
-				to = asOf
+		add(span.Start, span.End, 1, 0)
+		if !span.End.Before(since) && !span.Start.After(asOf) {
+			touched = true
+			if span.End.After(lastEnd) {
+				lastEnd = span.End
 			}
-			gaps = append(gaps, SplitGap{From: cursor, To: to})
 		}
-		if span.End.After(cursor) {
-			cursor = span.End
+		if stall := span.StallAfter; stall != nil {
+			add(stall.From, stall.To, 0, 1)
 		}
 	}
+	evicted := s.State.CoverageEvictedThrough
+	if evicted.After(since) && evicted.Before(asOf) {
+		points = append(points, boundary{at: evicted})
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].at.Before(points[j].at) })
+	covered, stalled := 0, 0
 	grace := duration(s.Config.NettopInterval) + duration(s.Config.SaveInterval)
-	if cursor.Before(asOf) && (!touched || asOf.Sub(cursor) > grace) {
-		gaps = append(gaps, SplitGap{From: cursor, To: asOf})
+	for i := 0; i < len(points); {
+		from := points[i].at
+		for i < len(points) && points[i].at.Equal(from) {
+			covered += points[i].covered
+			stalled += points[i].stalled
+			i++
+		}
+		if i == len(points) {
+			break
+		}
+		to := points[i].at
+		kind := ""
+		switch {
+		case from.Before(evicted):
+			kind = GapCoverageEvicted
+		case stalled > 0:
+			kind = GapStall
+		case covered > 0:
+		case touched && !from.Before(lastEnd) && asOf.Sub(lastEnd) <= grace:
+		default:
+			kind = GapNotRunning
+		}
+		if kind == "" {
+			continue
+		}
+		if len(gaps) > 0 && gaps[len(gaps)-1].Kind == kind && gaps[len(gaps)-1].To.Equal(from) {
+			gaps[len(gaps)-1].To = to
+		} else {
+			gaps = append(gaps, SplitGap{From: from, To: to, Kind: kind})
+		}
 	}
 	return gaps
 }

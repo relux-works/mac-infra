@@ -118,7 +118,7 @@ func TestSplitCoverageTruncation(t *testing.T) {
 			continue
 		}
 		for i := range tc.gaps {
-			if !w.CoverageGaps[i].From.Equal(tc.gaps[i].From) || !w.CoverageGaps[i].To.Equal(tc.gaps[i].To) {
+			if w.CoverageGaps[i].Kind != GapNotRunning || !w.CoverageGaps[i].From.Equal(tc.gaps[i].From) || !w.CoverageGaps[i].To.Equal(tc.gaps[i].To) {
 				t.Errorf("%s: gap %d = %+v, want %+v", tc.name, i, w.CoverageGaps[i], tc.gaps[i])
 			}
 		}
@@ -234,7 +234,7 @@ func TestCoverageSpans(t *testing.T) {
 	if len(loaded.State.Coverage) != 2 || !loaded.State.Coverage[0].Start.Equal(want[0].Start) || !loaded.State.Coverage[0].End.Equal(want[0].End) || !loaded.State.Coverage[1].Start.Equal(want[1].Start) || !loaded.State.Coverage[1].End.Equal(want[1].End) {
 		t.Fatalf("coverage: %+v", loaded.State.Coverage)
 	}
-	if gaps := loaded.Split(at(1), at(6)).Window.CoverageGaps; len(gaps) != 1 || !gaps[0].From.Equal(at(2)) || !gaps[0].To.Equal(at(5)) {
+	if gaps := loaded.Split(at(1), at(6)).Window.CoverageGaps; len(gaps) != 1 || gaps[0].Kind != GapNotRunning || !gaps[0].From.Equal(at(2)) || !gaps[0].To.Equal(at(5)) {
 		t.Fatalf("restart gap: %+v", gaps)
 	}
 	cutoff := at(10).Add(-time.Duration(c.RetentionDays) * 24 * time.Hour)
@@ -383,7 +383,7 @@ func TestCoverageStallIsGap(t *testing.T) {
 	if len(got) != 2 || !got[0].End.Equal(at(2)) || !got[1].Start.Equal(at(6)) || !got[1].End.Equal(at(7)) {
 		t.Fatalf("coverage: %+v", got)
 	}
-	if w := loaded.Split(at(0), at(7)).Window; !w.Truncated || len(w.CoverageGaps) != 1 || !w.CoverageGaps[0].From.Equal(at(2)) || !w.CoverageGaps[0].To.Equal(at(6)) {
+	if w := loaded.Split(at(0), at(7)).Window; !w.Truncated || len(w.CoverageGaps) != 1 || w.CoverageGaps[0].Kind != GapStall || !w.CoverageGaps[0].From.Equal(at(2)) || !w.CoverageGaps[0].To.Equal(at(6)) {
 		t.Fatalf("stall gap: %+v", w)
 	}
 }
@@ -470,7 +470,7 @@ func TestFeedLinesBackpressureGap(t *testing.T) {
 	w2 := loaded.Split(start, asOf).Window
 	covered := false
 	for _, g := range w2.CoverageGaps {
-		if !g.From.After(stallAt) && g.To.Sub(stallAt) >= 20*time.Millisecond {
+		if g.Kind == GapStall && !g.From.After(stallAt) && g.To.Sub(stallAt) >= 20*time.Millisecond {
 			covered = true
 		}
 	}

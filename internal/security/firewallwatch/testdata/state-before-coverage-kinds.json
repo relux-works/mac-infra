@@ -1,0 +1,11 @@
+{
+  "entries": {}, "events": [], "signers": {},
+  "alf": {"unrecognized": 4}, "netfilter": {},
+  "nettop_unrecognized": 0, "backend_healthy": true,
+  "updated": "2026-10-28T01:00:00Z",
+  "coverage": [
+    {"start":"2026-10-28T00:00:00Z","end":"2026-10-28T00:10:00Z"},
+    {"start":"2026-10-28T00:11:00Z","end":"2026-10-28T01:00:00Z"}
+  ],
+  "evicted_through": "0001-01-01T00:00:00Z"
+}

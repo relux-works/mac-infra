@@ -162,3 +162,46 @@ func TestWatchDigestSplit(t *testing.T) {
 		t.Fatalf("split: %s", o.String())
 	}
 }
+
+// Both status formats expose persisted queue and timing health without starting a collector.
+func TestWatchHealthOutput(t *testing.T) {
+	config, c := watchConfig(t, 0)
+	s, err := firewallwatch.OpenStore(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.State.Health = firewallwatch.RunHealth{
+		LineQueueHighWater: firewallwatch.QueueHighWater{ALF: 64, Netfilter: 32},
+		Classification:     firewallwatch.TimingSummary{LastNS: 1000000, MaxNS: 2000000, Count: 3},
+	}
+	if err = s.Save(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, asJSON := range []bool{false, true} {
+		var out, errOut bytes.Buffer
+		args := []string{"watch", "status", "--config", config}
+		if asJSON {
+			args = append(args, "--json")
+		}
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatal(code, errOut.String())
+		}
+		if asJSON {
+			var status map[string]any
+			if err = json.Unmarshal(out.Bytes(), &status); err != nil {
+				t.Fatal(err)
+			}
+			queue := status["line_queue_high_water"].(map[string]any)
+			timing := status["run_loop_timing"].(map[string]any)["classification"].(map[string]any)
+			if queue["alf"] != float64(64) || queue["netfilter"] != float64(32) || timing["count"] != float64(3) {
+				t.Fatal(status)
+			}
+		} else {
+			for _, want := range []string{"line queue high-water: alf=64 netfilter=32", "save: last=", "classification: last=1ms max=2ms count=3"} {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("missing %s: %s", want, out.String())
+				}
+			}
+		}
+	}
+}

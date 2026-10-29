@@ -87,6 +87,8 @@ func runWatch(args []string, out, errOut io.Writer) int {
 				return printJSON(s.Status())
 			}
 			fmt.Fprintf(out, "shadow: %s; backend healthy=%t (as of %s); unrecognized=%d; invalid_json=%d; last event=%s\n", s, s.State.BackendHealthy, s.State.Updated.Format(time.RFC3339), s.State.Parser.Unrecognized+s.State.NettopUnrecognized, s.State.Parser.Invalid, s.State.LastEvent.Format(time.RFC3339))
+			h := s.State.Health
+			fmt.Fprintf(out, "line queue high-water: alf=%d netfilter=%d; save: last=%s max=%s count=%d; classification: last=%s max=%s count=%d\n", h.LineQueueHighWater.ALF, h.LineQueueHighWater.Netfilter, time.Duration(h.Save.LastNS), time.Duration(h.Save.MaxNS), h.Save.Count, time.Duration(h.Classification.LastNS), time.Duration(h.Classification.MaxNS), h.Classification.Count)
 			return 0
 		}
 		if split {

@@ -148,16 +148,24 @@ type collectionObserver interface {
 // collector meanwhile; the end of the stream (EOF, error or cancellation) is
 // reported before lines is closed, so the run loop's final save sees it.
 func feedLines(ctx context.Context, r io.Reader, lines chan<- []byte, observer collectionObserver) error {
+	queueDepth := func(n int) {
+		if o, ok := observer.(interface{ QueueDepth(int) }); ok {
+			o.QueueDepth(n)
+		}
+	}
 	e := scanLines(ctx, r, func(line []byte) error {
 		copyLine := append([]byte(nil), line...)
 		select {
 		case lines <- copyLine:
+			queueDepth(len(lines))
 			return nil
 		default:
 		}
+		queueDepth(cap(lines))
 		observer.StallCoverage(time.Now())
 		select {
 		case lines <- copyLine:
+			queueDepth(len(lines))
 			observer.ResumeCoverage(time.Now())
 			return nil
 		case <-ctx.Done():
@@ -231,7 +239,9 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 	// A bounded queue provides backpressure while classification is slow.
 	lines := make(chan []byte, 64)
 	scanDone := make(chan error, 1)
-	go func() { scanDone <- feedLines(childCtx, pipe, lines, s) }()
+	s.BeginCoverage(time.Now())
+	alfCoverage := s.Coverage("")
+	go func() { scanDone <- feedLines(childCtx, pipe, lines, alfCoverage) }()
 	defer func() { cancel(); pipe.Close(); _ = cmd.Wait(); <-scanDone }()
 	// The netfilter stream is optional (config netfilter_source). Its end does
 	// not stop the watcher: ALF and nettop continue, the stream's coverage
@@ -252,9 +262,10 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 		}
 		netLines = make(chan []byte, 64)
 		netDone := make(chan error, 1)
-		go func() { netDone <- feedLines(childCtx, netPipe, netLines, s.Coverage(SourceNetfilter)) }()
-		defer func() { cancel(); netPipe.Close(); _ = netCmd.Wait(); <-netDone }()
 		s.BeginSourceCoverage(SourceNetfilter, time.Now())
+		netCoverage := s.Coverage(SourceNetfilter)
+		go func() { netDone <- feedLines(childCtx, netPipe, netLines, netCoverage) }()
+		defer func() { cancel(); netPipe.Close(); _ = netCmd.Wait(); <-netDone }()
 		s.State.NetfilterError = ""
 	}
 	classify := func(it Item) Decision { return cl.Classify(ctx, it) }
@@ -269,8 +280,6 @@ func Run(ctx context.Context, c Config, cl *Classifier) error {
 		}
 		return len(s.Observe(it, time.Now(), classify)) > 0
 	}
-	// Collection is live from here; a stop or crash ends the span at the last save.
-	s.BeginCoverage(time.Now())
 	// Startup metadata is dirty, but only an emitted event may flush it early.
 	s.dirty = true
 	s.lastSave = time.Now()
