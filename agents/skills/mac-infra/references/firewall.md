@@ -463,9 +463,13 @@ control characters. IP redaction happens once, at write time; load does not
 re-run it, because a cut at the cap can leave an address-looking fragment of a
 token that was not an address. Truncation never splits a UTF-8 rune.
 
-The state directory must be owned by the caller, mode `0700`, and not a symlink;
-the check applies to the entry `state_dir` names, so a trailing `/` does not
-follow a symlink, and a `state_dir` ending in `.` or `..` is refused.
+The state directory must be owned by the caller, mode `0700`, and not a symlink.
+`state_dir` must be a clean absolute path: no `.` or `..` element and no
+repeated `/` (trailing `/` are allowed). Every check and every use then
+name the same directory, and a trailing `/` does not follow a symlink. Any
+other spelling is refused when the config loads. The daily event files are
+found by name inside it, so characters such as `*` or `[` in the path are never
+read as a pattern.
 Choose a short absolute path: Darwin UNIX socket path names must fit in 103 bytes.
 `state.json`, `state-journal.jsonl`, `events-YYYY-MM-DD.jsonl` and
 `new-events.flag` are `0600`. `state.json` is a snapshot; the state journal
@@ -601,8 +605,8 @@ mac-firewall watch repair --config PATH --out DIR
 ```
 
 It refuses while a watcher holds the state directory's lock, when the state
-directory is a symlink (with or without a trailing `/`) or its path ends in
-`.` or `..`, when `DIR` exists, or when `DIR` resolves inside the state
+directory is a symlink or `state_dir` is not a clean absolute path (see
+above), when `DIR` exists, or when `DIR` resolves inside the state
 directory (checked by device and inode, so a symlink or a case variant of the
 path is caught). It only
 reads the state directory: it copies `state.json`, `state-journal.jsonl` and
@@ -626,10 +630,12 @@ and whether a watcher start on it succeeds: the start records the marker and
 saves, tried on a disposable copy with the marker that is removed afterwards.
 A copy that could not be made or removed is reported separately
 (`start_check_error`, naming a copy left behind), never as a start refusal or
-a success. The files the install leaves in place and a start rewrites or
-removes, `new-events.flag` and the daily `events-*.jsonl`, are checked where
-they are, read-only: each one a start would refuse (not a private regular file
-of the caller, mode 0600, with one link) is named in `retained_unsafe`. It
+a success. The files the install leaves in place and a save may rewrite or
+remove, `new-events.flag` and the daily `events-*.jsonl`, are checked where
+they are, read-only. Each one a save would refuse (not a private regular file
+of the caller, mode 0600, with one link) is named in `retained_unsafe`. A flag
+is named even if the next start would not yet rewrite it (no event recorded),
+since a later save would. It
 exits 0 only if the copy opens and starts, the check completed and
 `retained_unsafe` is empty.
 Installing the repaired files is a separate step in a window, with the
@@ -638,8 +644,9 @@ current: copy `DIR/repaired/*` into the state directory (it stays the
 caller's, mode 0700; the files are regular, mode 0600), keep `DIR/original`,
 and leave `last-write-refusal.json` in place, since the next start records it
 as refusal evidence. A file named in `retained_unsafe` is fixed first: set a
-regular file of the caller to mode 0600, or move a symlink or a hard-linked
-file aside (a start rebuilds the flag and the day files from `state.json`).
+regular file of the caller to mode 0600, or move a symlink, a hard-linked file
+or a directory with such a name aside (a save rebuilds the flag and the day
+files from `state.json`).
 Then start the watcher and check `watch status`.
 
 A per-directory advisory lock is acquired before loading state and refuses

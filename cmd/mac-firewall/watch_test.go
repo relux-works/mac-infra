@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"github.com/relux-works/mac-infra/internal/maccore"
 	"os"
 	"path/filepath"
@@ -331,12 +332,62 @@ func TestWatchRepairCLIStartFailsExitsOne(t *testing.T) {
 	}
 }
 
-// A retained file a watcher start would refuse (here new-events.flag with
+// A retained file the startup save would refuse (here new-events.flag with
 // mode 0644, which the install leaves in place) is named in the report, and
-// the command exits 1 although the repaired copy opens and starts. Positive
+// the command exits 1 although the repaired copy opens and starts. The claim
+// is the report and the exit: this fixture has no event, so its next start
+// would not yet rewrite the flag, but any later save would. The same holds in
+// a state directory whose name is an invalid pattern ("state["). Positive
 // control: with the flag private, the same state exits 0 with nothing named.
 func TestWatchRepairCLIRetainedUnsafeExitsOne(t *testing.T) {
+	for _, name := range []string{"state", "state["} {
+		config, c := watchConfig(t, 0)
+		c.StateDir = filepath.Join(filepath.Dir(c.StateDir), name)
+		raw, _ := json.Marshal(c)
+		if e := os.WriteFile(config, raw, 0600); e != nil {
+			t.Fatal(e)
+		}
+		s, e := firewallwatch.OpenStore(c)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e := s.Save(time.Now()); e != nil {
+			t.Fatal(e)
+		}
+		flag := filepath.Join(c.StateDir, "new-events.flag")
+		if e := os.WriteFile(flag, []byte("x\n"), 0600); e != nil {
+			t.Fatal(e)
+		}
+		for _, mode := range []os.FileMode{0644, 0600} {
+			if e := os.Chmod(flag, mode); e != nil {
+				t.Fatal(e)
+			}
+			var out, errOut bytes.Buffer
+			dir := filepath.Join(t.TempDir(), "repair")
+			code := run([]string{"watch", "repair", "--config", config, "--out", dir}, &out, &errOut)
+			var report firewallwatch.RepairReport
+			if e := json.Unmarshal(out.Bytes(), &report); e != nil || !report.Opens || !report.Starts {
+				t.Fatalf("%s mode %o: report %s (%v) %s", name, mode, out.String(), e, errOut.String())
+			}
+			unsafe := mode == 0644
+			if unsafe != (code == 1) || (!unsafe && code != 0) {
+				t.Fatalf("%s mode %o: exit %d, %s", name, mode, code, errOut.String())
+			}
+			if unsafe != (len(report.RetainedUnsafe) == 1 && strings.HasPrefix(report.RetainedUnsafe[0], "new-events.flag: ")) || (!unsafe && len(report.RetainedUnsafe) != 0) {
+				t.Fatalf("%s mode %o: retained_unsafe %q", name, mode, report.RetainedUnsafe)
+			}
+		}
+	}
+}
+
+// A state_dir with an inner symlink followed by ".." names one directory to
+// the kernel and another to filepath.Join. The config is refused at load, the
+// command exits 1 and no output is created, even an output inside the
+// directory the joined paths name. Positive control: the clean spelling of
+// that directory repairs with exit 0.
+func TestWatchRepairCLIRefusesAmbiguousStateDir(t *testing.T) {
 	config, c := watchConfig(t, 0)
+	root := filepath.Dir(c.StateDir)
 	s, e := firewallwatch.OpenStore(c)
 	if e != nil {
 		t.Fatal(e)
@@ -344,27 +395,35 @@ func TestWatchRepairCLIRetainedUnsafeExitsOne(t *testing.T) {
 	if e := s.Save(time.Now()); e != nil {
 		t.Fatal(e)
 	}
-	flag := filepath.Join(c.StateDir, "new-events.flag")
-	if e := os.WriteFile(flag, []byte("x\n"), 0600); e != nil {
+	elsewhere := filepath.Join(t.TempDir(), "other", "sub")
+	if e := errors.Join(os.MkdirAll(elsewhere, 0700), os.Mkdir(filepath.Join(elsewhere, "..", "state"), 0700)); e != nil {
 		t.Fatal(e)
 	}
-	for _, mode := range []os.FileMode{0644, 0600} {
-		if e := os.Chmod(flag, mode); e != nil {
-			t.Fatal(e)
-		}
-		var out, errOut bytes.Buffer
-		dir := filepath.Join(t.TempDir(), "repair")
-		code := run([]string{"watch", "repair", "--config", config, "--out", dir}, &out, &errOut)
-		var report firewallwatch.RepairReport
-		if e := json.Unmarshal(out.Bytes(), &report); e != nil || !report.Opens || !report.Starts {
-			t.Fatalf("mode %o: report %s (%v)", mode, out.String(), e)
-		}
-		unsafe := mode == 0644
-		if unsafe != (code == 1) || (!unsafe && code != 0) {
-			t.Fatalf("mode %o: exit %d, %s", mode, code, errOut.String())
-		}
-		if unsafe != (len(report.RetainedUnsafe) == 1 && strings.HasPrefix(report.RetainedUnsafe[0], "new-events.flag: ")) || (!unsafe && len(report.RetainedUnsafe) != 0) {
-			t.Fatalf("mode %o: retained_unsafe %q", mode, report.RetainedUnsafe)
-		}
+	if e := os.Symlink(elsewhere, filepath.Join(root, "inner")); e != nil {
+		t.Fatal(e)
+	}
+	clean := c.StateDir
+	c.StateDir = root + "/inner/../state"
+	raw, _ := json.Marshal(c)
+	if e := os.WriteFile(config, raw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	var out, errOut bytes.Buffer
+	dir := filepath.Join(clean, "repair")
+	if code := run([]string{"watch", "repair", "--config", config, "--out", dir}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "state dir must be") {
+		t.Fatalf("ambiguous state_dir: exit %d, %s", code, errOut.String())
+	}
+	if _, e := os.Lstat(dir); !os.IsNotExist(e) {
+		t.Fatalf("output created: %v", e)
+	}
+	c.StateDir = clean
+	raw, _ = json.Marshal(c)
+	if e := os.WriteFile(config, raw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"watch", "repair", "--config", config, "--out", filepath.Join(t.TempDir(), "repair")}, &out, &errOut); code != 0 {
+		t.Fatalf("clean state_dir: exit %d, %s", code, errOut.String())
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -557,24 +558,45 @@ func TestRepairReportsUnsafeRetainedFiles(t *testing.T) {
 	}
 }
 
-// A state directory is checked as the entry it names, whatever its spelling.
-// A symlink to it is refused by checkDir, safeDir and the repair with or
-// without trailing separators, and a spelling ending in "." or ".." is
-// refused; the repair creates no output. Positive control: the directory
-// itself, with or without a trailing separator, is accepted and repairs.
+// The state directory is admitted in one spelling, on which every check and
+// every use name the same directory: an absolute clean path, with or without
+// trailing separators. Config validation, checkDir, safeDir and the repair
+// refuse every other spelling, and the repair creates no output: a path
+// ending in "/." or "/.."; a repeated separator or "." element inside; an inner
+// symlink followed by "..", which the kernel resolves elsewhere than
+// filepath.Join does (here the output would have landed in the directory
+// read). A symlink to the directory, written as link, link/ or link//, passes
+// validation as a spelling, and checkDir, safeDir and the repair refuse it.
+// Positive control: the clean path, with one or two trailing
+// separators, validates, passes both checks and repairs.
 func TestStateDirSpellingsCheckTheEntry(t *testing.T) {
 	c, _ := brokenStateDir(t)
+	parent, base := filepath.Dir(c.StateDir), filepath.Base(c.StateDir)
 	link := filepath.Join(t.TempDir(), "link")
 	if e := os.Symlink(c.StateDir, link); e != nil {
 		t.Fatal(e)
 	}
-	for _, dir := range []string{link, link + "/", link + "//", link + "/.", c.StateDir + "/.", c.StateDir + "/sub/.."} {
-		if checkDir(dir) == nil || safeDir(dir) == nil {
-			t.Fatalf("%s: accepted", dir)
-		}
+	elsewhere := filepath.Join(t.TempDir(), "other", "sub")
+	if e := errors.Join(os.MkdirAll(elsewhere, 0700), os.Mkdir(filepath.Join(elsewhere, "..", base), 0700)); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Symlink(elsewhere, filepath.Join(parent, "inner")); e != nil {
+		t.Fatal(e)
+	}
+	refused := []string{link, link + "/", link + "//", link + "/.", c.StateDir + "/.", c.StateDir + "/sub/..",
+		parent + "//" + base, parent + "/./" + base, parent + "/inner/../" + base}
+	for _, dir := range refused {
 		rc := c
 		rc.StateDir = dir
+		// A symlink written cleanly is a valid spelling; the entry checks refuse it.
+		spelling := dir != link && dir != link+"/" && dir != link+"//"
+		if checkDir(dir) == nil || safeDir(dir) == nil || spelling != (rc.Validate() != nil) {
+			t.Fatalf("%s: accepted", dir)
+		}
 		out := filepath.Join(t.TempDir(), "repair")
+		if dir == parent+"/inner/../"+base {
+			out = filepath.Join(c.StateDir, "repair")
+		}
 		if _, e := Repair(rc, out); e == nil {
 			t.Fatalf("%s: repaired", dir)
 		}
@@ -582,17 +604,58 @@ func TestStateDirSpellingsCheckTheEntry(t *testing.T) {
 			t.Fatalf("%s: output created: %v", dir, e)
 		}
 	}
-	for _, dir := range []string{c.StateDir, c.StateDir + "/"} {
-		if e := checkDir(dir); e != nil {
-			t.Fatalf("%s: %v", dir, e)
-		}
-		if e := safeDir(dir); e != nil {
-			t.Fatalf("%s: %v", dir, e)
-		}
+	for _, dir := range []string{c.StateDir, c.StateDir + "/", c.StateDir + "//"} {
 		rc := c
 		rc.StateDir = dir
+		if e := errors.Join(checkDir(dir), safeDir(dir), rc.Validate()); e != nil {
+			t.Fatalf("%s: %v", dir, e)
+		}
 		if report, e := Repair(rc, filepath.Join(t.TempDir(), "repair")); e != nil || !report.Opens || !report.Starts {
 			t.Fatalf("%s: %+v %v", dir, report, e)
+		}
+	}
+}
+
+// Characters of the state directory's path are never read as a pattern. In a
+// directory named "state[" (an invalid pattern) the startup save succeeds and
+// the repair's ready report holds after the documented install; in one named
+// "state*", a daily event file in a sibling directory the name would match
+// survives the save, while an obsolete one inside is still removed (positive
+// control for the cleanup).
+func TestStateDirNameIsNotAPattern(t *testing.T) {
+	for _, name := range []string{"state[", "state*"} {
+		c, _ := brokenStateDir(t)
+		dir := filepath.Join(filepath.Dir(c.StateDir), name)
+		if e := os.Rename(c.StateDir, dir); e != nil {
+			t.Fatal(e)
+		}
+		c.StateDir = dir
+		sibling := filepath.Join(filepath.Dir(dir), name[:len(name)-1]+"-other")
+		if e := os.Mkdir(sibling, 0700); e != nil {
+			t.Fatal(e)
+		}
+		writeMode(t, filepath.Join(sibling, "events-1900-01-01.jsonl"), "{}\n", 0600)
+		writeMode(t, filepath.Join(dir, "events-1900-01-02.jsonl"), "{}\n", 0600)
+		out := filepath.Join(t.TempDir(), "repair")
+		report, e := Repair(c, out)
+		if e != nil || !report.Opens || !report.Starts || report.StartCheckError != "" || len(report.RetainedUnsafe) != 0 {
+			t.Fatalf("%s: %+v %v", name, report, e)
+		}
+		for _, f := range []string{"state.json", journalFile} {
+			b, e := os.ReadFile(filepath.Join(out, "repaired", f))
+			if e != nil {
+				t.Fatal(e)
+			}
+			writeMode(t, filepath.Join(dir, f), string(b), 0600)
+		}
+		if _, e := openRun(c, time.Now); e != nil {
+			t.Fatalf("%s: start after install: %v", name, e)
+		}
+		if _, e := os.Stat(filepath.Join(sibling, "events-1900-01-01.jsonl")); e != nil {
+			t.Fatalf("%s: sibling day file: %v", name, e)
+		}
+		if _, e := os.Stat(filepath.Join(dir, "events-1900-01-02.jsonl")); !os.IsNotExist(e) {
+			t.Fatalf("%s: obsolete day file kept: %v", name, e)
 		}
 	}
 }

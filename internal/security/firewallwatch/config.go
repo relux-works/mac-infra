@@ -87,6 +87,9 @@ func (c Config) Validate() error {
 			return errors.New("all paths must be absolute")
 		}
 	}
+	if _, e := stateDirLeaf(c.StateDir); e != nil {
+		return e
+	}
 	for _, v := range []string{c.NettopInterval, c.DenySpikeWindow, c.ClassifierTimeout, c.SaveInterval, c.SignerFailureTTL} {
 		if d, e := time.ParseDuration(v); e != nil || d <= 0 {
 			return errors.New("required durations must be positive Go durations")

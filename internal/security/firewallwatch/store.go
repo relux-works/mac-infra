@@ -177,10 +177,14 @@ func checkDir(dir string) error {
 	return nil
 }
 
-// stateDirLeaf is the state dir's spelling for the symlink check: without
-// trailing separators, with which Lstat follows a final symlink ("link/"
-// passed as a directory). A spelling ending in "." or ".." names no entry to
-// check and is refused.
+// stateDirLeaf admits the one spelling of the state dir on which every check
+// and every use agree, and returns it without trailing separators: an
+// absolute path that filepath.Clean leaves unchanged (trailing separators
+// aside), so no "." or ".." element and no repeated separator. On it the
+// checks (Lstat, ReadDir, the lock) and the uses (filepath.Join, which
+// cleans lexically) name the same directory, and Lstat sees a final symlink
+// instead of following it. An empty dir is passed through for Lstat to
+// refuse.
 func stateDirLeaf(dir string) (string, error) {
 	if dir == "" {
 		return dir, nil
@@ -189,8 +193,8 @@ func stateDirLeaf(dir string) (string, error) {
 	if leaf == "" {
 		leaf = string(filepath.Separator)
 	}
-	if base := filepath.Base(leaf); base == "." || base == ".." {
-		return "", errors.New("state dir must name its directory, not end in . or ..")
+	if !filepath.IsAbs(leaf) || filepath.Clean(leaf) != leaf {
+		return "", errors.New("state dir must be an absolute path without . or .. elements or repeated separators")
 	}
 	return leaf, nil
 }
@@ -1086,12 +1090,13 @@ func (s *Store) saveProjections(now, start time.Time) (e error) {
 		}
 		s.dayHashes[day] = h
 	}
-	files, e := filepath.Glob(filepath.Join(s.Config.StateDir, "events-*.jsonl"))
+	files, e := dayFiles(s.Config.StateDir)
 	if e != nil {
 		return e
 	}
-	for _, path := range files {
-		day := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "events-"), ".jsonl")
+	for _, name := range files {
+		path := filepath.Join(s.Config.StateDir, name)
+		day := strings.TrimSuffix(strings.TrimPrefix(name, "events-"), ".jsonl")
 		if _, ok := days[day]; !ok {
 			if e = safeExisting(path); e != nil {
 				return e
@@ -1117,6 +1122,23 @@ func (s *Store) saveProjections(now, start time.Time) (e error) {
 	// must not make the next silent flush save again at once (BUG-261030-v6ahj5).
 	s.lastSave = now.Add(time.Since(start))
 	return nil
+}
+
+// dayFiles names the daily event files in dir (events-*.jsonl). It matches
+// entry names, not the joined path, so characters of dir are never read as a
+// pattern (a dir named "state*" would otherwise match files beside it).
+func dayFiles(dir string) ([]string, error) {
+	entries, e := os.ReadDir(dir)
+	if e != nil {
+		return nil, e
+	}
+	var names []string
+	for _, entry := range entries {
+		if day, _ := filepath.Match("events-*.jsonl", entry.Name()); day {
+			names = append(names, entry.Name())
+		}
+	}
+	return names, nil
 }
 
 type DigestGroup struct {

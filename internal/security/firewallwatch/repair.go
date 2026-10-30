@@ -272,21 +272,17 @@ func checkStart(c Config, dir string, outputs map[string][]byte, marker []byte) 
 }
 
 // retainedUnsafe applies the startup save's file check (safeExisting) to the
-// files of dir that the save rewrites or removes and the install keeps: the
-// new-events flag and every daily event file (the save's own pattern). It
-// only reads metadata.
+// files of dir that the save may rewrite or remove and the install keeps: the
+// new-events flag and every daily event file (dayFiles, as the save lists
+// them). It only reads metadata. A flag is named even when the next start
+// would not rewrite it (no event recorded yet): any later save would.
 func retainedUnsafe(dir string) ([]string, error) {
-	entries, e := os.ReadDir(dir)
+	days, e := dayFiles(dir)
 	if e != nil {
 		return nil, e
 	}
 	var unsafe []string
-	for _, entry := range entries {
-		name := entry.Name()
-		day, _ := filepath.Match("events-*.jsonl", name)
-		if name != "new-events.flag" && !day {
-			continue
-		}
+	for _, name := range append([]string{"new-events.flag"}, days...) {
 		if e := safeExisting(filepath.Join(dir, name)); e != nil {
 			unsafe = append(unsafe, name+": "+e.Error())
 		}
