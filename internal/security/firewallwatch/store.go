@@ -776,6 +776,12 @@ func (s *Store) journalOrSnapshot(now time.Time, beat bool) error {
 	if e == nil {
 		return nil
 	}
+	// A shape-check refusal ends the run with its named error and marker
+	// (refusal.go), even when a snapshot could succeed (pruning can drop
+	// the refused span). Other append failures recover through a snapshot.
+	if errors.Is(e, errInvalidState) {
+		return e
+	}
 	if se := s.Save(now); se != nil {
 		return errors.Join(e, se)
 	}

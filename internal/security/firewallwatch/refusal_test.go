@@ -267,3 +267,43 @@ func TestSeveralRefusalsInOneGap(t *testing.T) {
 		t.Fatalf("gaps %+v; want one write_refused naming both checks and the repeat", gaps)
 	}
 }
+
+// Review r3: a shape-check refusal of a journal record is returned as such,
+// also when a snapshot could succeed instead (at cap 1 the snapshot's prune
+// drops the refused span), so the run ends with the named error and its
+// marker; the last durable state stays readable. Control: an ordinary
+// append I/O failure still recovers through a snapshot, keeping the entry.
+// Negative control: falling back to the snapshot on a refusal returns nil.
+func TestRefusalIsNotSwallowedBySnapshotFallback(t *testing.T) {
+	for _, cap := range []int{1, 20} {
+		s, c := journalStore(t)
+		s.Config.MaxEntries, c.MaxEntries = cap, cap
+		at := time.Now()
+		s.BeginCoverage(at)
+		if e := s.Save(at.Add(time.Second)); e != nil {
+			t.Fatal(e)
+		}
+		back := sameWallLaterMono(t, at.Add(-time.Second), 2*time.Second)
+		s.StallCoverage(back)
+		s.ResumeCoverage(sameWallLaterMono(t, at.Add(-time.Second), 3*time.Second))
+		err := s.Checkpoint(back)
+		if !errors.Is(err, errRefusedRecord) || !errors.Is(err, errInvalidState) {
+			t.Fatalf("cap %d: checkpoint %v; want the named refusal", cap, err)
+		}
+		if _, e := OpenStore(c); e != nil {
+			t.Fatalf("cap %d: last durable state unreadable: %v", cap, e)
+		}
+	}
+
+	s, c := journalStore(t)
+	at := time.Now()
+	s.Observe(newKey(1), at, ruleClassify)
+	s.journalWrite = func(*os.File, []byte) error { return errors.New("injected append I/O failure") }
+	if e := s.Flush(at, true, false); e != nil {
+		t.Fatalf("ordinary append failure: %v; want recovery through a snapshot", e)
+	}
+	r, e := OpenStore(c)
+	if e != nil || r.State.Entries[key(newKey(1))] == nil {
+		t.Fatalf("snapshot fallback lost the entry: %v", e)
+	}
+}

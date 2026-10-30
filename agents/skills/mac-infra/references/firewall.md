@@ -580,8 +580,10 @@ the recorded time, later than the refresh by at most the step; after a large
 manual step back (hours), by that much. `first_seen` and `window_start` are
 never moved. Before writing, the watcher checks a record or snapshot as the
 reader will load it, by wall time only; one the reader would reject is refused
-before anything is written, never written and never dropped silently. The run
-then ends with an error that names the check (stderr) and leaves
+before anything is written, never written and never dropped silently (a
+refused journal record is not replaced by a fallback snapshot, which serves
+only ordinary append failures). The run then ends with an error that names the
+check (stderr) and leaves
 `last-write-refusal.json` in the state directory, holding only the time, the
 check and the kind; the next start records it in `write_refusals` (the last
 32), removes the marker, and the digest labels that restart's gap
