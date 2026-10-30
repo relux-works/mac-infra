@@ -247,8 +247,9 @@ two seconds, in completion order: `kind` (`save`, `classification`,
 `maintenance`, `nettop_sample` or `journal`), `at` (completion time), `duration_ns`, and
 `items` when known (the rows of a nettop sample, including the time spent on
 collector lines drained during it, or the labelled pool rows of a maintenance
-whose Init succeeded). A failed or timed-out nettop command is recorded as a
-`nettop_sample` without `items`. Records hold no item text, hosts, apps or paths. When the
+whose Init succeeded). A `nettop_sample` is timed from the command start, so it
+includes command time during which the run loop kept handling lines. A failed
+or timed-out nettop command is recorded as a `nettop_sample` without `items`. Records hold no item text, hosts, apps or paths. When the
 bound drops a record, `health.slow_ops_dropped_through` keeps the latest dropped
 completion time. Like the timings, a save's own record persists with the next
 save.
@@ -523,12 +524,24 @@ A shutdown takes a snapshot and removes the journal, so an older binary reads
 the full state after a clean stop. After a crash, run this binary once before
 rolling back, or the older binary misses the journaled records.
 
+The nettop command runs off the run loop, one at a time: while it runs, the
+loop keeps handling ALF and netfilter lines and the save timer, so a command
+that runs to its timeout under a socket flood does not stall the feeders. A tick
+that finds a command still running is skipped, and the tick restarts when a
+sample completes, so the next command starts a full `nettop_interval` later
+rather than at once. A command that outlives its timeout (`nettop_interval`) is
+killed by its own PID only; its partial output is discarded, it records
+`nettop_error`, emits nothing and is recorded as a `nettop_sample` without
+items. On shutdown a running command is cancelled and its result discarded.
 Before each nettop row is classified, the sample handles the ALF and netfilter
 lines already queued, at most one queue's worth per source (each source has
 its own budget) and without waiting, so a sample of many slow classifications
 does not hold the feeders in a stall. After cancellation the sample drains
-nothing. Backend maintenance, journal appends and snapshots still block the
-run loop. An observation decides only its own key's retention: an entry last
+nothing. Row collection, backend maintenance, journal appends and snapshots
+still run on the run loop. Each new item that emits an event costs one journal
+append with `F_FULLFSYNC`, so a flood of lines that are each a new item (for
+example loopback flows to many fresh ports) is handled at the speed of those
+appends, tens of lines per second, and can still stall the feeders. An observation decides only its own key's retention: an entry last
 seen before the cutoff counts as new. Entries, events and coverage spans nobody
 observes expire at the next snapshot. When an observation takes entries,
 events or signers over `max_entries`, their retention and bound prune runs at

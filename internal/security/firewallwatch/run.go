@@ -310,21 +310,90 @@ func drainQueued(ctx context.Context, alf <-chan []byte, netfilter *chan []byte,
 	return nil
 }
 
-// sampleNettop runs one nettop sample through run, the collector command,
-// and collects its rows. A failed or timed-out command records nettop_error
-// and emits nothing. The sample is a slow-operation candidate on every exit,
-// including a failed command, with the parsed row count (zero when the command
-// failed; PR67 review r1).
-func (s *Store) sampleNettop(run func(io.Writer) error, collect func(Item) bool, flush func(emitted bool) error, drain func() error) (bool, error) {
-	start, rows := time.Now(), 0
+// nettopRun is the result of one nettop command.
+type nettopRun struct {
+	output *cappedBuffer
+	err    error
+}
+
+// nettopSampler runs the nettop command off the run loop, at most one at a
+// time, so a slow command (up to its timeout under a socket flood) does not
+// stop the loop from handling collector lines and the save timer
+// (BUG-261030-pq91zb). The command runs on its own goroutine and touches no
+// Store state; the loop receives the result from done and collects the rows.
+type nettopSampler struct {
+	command func(ctx context.Context, out io.Writer) error
+	done    chan nettopRun
+	stop    context.CancelFunc
+	start   time.Time
+	busy    bool
+}
+
+func newNettopSampler(command func(ctx context.Context, out io.Writer) error) *nettopSampler {
+	return &nettopSampler{command: command, done: make(chan nettopRun, 1)}
+}
+
+// begin starts a command bounded by timeout, unless one is still running; a
+// tick that finds a running command is skipped.
+func (n *nettopSampler) begin(ctx context.Context, timeout time.Duration) bool {
+	if n.busy {
+		return false
+	}
+	sampleCtx, stop := context.WithTimeout(ctx, timeout)
+	n.busy, n.stop, n.start = true, stop, time.Now()
+	go func() {
+		output := &cappedBuffer{limit: 4 << 20}
+		err := n.command(sampleCtx, output)
+		n.done <- nettopRun{output: output, err: err}
+	}()
+	return true
+}
+
+// finish marks the received run complete and returns its start time.
+func (n *nettopSampler) finish() time.Time {
+	n.stop()
+	n.busy = false
+	return n.start
+}
+
+// wait cancels a running command and waits for it, so no nettop child
+// outlives Run; its result is discarded.
+func (n *nettopSampler) wait() {
+	if n.busy {
+		n.stop()
+		<-n.done
+		n.busy = false
+	}
+}
+
+// runNettop runs one nettop child into out. On timeout or cancellation
+// exec.CommandContext kills that child by its PID and nothing else; WaitDelay
+// bounds the wait for its output pipe afterwards.
+func runNettop(ctx context.Context, out io.Writer) error {
+	return runChild(collectorCommand(ctx, "nettop"), out)
+}
+
+func runChild(cmd *exec.Cmd, out io.Writer) error {
+	cmd.Stdout = out
+	cmd.WaitDelay = time.Second
+	return cmd.Run()
+}
+
+// sampleNettop collects the rows of one completed nettop command started at
+// start. A failed command, including one killed at its timeout, records
+// nettop_error and emits nothing: output it wrote before failing is discarded.
+// The sample is a slow-operation candidate on every exit, timed from the
+// command start, with the parsed row count (zero when the command failed;
+// PR67 review r1).
+func (s *Store) sampleNettop(run nettopRun, start time.Time, collect func(Item) bool, flush func(emitted bool) error, drain func() error) (bool, error) {
+	rows := 0
 	defer func() { s.State.Health.recordSlow(SlowNettopSample, time.Since(start), time.Now(), rows) }()
-	output := &cappedBuffer{limit: 4 << 20}
-	if e := run(output); e != nil {
+	if run.err != nil {
 		s.State.NettopError = "nettop sample failed"
 		return false, nil
 	}
 	s.State.NettopError = ""
-	items, unknown := ParseNettop(output.String())
+	items, unknown := ParseNettop(run.output.String())
 	s.State.NettopUnrecognized += unknown
 	rows = len(items)
 	return collectSample(items, collect, flush, drain)
@@ -487,15 +556,6 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		return flush(emitted)
 	}
 	drain := func() error { return drainQueued(ctx, lines, &netLines, onALF, onNetfilter) }
-	sample := func() (bool, error) {
-		sampleCtx, stop := context.WithTimeout(ctx, duration(c.NettopInterval))
-		defer stop()
-		return s.sampleNettop(func(out io.Writer) error {
-			nettop := collectorCommand(sampleCtx, "nettop")
-			nettop.Stdout = out
-			return nettop.Run()
-		}, collect, flush, drain)
-	}
 	maintain := func() {
 		start, pool := time.Now(), 0
 		if ctx.Err() == nil && !cl.CheckHealth(ctx) && cl.Init(ctx) == nil {
@@ -505,28 +565,68 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		s.State.Health.Maintenance.observe(d, now)
 		s.State.Health.recordSlow(SlowMaintenance, d, now, pool)
 	}
+	sampler := newNettopSampler(runNettop)
+	defer sampler.wait()
 	tick := time.NewTicker(duration(c.NettopInterval))
 	defer tick.Stop()
+	loop := &runLoop{
+		alf: lines, netfilter: &netLines, saveTick: saveTick.C,
+		tick: tick, interval: duration(c.NettopInterval), sampler: sampler,
+		onALF: onALF, onNetfilter: onNetfilter, flush: flush,
+		sample: func(run nettopRun, start time.Time) error {
+			return sampleTick(func() (bool, error) {
+				return s.sampleNettop(run, start, collect, flush, drain)
+			}, save, maintain)
+		},
+	}
+	return loop.run(ctx)
+}
+
+// runLoop is the watcher's event loop. Run wires it to the collectors; the
+// fields keep it testable with fake queues and a fake nettop command.
+type runLoop struct {
+	alf         <-chan []byte
+	netfilter   *chan []byte // nil when the stream is off or ended
+	saveTick    <-chan time.Time
+	tick        *time.Ticker
+	interval    time.Duration // nettop_interval: the tick period and the command timeout
+	sampler     *nettopSampler
+	onALF       func(line []byte, ok bool) (bool, error)
+	onNetfilter func(line []byte, ok bool) error
+	flush       func(emitted bool) error
+	sample      func(run nettopRun, start time.Time) error
+}
+
+// run handles collector lines, the save timer and nettop results until ctx
+// ends or a handler fails. A tick starts a nettop command unless one is still
+// running; the loop keeps handling lines while it runs. After each completed
+// sample the tick restarts, so the next command starts a full interval later
+// rather than at once from a tick that came due during a slow sample.
+func (l *runLoop) run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-saveTick.C:
-			if e = flush(false); e != nil {
+		case <-l.saveTick:
+			if e := l.flush(false); e != nil {
 				return e
 			}
-		case line, ok := <-lines:
-			if done, e := onALF(line, ok); done || e != nil {
+		case line, ok := <-l.alf:
+			if done, e := l.onALF(line, ok); done || e != nil {
 				return e
 			}
-		case line, ok := <-netLines:
-			if e = onNetfilter(line, ok); e != nil {
+		case line, ok := <-*l.netfilter:
+			if e := l.onNetfilter(line, ok); e != nil {
 				return e
 			}
-		case <-tick.C:
-			if e = sampleTick(sample, save, maintain); e != nil {
+		case <-l.tick.C:
+			l.sampler.begin(ctx, l.interval)
+		case run := <-l.sampler.done:
+			start := l.sampler.finish()
+			if e := l.sample(run, start); e != nil {
 				return e
 			}
+			l.tick.Reset(l.interval)
 		}
 	}
 }

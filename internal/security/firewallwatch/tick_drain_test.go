@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func noDrain() error { return nil }
@@ -147,10 +147,21 @@ func TestDrainQueuedBoundIsPerSource(t *testing.T) {
 	}
 }
 
+func nettopResult(t *testing.T, raw []byte, err error) nettopRun {
+	t.Helper()
+	out := &cappedBuffer{limit: 4 << 20}
+	if _, e := out.Write(raw); e != nil {
+		t.Fatal(e)
+	}
+	return nettopRun{output: out, err: err}
+}
+
 // PR67 review r1, finding 2: a nettop sample is a slow-operation candidate on
 // every exit. A failed or timed-out collector command records the sample with
 // no rows, sets nettop_error and emits nothing; a successful one records its
-// parsed row count and clears the error.
+// parsed row count and clears the error. BUG-261030-pq91zb: a command killed at
+// its timeout after writing complete rows (a late sample) collects none of
+// them, and the recorded duration runs from the command start.
 func TestSampleNettopRecordsEveryExit(t *testing.T) {
 	saved := slowOpThreshold
 	slowOpThreshold = 0
@@ -160,26 +171,38 @@ func TestSampleNettopRecordsEveryExit(t *testing.T) {
 		t.Fatal(e)
 	}
 	s := pruneFixture(t, 20)
-	collect := func(Item) bool { return false }
+	collected := 0
+	collect := func(Item) bool { collected++; return false }
 	flush := func(bool) error { return nil }
 
 	timeout := errors.New("signal: killed")
-	emitted, e := s.sampleNettop(func(io.Writer) error { return timeout }, collect, flush, noDrain)
+	emitted, e := s.sampleNettop(nettopResult(t, nil, timeout), time.Now(), collect, flush, noDrain)
 	ops := s.State.Health.SlowOps
 	if emitted || e != nil || s.State.NettopError == "" || len(ops) != 1 || ops[0].Kind != SlowNettopSample || ops[0].Items != 0 {
 		t.Fatalf("failed command: emitted=%t err=%v nettop_error=%q ops=%+v", emitted, e, s.State.NettopError, ops)
 	}
 
-	_, e = s.sampleNettop(func(w io.Writer) error { _, err := w.Write(raw); return err }, collect, flush, noDrain)
+	start := time.Now().Add(-30 * time.Second)
+	_, e = s.sampleNettop(nettopResult(t, raw, nil), start, collect, flush, noDrain)
 	ops = s.State.Health.SlowOps
-	if e != nil || s.State.NettopError != "" || len(ops) != 2 || ops[1].Items != 7 {
-		t.Fatalf("successful command: err=%v nettop_error=%q ops=%+v", e, s.State.NettopError, ops)
+	if e != nil || s.State.NettopError != "" || len(ops) != 2 || ops[1].Items != 7 || collected != 7 {
+		t.Fatalf("successful command: err=%v nettop_error=%q collected=%d ops=%+v", e, s.State.NettopError, collected, ops)
+	}
+	if time.Duration(ops[1].NS) < 30*time.Second {
+		t.Fatalf("duration %v does not include the command time", time.Duration(ops[1].NS))
+	}
+
+	collected = 0
+	emitted, e = s.sampleNettop(nettopResult(t, raw, timeout), time.Now(), collect, flush, noDrain)
+	ops = s.State.Health.SlowOps
+	if emitted || e != nil || collected != 0 || s.State.NettopError == "" || len(ops) != 3 || ops[2].Items != 0 {
+		t.Fatalf("late sample: emitted=%t err=%v collected=%d nettop_error=%q ops=%+v", emitted, e, collected, s.State.NettopError, ops)
 	}
 
 	// A drain error still records the sample with its rows.
 	failed := errors.New("ALF log stream ended")
-	_, e = s.sampleNettop(func(w io.Writer) error { _, err := w.Write(raw); return err }, collect, flush, func() error { return failed })
-	if ops = s.State.Health.SlowOps; !errors.Is(e, failed) || len(ops) != 3 || ops[2].Items != 7 {
+	_, e = s.sampleNettop(nettopResult(t, raw, nil), time.Now(), collect, flush, func() error { return failed })
+	if ops = s.State.Health.SlowOps; !errors.Is(e, failed) || len(ops) != 4 || ops[3].Items != 7 {
 		t.Fatalf("drain error: err=%v ops=%+v", e, ops)
 	}
 }
