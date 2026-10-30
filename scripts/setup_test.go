@@ -258,43 +258,109 @@ func TestSetupScopedInstall(t *testing.T) {
 		}
 	})
 	// Claim: an existing bin/mac-keyvault-kek is kept by a scoped run without
-	// --rebuild-kek: no go build runs, its bytes and installed link are
-	// unchanged. Its keys trust exactly that binary. A stub go answers list and
-	// test (so no real keyvault test runs here) and records any build.
+	// --rebuild-kek, alone or with another tool: no broker build runs, its bytes
+	// are unchanged, the run reaches installation and exits 0 with no shell
+	// diagnostic, and the installed link keeps whatever broker it names (this
+	// checkout's, another checkout's, or a regular file); a missing link is
+	// created. Its keys trust exactly the installed binary. A stub go answers
+	// list and test (so no real keyvault test runs here) and writes a fixture
+	// for any other selected tool's build.
 	t.Run("kek-kept", func(t *testing.T) {
-		f := newSetupFixture(t, cache)
-		buildDir := filepath.Join(f.root, "bin")
-		if err := os.Mkdir(buildDir, 0700); err != nil {
-			t.Fatal(err)
+		cases := []struct {
+			name, only, link string
+		}{
+			{"own link", "mac-keyvault-kek", "own"},
+			{"missing link", "mac-keyvault-kek", "missing"},
+			{"other checkout", "mac-keyvault-kek", "other"},
+			{"other checkout with another tool", "mac-keyvault-kek,mac-load-profile", "other"},
+			{"regular file", "mac-keyvault-kek", "file"},
 		}
-		kek := filepath.Join(buildDir, "mac-keyvault-kek")
-		writeProvenanceFile(t, kek, "trusted broker bytes")
-		if err := os.Symlink(kek, filepath.Join(f.bin, "mac-keyvault-kek")); err != nil {
-			t.Fatal(err)
-		}
-		tools := t.TempDir()
-		goCalls := filepath.Join(tools, "go-calls")
-		fakeTool(t, tools, "go", `[ "$1" = -C ] && shift 2
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newSetupFixture(t, cache)
+				buildDir := filepath.Join(f.root, "bin")
+				if err := os.Mkdir(buildDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				kek := filepath.Join(buildDir, "mac-keyvault-kek")
+				writeProvenanceFile(t, kek, "trusted broker bytes")
+				link := filepath.Join(f.bin, "mac-keyvault-kek")
+				other := filepath.Join(f.home, "other-broker")
+				writeProvenanceFile(t, other, "other checkout's trusted broker")
+				switch tc.link {
+				case "own":
+					os.Symlink(kek, link)
+				case "other":
+					os.Symlink(other, link)
+				case "file":
+					writeProvenanceFile(t, link, "installed broker file")
+				}
+				tools := t.TempDir()
+				goCalls := filepath.Join(tools, "go-calls")
+				fakeTool(t, tools, "go", `[ "$1" = -C ] && shift 2
 echo "$@" >> '`+goCalls+`'
 case "$1" in
   list) echo github.com/relux-works/mac-infra/cmd/mac-keyvault-kek ;;
   test) exit 0 ;;
+  build) shift
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -o ]; then shift; case "$1" in */mac-keyvault-kek) exit 77 ;; esac; echo fixture > "$1"; exit 0; fi
+      shift
+    done
+    exit 77 ;;
   *) exit 77 ;;
 esac`)
+				f.env = append(f.env, "PATH="+tools+":"+os.Getenv("PATH"))
+				beforeLink, _ := os.Readlink(link)
+				out, code := f.run(t, "--only", tc.only, "--allow-unprovable")
+				if code != 0 || !strings.Contains(out, "Keeping the existing bin/mac-keyvault-kek") || !strings.Contains(out, "Installed binary symlinks:") || strings.Contains(out, "unbound variable") || strings.Contains(out, "Building mac-keyvault-kek") {
+					t.Fatalf("exit %d\n%s", code, out)
+				}
+				if calls, _ := os.ReadFile(goCalls); strings.Contains(string(calls), "mac-keyvault-kek ./cmd") || strings.Contains(string(calls), "/mac-keyvault-kek ./cmd/mac-keyvault-kek") {
+					t.Fatalf("the broker was built: %q", calls)
+				}
+				requireProvenanceBytes(t, kek, []byte("trusted broker bytes"))
+				switch tc.link {
+				case "own", "other":
+					if after, err := os.Readlink(link); err != nil || after != beforeLink {
+						t.Fatalf("installed link %q -> %q (%v)", beforeLink, after, err)
+					}
+				case "missing":
+					if after, err := os.Readlink(link); err != nil || after != kek {
+						t.Fatalf("missing link not created: %q (%v)", after, err)
+					}
+				case "file":
+					requireProvenanceBytes(t, link, []byte("installed broker file"))
+				}
+			})
+		}
+	})
+	// Claim: a run that dies on a shell error after staging exits non-zero
+	// even where bash 3.2 itself would report 0 (an unbound expansion under
+	// set -u): the EXIT trap turns an unfinished run into exit 1.
+	t.Run("unfinished-run-fails", func(t *testing.T) {
+		f := newSetupFixture(t, cache)
+		script := filepath.Join(f.root, "scripts/setup.sh")
+		data, err := os.ReadFile(script)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Plant an unbound expansion right after staging is set up.
+		planted := strings.Replace(string(data), "trap 'exit 129' HUP\n", "trap 'exit 129' HUP\nEMPTY=()\necho \"${EMPTY[@]}\"\n", 1)
+		if planted == string(data) {
+			t.Fatal("plant not applied")
+		}
+		if err := os.WriteFile(script, []byte(planted), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		tools := t.TempDir()
+		fakeTool(t, tools, "go", `[ "$1" = -C ] && shift 2
+case "$1" in list) echo github.com/relux-works/mac-infra/cmd/mac-load-profile ;; test) exit 0 ;; *) exit 77 ;; esac`)
 		f.env = append(f.env, "PATH="+tools+":"+os.Getenv("PATH"))
-		beforeBuild, beforeLinks := setupTree(t, buildDir), setupTree(t, f.bin)
-		out, code := f.run(t, "--only", "mac-keyvault-kek", "--allow-unprovable")
-		if code != 0 || !strings.Contains(out, "Keeping the existing bin/mac-keyvault-kek") || strings.Contains(out, "Building mac-keyvault-kek") {
-			t.Fatalf("kek not kept: exit %d\n%s", code, out)
+		out, code := f.run(t, "--only", "mac-load-profile", "--allow-unprovable")
+		if code == 0 || !strings.Contains(out, "unbound variable") || strings.Contains(out, "Installed binary symlinks:") {
+			t.Fatalf("an unfinished run reported exit %d\n%s", code, out)
 		}
-		calls, _ := os.ReadFile(goCalls)
-		if strings.Contains(string(calls), "build") {
-			t.Fatalf("go build ran: %q", calls)
-		}
-		if !reflect.DeepEqual(beforeBuild, setupTree(t, buildDir)) || !reflect.DeepEqual(beforeLinks, setupTree(t, f.bin)) {
-			t.Fatal("the kept broker or its link changed")
-		}
-		requireProvenanceBytes(t, kek, []byte("trusted broker bytes"))
 	})
 	// Claim: failures in either the selected command or an in-module dependency abort before staging or publication.
 	t.Run("test-failure", func(t *testing.T) {

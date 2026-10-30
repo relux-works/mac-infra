@@ -18,6 +18,10 @@ import (
 	"time"
 )
 
+// waitDelay bounds how long Unwrap and Rebind wait for the broker's pipes
+// after it was stopped or exited.
+const waitDelay = 2 * time.Second
+
 // ErrProtocol reports a broker answer outside the contract. The answer is
 // not used.
 var ErrProtocol = errors.New("mac-keyvault-kek answered outside contract kek-1")
@@ -49,8 +53,11 @@ func Unwrap(ctx context.Context, opts Options, envelope []byte) ([]byte, error) 
 		clear(res.KEK)
 		return nil, fmt.Errorf("%w: unwrap result is not one %d-byte KEK", ErrProtocol, KEKLen)
 	}
-	// Only the KEK sealed in this envelope matches its check value: a
-	// broker that cannot open the envelope cannot produce it.
+	// Only the KEK sealed in this envelope matches its check value, so a
+	// substituted broker cannot choose the KEK for an unchanged envelope.
+	// The envelope itself is a same-user file: rewritten together with the
+	// broker, it can carry the check value of a chosen KEK. That case is
+	// caught by the service's own store check, which must fail closed.
 	if !MatchesKCV(res.KEK, env.KCV) {
 		clear(res.KEK)
 		return nil, fmt.Errorf("%w: the returned KEK does not match the envelope's check value", ErrProtocol)
@@ -103,6 +110,12 @@ func exchange(ctx context.Context, opts Options, op string, env Envelope, envelo
 
 	cmd := exec.CommandContext(ctx, opts.Broker, op, "--address", env.Address, "--socket", sock)
 	cmd.Stdin = nil
+	// The broker runs in its own process group, and cancellation kills the
+	// group, so a descendant cannot outlive the exchange; WaitDelay bounds
+	// the wait for pipes a descendant might still hold.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = waitDelay
 	var stderr bytes.Buffer
 	cmd.Stderr = &limited{w: &stderr, n: 4096}
 	stdout, err := cmd.StdoutPipe()
@@ -178,23 +191,23 @@ func talk(ctx context.Context, stdout io.Reader, sock, op string, env Envelope, 
 
 // checkResponse admits only a contract answer about the envelope's key.
 func checkResponse(line []byte, env Envelope) (*Result, error) {
-	var resp Response
-	if err := strictUnmarshal(bytes.TrimSuffix(line, []byte("\n")), &resp); err != nil {
+	resp, err := parseResponse(bytes.TrimSuffix(line, []byte("\n")))
+	if err != nil {
+		if resp.Result != nil {
+			clear(resp.Result.KEK)
+		}
 		return nil, fmt.Errorf("%w: %v", ErrProtocol, err)
 	}
 	if resp.Contract != Contract {
 		return nil, fmt.Errorf("%w: contract %q", ErrProtocol, resp.Contract)
 	}
 	if !resp.OK {
-		if resp.Result != nil || resp.Error == nil || !declared(resp.Error.Code) {
-			return nil, fmt.Errorf("%w: refusal without a declared error", ErrProtocol)
+		if !declared(resp.Error.Code) {
+			return nil, fmt.Errorf("%w: undeclared error code %q", ErrProtocol, resp.Error.Code)
 		}
 		return nil, resp.Error
 	}
 	res := resp.Result
-	if res == nil || resp.Error != nil {
-		return nil, fmt.Errorf("%w: success without exactly one result", ErrProtocol)
-	}
 	if res.Address != env.Address || res.Generation != env.Generation || res.Fingerprint != env.Fingerprint {
 		clear(res.KEK)
 		return nil, fmt.Errorf("%w: answer is about another key", ErrProtocol)

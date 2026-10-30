@@ -229,7 +229,11 @@ fi
 
 mkdir -p "$BUILD_DIR" "$BIN_DIR"
 STAGE_DIR="$(mktemp -d "$BUILD_DIR/.staging.XXXXXX")"
-trap 'rm -rf "$STAGE_DIR"' EXIT
+# bash 3.2 exits with status 0 on some errors under set -u (an unbound
+# expansion), even with the status read in the trap; a run that did not
+# reach its end therefore exits 1.
+SETUP_DONE=0
+trap 'status=$?; rm -rf "$STAGE_DIR"; if [[ "$SETUP_DONE" != 1 && "$status" == 0 ]]; then status=1; fi; exit "$status"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -379,11 +383,15 @@ fi
 if [[ "$KEK_DECISION" == build ]]; then
   BUILT_BINARIES+=("mac-keyvault-kek")
 fi
-if [[ "$ALLOW_UNPROVABLE" == 1 ]]; then
-  "$SCRIPT_DIR/provenance-guard.sh" publish "$PROJECT_ROOT" "$STAGE_DIR" "$BUILD_DIR" --allow-unprovable "${BUILT_BINARIES[@]}"
-else
-  "$SCRIPT_DIR/provenance-guard.sh" preflight "$PROJECT_ROOT"
-  "$SCRIPT_DIR/provenance-guard.sh" publish "$PROJECT_ROOT" "$STAGE_DIR" "$BUILD_DIR" "${BUILT_BINARIES[@]}"
+# A run that only keeps binaries (an existing broker or keyvault) publishes
+# nothing; bash 3.2 cannot expand an empty array under set -u.
+if [[ ${#BUILT_BINARIES[@]} -gt 0 ]]; then
+  if [[ "$ALLOW_UNPROVABLE" == 1 ]]; then
+    "$SCRIPT_DIR/provenance-guard.sh" publish "$PROJECT_ROOT" "$STAGE_DIR" "$BUILD_DIR" --allow-unprovable "${BUILT_BINARIES[@]}"
+  else
+    "$SCRIPT_DIR/provenance-guard.sh" preflight "$PROJECT_ROOT"
+    "$SCRIPT_DIR/provenance-guard.sh" publish "$PROJECT_ROOT" "$STAGE_DIR" "$BUILD_DIR" "${BUILT_BINARIES[@]}"
+  fi
 fi
 # The Swift helper has no Go buildinfo; install it only after Go publication.
 if [[ -f "$STAGE_DIR/mac-keyvault-enclave" ]]; then
@@ -468,8 +476,15 @@ if selected mac-keyvault; then
     echo "Keeping $KEYVAULT_LINK -> $(readlink "$KEYVAULT_LINK" || echo "a regular file") (see --rebuild-keyvault)"
   fi
 fi
+# An installed broker link to another checkout's binary, or a regular file,
+# is kept unless a rebuild was requested: its keys trust that binary.
 if selected mac-keyvault-kek && [[ -e "$BUILD_DIR/mac-keyvault-kek" ]]; then
-  ln -sf "$BUILD_DIR/mac-keyvault-kek" "$BIN_DIR/mac-keyvault-kek"
+  KEK_LINK="$BIN_DIR/mac-keyvault-kek"
+  if [[ "$REBUILD_KEK" == 1 || ! -e "$KEK_LINK" || "$KEK_LINK" -ef "$BUILD_DIR/mac-keyvault-kek" ]]; then
+    ln -sf "$BUILD_DIR/mac-keyvault-kek" "$KEK_LINK"
+  else
+    echo "Keeping $KEK_LINK -> $(readlink "$KEK_LINK" || echo "a regular file") (see --rebuild-kek)"
+  fi
 fi
 echo "Installed binary symlinks:"
 if selected mac-audio-reset; then
@@ -551,6 +566,7 @@ echo
 echo "Then reset audio without sudo:"
 echo "  mac-audio-reset reset"
 
+SETUP_DONE=1
 if [[ "$ALLOW_UNPROVABLE" == 1 ]]; then
   warn_unprovable
 fi

@@ -52,7 +52,10 @@ type Envelope struct {
 	Fingerprint string `json:"fingerprint"`
 	// KCV is the KEK's check value (KeyCheckValue). The client refuses a
 	// returned KEK that does not match it, so a broker that is not the real
-	// one cannot hand the service a KEK of its own choosing.
+	// one cannot hand the service a KEK of its own choosing for this
+	// envelope. The clear KCV is not authenticated: someone who can rewrite
+	// the envelope file and replace the broker can pair a chosen KEK with its
+	// own KCV; the service's store check is the backstop for that.
 	KCV   []byte `json:"kcv"`
 	ECIES []byte `json:"ecies"`
 }
@@ -245,14 +248,15 @@ func x963KDF(z, info []byte, n int) []byte {
 	return out[:n]
 }
 
-// ParseEnvelope reads an envelope file strictly: the known format and
-// version, no unknown or repeated members, a valid address and generation.
+// ParseEnvelope reads an envelope file strictly: exactly the contract's
+// members with their types, nothing repeated or after the object, the known
+// format and version, a valid address and generation.
 func ParseEnvelope(data []byte) (Envelope, error) {
 	var env Envelope
 	if len(data) > maxEnvelopeBytes {
 		return env, errors.New("envelope is too large")
 	}
-	if err := strictUnmarshal(data, &env); err != nil {
+	if _, err := decodeStrict(data, envelopeShape, &env); err != nil {
 		return env, fmt.Errorf("envelope: %w", err)
 	}
 	switch {
@@ -272,7 +276,7 @@ func ParseEnvelope(data []byte) (Envelope, error) {
 // envelope header it came in.
 func ParsePayload(plain []byte, env Envelope) (Payload, error) {
 	var p Payload
-	if err := strictUnmarshal(plain, &p); err != nil {
+	if _, err := decodeStrict(plain, payloadShape, &p); err != nil {
 		return p, fmt.Errorf("payload: %w", err)
 	}
 	switch {
@@ -290,51 +294,4 @@ func ParsePayload(plain []byte, env Envelope) (Payload, error) {
 		return p, errors.New("payload KEK does not match its check value")
 	}
 	return p, nil
-}
-
-// strictUnmarshal refuses unknown members, trailing data and repeated
-// member names, which encoding/json would otherwise accept silently.
-func strictUnmarshal(data []byte, v any) error {
-	if err := noRepeatedMembers(data); err != nil {
-		return err
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if dec.More() {
-		return errors.New("trailing data")
-	}
-	return nil
-}
-
-// noRepeatedMembers walks the top-level object once and refuses a member
-// name that appears twice. The contract's objects are flat.
-func noRepeatedMembers(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	tok, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	if tok != json.Delim('{') {
-		return errors.New("not a JSON object")
-	}
-	seen := map[string]bool{}
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		name, _ := tok.(string)
-		if seen[name] {
-			return fmt.Errorf("member %q repeated", name)
-		}
-		seen[name] = true
-		var skip json.RawMessage
-		if err := dec.Decode(&skip); err != nil {
-			return err
-		}
-	}
-	return nil
 }

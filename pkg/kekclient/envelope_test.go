@@ -235,18 +235,24 @@ func TestParseEnvelopeIsStrict(t *testing.T) {
 		return b
 	}
 	bad := map[string][]byte{
-		"unknown member":  variant(func(m map[string]any) { m["kek"] = "x" }),
-		"other format":    variant(func(m map[string]any) { m["format"] = "other" }),
-		"version 2":       variant(func(m map[string]any) { m["v"] = 2 }),
-		"bad address":     variant(func(m map[string]any) { m["address"] = "x" }),
-		"generation 0":    variant(func(m map[string]any) { m["generation"] = 0 }),
-		"no fingerprint":  variant(func(m map[string]any) { m["fingerprint"] = "" }),
-		"no ciphertext":   variant(func(m map[string]any) { delete(m, "ecies") }),
-		"no kcv":          variant(func(m map[string]any) { delete(m, "kcv") }),
-		"trailing data":   append(bytes.Clone(sealed), []byte(` {}`)...),
-		"repeated member": []byte(strings.Replace(string(sealed), `{"format"`, `{"v":1,"format"`, 1)),
-		"not an object":   []byte(`[]`),
-		"too large":       bytes.Repeat([]byte(" "), maxEnvelopeBytes+1),
+		"unknown member":   variant(func(m map[string]any) { m["kek"] = "x" }),
+		"other format":     variant(func(m map[string]any) { m["format"] = "other" }),
+		"version 2":        variant(func(m map[string]any) { m["v"] = 2 }),
+		"bad address":      variant(func(m map[string]any) { m["address"] = "x" }),
+		"generation 0":     variant(func(m map[string]any) { m["generation"] = 0 }),
+		"no fingerprint":   variant(func(m map[string]any) { m["fingerprint"] = "" }),
+		"no ciphertext":    variant(func(m map[string]any) { delete(m, "ecies") }),
+		"no kcv":           variant(func(m map[string]any) { delete(m, "kcv") }),
+		"trailing data":    append(bytes.Clone(sealed), []byte(` {}`)...),
+		"repeated member":  []byte(strings.Replace(string(sealed), `{"format"`, `{"v":1,"format"`, 1)),
+		"not an object":    []byte(`[]`),
+		"trailing brace":   append(bytes.Clone(sealed), '}'),
+		"trailing bracket": append(bytes.Clone(sealed), ']'),
+		"case alias":       []byte(strings.Replace(string(sealed), `"format"`, `"Format"`, 1)),
+		"null member":      []byte(strings.Replace(string(sealed), `"kcv":`, `"kcv":null,"x":`, 1)),
+		"escaped repeat":   []byte(strings.Replace(string(sealed), `{"format"`, `{"f\u006frmat":"x","format"`, 1)),
+		"number as text":   []byte(strings.Replace(string(sealed), `"generation":1`, `"generation":"1"`, 1)),
+		"too large":        bytes.Repeat([]byte(" "), maxEnvelopeBytes+1),
 	}
 	for name, data := range bad {
 		if _, err := ParseEnvelope(data); err == nil {
@@ -286,8 +292,14 @@ func TestParsePayloadChecksItsEnvelope(t *testing.T) {
 			t.Fatalf("%s: parsed", name)
 		}
 	}
-	extra := bytes.Replace(enc(base), []byte(`{"v":1`), []byte(`{"v":1,"note":"x"`), 1)
-	if _, err := ParsePayload(extra, env); err == nil {
-		t.Fatal("unknown payload member parsed")
+	for name, data := range map[string][]byte{
+		"unknown member": bytes.Replace(enc(base), []byte(`{"v":1`), []byte(`{"v":1,"note":"x"`), 1),
+		"case alias":     bytes.Replace(enc(base), []byte(`"kek"`), []byte(`"KEK"`), 1),
+		"repeated kek":   bytes.Replace(enc(base), []byte(`{"v":1`), []byte(`{"kek":"AAAA","v":1`), 1),
+		"trailing data":  append(enc(base), '}'),
+	} {
+		if _, err := ParsePayload(data, env); err == nil {
+			t.Fatalf("%s: parsed", name)
+		}
 	}
 }

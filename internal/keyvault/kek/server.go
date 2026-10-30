@@ -174,16 +174,12 @@ func (s *Server) answer(conn *net.UnixConn, entry *AuditEntry) (*kekclient.Resul
 	if problem := peer.Problem(); problem != "" {
 		return nil, refuse(kekclient.CodeCallerRefused, "the caller is refused: %s", problem)
 	}
-	req, err := readRequest(conn)
+	req, env, err := readRequest(conn)
 	if err != nil {
 		return nil, refuse(kekclient.CodeBadRequest, "%v", err)
 	}
 	if req.Op != s.Op || req.Address != s.Address {
 		return nil, refuse(kekclient.CodeBadRequest, "this broker serves %s for %s, not %s for %s", s.Op, s.Address, req.Op, req.Address)
-	}
-	env, err := kekclient.ParseEnvelope(req.Envelope)
-	if err != nil {
-		return nil, refuse(kekclient.CodeBadRequest, "%v", err)
 	}
 	if env.Address != s.Address {
 		return nil, refuse(kekclient.CodeBadRequest, "the envelope is for %s, not %s", env.Address, s.Address)
@@ -248,21 +244,14 @@ func (s *Server) rebind(key keyvault.Key, payload kekclient.Payload) (json.RawMe
 	return next, newReq, nil
 }
 
-func readRequest(r io.Reader) (kekclient.Request, error) {
-	var req kekclient.Request
+// readRequest reads one request line and parses it strictly: one object,
+// exact members, nothing repeated, nothing after it on the line.
+func readRequest(r io.Reader) (kekclient.Request, kekclient.Envelope, error) {
 	line, err := bufio.NewReader(io.LimitReader(r, maxRequestBytes)).ReadBytes('\n')
 	if err != nil {
-		return req, fmt.Errorf("no request line: %v", err)
+		return kekclient.Request{}, kekclient.Envelope{}, fmt.Errorf("no request line: %v", err)
 	}
-	dec := json.NewDecoder(bytes.NewReader(line))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		return req, fmt.Errorf("request: %v", err)
-	}
-	if req.Contract != kekclient.Contract {
-		return req, fmt.Errorf("request names contract %q, not %s", req.Contract, kekclient.Contract)
-	}
-	return req, nil
+	return kekclient.ParseRequest(bytes.TrimSuffix(line, []byte("\n")))
 }
 
 // vaultRefusal maps the vault's gates onto the contract's codes.

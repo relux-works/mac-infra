@@ -1,7 +1,6 @@
 package kek
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -89,8 +88,12 @@ func (a *Audit) Append(entry AuditEntry, now time.Time) error {
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		return err
 	}
-	return f.Sync()
+	return syncFile(f)
 }
+
+// syncFile makes an appended entry durable before the broker answers; tests
+// replace it to prove a failed sync answers nothing.
+var syncFile = func(f *os.File) error { return f.Sync() }
 
 // lastHash hashes the last complete line, or returns genesis for an empty
 // log. A log whose last line is torn is refused rather than chained over.
@@ -111,31 +114,44 @@ func lastHash(f *os.File) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// Verify reads the log and checks every link of the chain. It returns the
+// Verify reads the log and checks every link of the chain under the same
+// framing Append requires: every entry is one complete line ending in a
+// newline, so a log Append would refuse never verifies. It returns the
 // number of entries and the chain head, the hash of the last line. The
 // chain shows an edit inside the log; a same-user rewrite of the whole log
 // passes it, so the head is posted with every window record and compared
 // with the posted one later.
 func (a *Audit) Verify() (int, string, error) {
-	f, err := os.Open(a.Path)
+	info, err := os.Lstat(a.Path)
 	if err != nil {
 		return 0, "", err
 	}
-	defer f.Close()
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return 0, "", fmt.Errorf("%s is not a private regular file", a.Path)
+	}
+	data, err := os.ReadFile(a.Path)
+	if err != nil {
+		return 0, "", err
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		return 0, "", errors.New("the audit log ends in a torn line")
+	}
 	prev, n := genesis, 0
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
+	for _, line := range bytes.Split(bytes.TrimSuffix(data, []byte("\n")), []byte("\n")) {
+		if len(data) == 0 {
+			break
+		}
 		var entry AuditEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+		if err := json.Unmarshal(line, &entry); err != nil {
 			return n, "", fmt.Errorf("line %d: %v", n+1, err)
 		}
 		if entry.Prev != prev {
 			return n, "", fmt.Errorf("line %d does not follow line %d", n+1, n)
 		}
-		sum := sha256.Sum256(scanner.Bytes())
+		sum := sha256.Sum256(line)
 		prev, n = hex.EncodeToString(sum[:]), n+1
 	}
-	return n, prev, scanner.Err()
+	return n, prev, nil
 }
 
 func privateDir(dir string) error {

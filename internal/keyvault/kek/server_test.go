@@ -447,6 +447,11 @@ func TestUnwrapRefusesMalformedRequests(t *testing.T) {
 		"unknown member":   bytes.Replace(request(kekclient.OpUnwrap, f.envelope), []byte(`{"contract"`), []byte(`{"debug":true,"contract"`), 1),
 		"no envelope":      request(kekclient.OpUnwrap, nil),
 		"not json":         []byte("unwrap please"),
+		"repeated op":      bytes.Replace(request(kekclient.OpUnwrap, f.envelope), []byte(`{"contract"`), []byte(`{"op":"rebind","contract"`), 1),
+		"case alias":       bytes.Replace(request(kekclient.OpUnwrap, f.envelope), []byte(`"op"`), []byte(`"OP"`), 1),
+		"second document":  append(request(kekclient.OpUnwrap, f.envelope), []byte(` {"op":"rebind"}`)...),
+		"trailing brace":   append(request(kekclient.OpUnwrap, f.envelope), '}'),
+		"null envelope":    bytes.Replace(request(kekclient.OpUnwrap, f.envelope), []byte(`"envelope":{`), []byte(`"envelope":null,"x":{`), 1),
 	}
 	for name, line := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -522,6 +527,55 @@ func TestRebindRefusals(t *testing.T) {
 				t.Fatalf("the held envelope stopped working: %s", raw)
 			}
 		})
+	}
+}
+
+// Nothing is answered unless the entry was synced: a failing sync gives the
+// bound caller security and no KEK, and a working one answers (control).
+func TestUnwrapAnswersNothingWhenTheAuditSyncFails(t *testing.T) {
+	f := newFixture(t, nil)
+	saved := syncFile
+	t.Cleanup(func() { syncFile = saved })
+	synced := 0
+	syncFile = func(*os.File) error { synced++; return errors.New("disk said no") }
+	resp, raw := f.unwrap()
+	requireRefused(t, resp, raw, kekclient.CodeSecurity)
+	if synced != 1 {
+		t.Fatalf("sync ran %d times", synced)
+	}
+	syncFile = func(*os.File) error { synced++; return nil }
+	if resp, raw := f.unwrap(); !resp.OK || synced != 2 {
+		t.Fatalf("control: synced=%d %s", synced, raw)
+	}
+}
+
+// Verify applies Append's framing: a log whose last entry lacks its newline,
+// or ends in a truncated entry, does not verify, although its JSON may be
+// complete; a log that is not a private regular file does not verify either.
+// The intact log verifies (control).
+func TestAuditVerifyRequiresAppendFraming(t *testing.T) {
+	f := newFixture(t, nil)
+	f.unwrap()
+	f.unwrap()
+	data, _ := os.ReadFile(f.audit.Path)
+	if _, _, err := f.audit.Verify(); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	cases := map[string][]byte{
+		"no final newline": bytes.TrimSuffix(data, []byte("\n")),
+		"truncated entry":  data[:len(data)-20],
+		"empty line":       append(bytes.Clone(data), '\n'),
+	}
+	for name, edited := range cases {
+		os.WriteFile(f.audit.Path, edited, 0o600)
+		if n, head, err := f.audit.Verify(); err == nil {
+			t.Fatalf("%s: verified %d entries, head %s", name, n, head)
+		}
+	}
+	os.WriteFile(f.audit.Path, data, 0o600)
+	os.Chmod(f.audit.Path, 0o644)
+	if _, _, err := f.audit.Verify(); err == nil {
+		t.Fatal("a group-readable log verified")
 	}
 }
 

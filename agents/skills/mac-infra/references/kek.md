@@ -21,7 +21,7 @@ The keys are ordinary keyvault records: kind `key`, address `SERVICE/PURPOSE`, u
 | `mac-keyvault-kek pub --address S/P [--version N]` | Prints the same for an existing generation. |
 | `mac-keyvault-kek unwrap --address S/P --socket PATH` | Serves one request on a new socket, then exits. A service runs it through `kekclient.Unwrap`, never by hand. |
 | `mac-keyvault-kek rebind --address S/P --socket PATH` | Serves one rebind request (below), then exits. |
-| `mac-keyvault-kek audit-verify` | Checks the audit log's chain and prints the entry count and the chain head. |
+| `mac-keyvault-kek audit-verify` | Checks the audit log's chain under the same framing `unwrap` requires (one complete line per entry, ending in a newline, a private regular file), and prints the entry count and the chain head. |
 | `pkg/kekclient` | Go client: `Wrap` (pure Go, public key only), `Unwrap`, `Rebind`, `ParseEnvelope`, the requirement allowlist, the error codes. |
 
 Every command disables Keychain UI first. A call that would need a dialog fails instead.
@@ -41,7 +41,13 @@ The sealed payload repeats `address`, `generation`, `fingerprint` and `kcv`, and
 - `install_path`: where the bound service is installed;
 - `kek`.
 
-Unknown or repeated members, trailing data, and any difference between the clear and the sealed header are refused. A KEK that does not match its `kcv` is refused as well.
+Both sides parse every contract object strictly, including nested `result`, `error` and `envelope` objects:
+- exact member names, so no case aliases;
+- no unknown, missing, repeated or null members;
+- each member of its declared JSON type;
+- exactly one object and nothing after it.
+
+Any difference between the clear and the sealed header is refused. A KEK that does not match its `kcv` is refused as well.
 
 The binding is inside the ciphertext, so a same-user process cannot change it without breaking GCM. It also cannot make an envelope holding the service's KEK without knowing that KEK.
 
@@ -58,7 +64,9 @@ The binding is inside the ciphertext, so a same-user process cannot change it wi
    - the KEK is 32 bytes;
    - the KEK matches the envelope's `kcv`.
 
-   So a substituted broker cannot hand the service a KEK of its own choosing.
+   So a substituted broker cannot hand the service a KEK of its own choosing for an unchanged envelope.
+
+   The clear `kcv` is not authenticated. A same-user process that can both rewrite the envelope file and replace the broker can pair a chosen KEK with its own `kcv`, and `Unwrap` returns that KEK. It is not the service's real KEK, and the original KEK is not disclosed. The service's own store check (an authenticated store header) must then refuse it and stop the service. At first provisioning there is no store yet; that step happens only in a recorded window, wrapped to the posted fingerprint.
 
 The broker runs these gates, in order:
 1. **The peer's code**, from the socket's audit token (`LOCAL_PEERTOKEN`, SecCodeCopyGuestWithAttributes). It must be validly signed, with hardened runtime and library validation, and without `com.apple.security.get-task-allow`. Otherwise a same-user process could inject into it and act through it.
@@ -69,6 +77,8 @@ The broker runs these gates, in order:
 6. **The audit log.** The entry is written and synced before the answer is sent. If the log cannot be written, nothing is answered.
 
 Pipes and inherited descriptors are not a transport: a same-user parent can keep a copy of a pipe across exec.
+
+`Unwrap` runs the broker in its own process group. On a protocol error or at the deadline it kills the group, and it waits at most two seconds more for pipes a descendant might hold.
 
 ### Error codes (closed set)
 
@@ -112,9 +122,10 @@ The new envelope comes back; the KEK never does. The audit log records the new b
 - Everything runs as one macOS user, so this is a barrier against casual and accidental use, not a wall. A separate OS user for the service is the real isolation.
 - The binding is to code, not path. Any same-user process can rebind to any binary it can place at the install path and then start the bound service's rebind. Detection is the control: the audit log, plus the chain head posted in each window record and compared at checkpoints.
 - The audit chain shows an edit inside the log. A same-user rewrite of the whole log passes its own chain, so compare the head with the posted one.
-- The broker is ad-hoc signed. A rebuilt broker is a new code identity, and with UI disabled the key's ACL refuses it silently. `scripts/setup.sh` therefore builds `mac-keyvault-kek` only when it is absent. `--rebuild-kek` is for a planned owner sitting that also re-provisions the keys. With a stable signing identity this goes away.
+- The broker is ad-hoc signed. A rebuilt broker is a new code identity, and with UI disabled the key's ACL refuses it silently. `scripts/setup.sh` therefore builds `mac-keyvault-kek` only when it is absent, and keeps an installed `~/.local/bin/mac-keyvault-kek` that names another checkout's broker or is a regular file. `--rebuild-kek` is for a planned owner sitting that also re-provisions the keys. With a stable signing identity this goes away.
 - The key is non-extractable. If the login Keychain is reset or the item is deleted, the envelope cannot be opened again. A service using this must be able to rebuild its store, or keep a recovery envelope elsewhere.
 - First provisioning trusts the public key the operator reads with `create` or `pub`. The service wraps only to the fingerprint posted with the window record.
+- The envelope file and the broker binary are same-user files. Rewriting both lets a process feed the service a KEK of its choice (not the real one). Only the service's authenticated store refuses it, so a service must never start a new store on its own after an unwrap.
 
 ## Tests
 

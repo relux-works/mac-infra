@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ const (
 	fakeBrokerEnv = "KEKCLIENT_FAKE_BROKER"
 	fakeAnswerEnv = "KEKCLIENT_FAKE_ANSWER"
 	fakeReadyEnv  = "KEKCLIENT_FAKE_READY"
+	fakeLingerEnv = "KEKCLIENT_FAKE_LINGER"
 )
 
 func TestMain(m *testing.M) {
@@ -45,6 +47,17 @@ func fakeBroker(args []string) int {
 		return 1
 	}
 	defer l.Close()
+	if linger := os.Getenv(fakeLingerEnv); linger != "" {
+		// A descendant that inherits stdout and stderr and outlives us
+		// unless its process group is killed.
+		child := exec.Command("/bin/sleep", "30")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		child.Start()
+		if linger == "silent" {
+			time.Sleep(30 * time.Second)
+			return 0
+		}
+	}
 	if ready := os.Getenv(fakeReadyEnv); ready != "" {
 		fmt.Println(ready)
 	} else {
@@ -94,6 +107,7 @@ func fakeOptions(t *testing.T, answer, ready string) Options {
 	t.Setenv(fakeBrokerEnv, "1")
 	t.Setenv(fakeAnswerEnv, answer)
 	t.Setenv(fakeReadyEnv, ready)
+	t.Setenv(fakeLingerEnv, "")
 	return Options{Broker: exe, SocketDir: shortDir(t), Timeout: 10 * time.Second}
 }
 
@@ -147,6 +161,18 @@ func TestUnwrapRefusesAnswersOutsideTheContract(t *testing.T) {
 		"unknown member":    strings.Replace(ok(good), `{"contract"`, `{"debug":1,"contract"`, 1),
 		"repeated member":   strings.Replace(ok(good), `{"contract":"kek-1"`, `{"contract":"kek-1","contract":"kek-1"`, 1),
 		"not json":          `kek: 0707`,
+		"nested repeat":     strings.Replace(ok(good), `"generation":1`, `"generation":999,"generation":1`, 1),
+		"escaped repeat":    strings.Replace(ok(good), `"generation":1`, `"gen\u0065ration":999,"generation":1`, 1),
+		"case alias":        strings.Replace(ok(good), `"generation":1`, `"GENERATION":1`, 1),
+		"error null":        strings.Replace(ok(good), `{"contract":"kek-1","ok":true`, `{"contract":"kek-1","ok":true,"error":null`, 1),
+		"refusal no ok":     `{"contract":"kek-1","error":{"code":"caller_refused","message":"x"}}`,
+		"ok as string":      strings.Replace(ok(good), `"ok":true`, `"ok":"true"`, 1),
+		"error extra":       `{"contract":"kek-1","ok":false,"error":{"code":"caller_refused","message":"x","debug":1}}`,
+		"code not string":   `{"contract":"kek-1","ok":false,"error":{"code":7,"message":"x"}}`,
+		"result unknown":    strings.Replace(ok(good), `"address"`, `"note":"x","address"`, 1),
+		"trailing brace":    ok(good) + `}`,
+		"trailing bracket":  ok(good) + `]`,
+		"second document":   ok(good) + ` {}`,
 	}
 	for name, answer := range protocol {
 		t.Run(name, func(t *testing.T) {
@@ -169,6 +195,57 @@ func TestUnwrapRefusesAnswersOutsideTheContract(t *testing.T) {
 			t.Fatalf("kek=%x err=%v", kek, err)
 		}
 	})
+}
+
+// Limit witness, not a guarantee: the clear KCV is the client's only
+// reference, so a rewritten envelope whose KCV matches a chosen KEK, served
+// by a substituted broker, is accepted (the service's store check is the
+// backstop, see kek.md). The control beside it: the same edited envelope
+// with a broker that answers the real KEK is refused, so the KCV check runs.
+func TestUnwrapTrustsTheEnvelopeItIsGiven(t *testing.T) {
+	sealed, _ := testEnvelope(t)
+	chosen := bytes.Repeat([]byte{9}, KEKLen)
+	var m map[string]json.RawMessage
+	json.Unmarshal(sealed, &m)
+	kcv, _ := json.Marshal(KeyCheckValue(chosen))
+	m["kcv"] = kcv
+	edited, _ := json.Marshal(m)
+	env, err := ParseEnvelope(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, _ := json.Marshal(Response{Contract: Contract, OK: true, Result: &Result{Address: env.Address, Generation: env.Generation, Fingerprint: env.Fingerprint, KEK: chosen}})
+	kek, err := Unwrap(context.Background(), fakeOptions(t, string(answer), ""), edited)
+	if err != nil || !bytes.Equal(kek, chosen) {
+		t.Fatalf("limit not as documented: kek=%x err=%v", kek, err)
+	}
+	if kek, err := Unwrap(context.Background(), fakeOptions(t, "echo-kek", ""), edited); kek != nil || !errors.Is(err, ErrProtocol) {
+		t.Fatalf("control: the real KEK against an edited KCV: kek=%x err=%v", kek, err)
+	}
+}
+
+// A broker whose descendant keeps stdout and stderr open does not hold
+// Unwrap past its bound, after a protocol error or at the deadline: the
+// broker's process group is killed and the pipes are given up after
+// waitDelay. The first case is the reviewer's witness (7.3 s against a 5 s
+// timeout before the fix).
+func TestUnwrapIsBoundedWhenADescendantHoldsThePipes(t *testing.T) {
+	sealed, _ := testEnvelope(t)
+	for _, mode := range []string{"bad-ready", "silent"} {
+		t.Run(mode, func(t *testing.T) {
+			opts := fakeOptions(t, "echo-kek", "not a ready line")
+			opts.Timeout = 2 * time.Second
+			t.Setenv(fakeLingerEnv, mode)
+			start := time.Now()
+			kek, err := Unwrap(context.Background(), opts, sealed)
+			if kek != nil || err == nil {
+				t.Fatalf("kek=%x err=%v", kek, err)
+			}
+			if elapsed := time.Since(start); elapsed > opts.Timeout+waitDelay+time.Second {
+				t.Fatalf("returned after %v (timeout %v, wait delay %v)", elapsed, opts.Timeout, waitDelay)
+			}
+		})
+	}
 }
 
 // Unwrap refuses before starting anything when the broker path is relative,
