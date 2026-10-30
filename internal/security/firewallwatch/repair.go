@@ -8,9 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"time"
 )
 
@@ -60,14 +61,17 @@ func Repair(c Config, out string) (RepairReport, error) {
 	if e != nil {
 		return report, e
 	}
-	absState, e := filepath.Abs(c.StateDir)
+	// Checked on the output's parent as the kernel resolves it, so a symlink
+	// or a case variant on a case-insensitive volume cannot lead into the
+	// state directory.
+	inside, e := insideDir(filepath.Dir(absOut), c.StateDir)
 	if e != nil {
-		return report, e
+		return report, fmt.Errorf("repair output: %w", e)
 	}
-	if rel, e := filepath.Rel(absState, absOut); e == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if inside {
 		return report, errors.New("repair output must be outside the state directory")
 	}
-	if _, e := os.Lstat(out); !errors.Is(e, os.ErrNotExist) {
+	if _, e := os.Lstat(absOut); !errors.Is(e, os.ErrNotExist) {
 		return report, fmt.Errorf("repair output %s already exists", out)
 	}
 	unlock, e := (&Store{Config: c}).Lock()
@@ -78,8 +82,8 @@ func Repair(c Config, out string) (RepairReport, error) {
 	if _, e := OpenStore(c); e != nil {
 		report.BeforeOpen = e.Error()
 	}
-	originals, repaired := filepath.Join(out, "original"), filepath.Join(out, "repaired")
-	for _, dir := range []string{out, originals, repaired} {
+	originals, repaired := filepath.Join(absOut, "original"), filepath.Join(absOut, "repaired")
+	for _, dir := range []string{absOut, originals, repaired} {
 		if e := os.Mkdir(dir, 0700); e != nil {
 			return report, e
 		}
@@ -188,6 +192,38 @@ func Repair(c Config, out string) (RepairReport, error) {
 	return report, nil
 }
 
+// insideDir reports whether dir is root or lies below it. It climbs from dir
+// through ".." as the kernel resolves it, comparing each directory with root
+// by device and inode, so symlinks and case variants are followed rather than
+// compared as text. A climb that does not reach the volume root within 256
+// steps is refused.
+func insideDir(dir, root string) (bool, error) {
+	rootInfo, e := os.Stat(root)
+	if e != nil {
+		return false, e
+	}
+	p := dir
+	for range 256 {
+		info, e := os.Stat(p)
+		if e != nil {
+			return false, e
+		}
+		if os.SameFile(info, rootInfo) {
+			return true, nil
+		}
+		parent := p + string(filepath.Separator) + ".."
+		up, e := os.Stat(parent)
+		if e != nil {
+			return false, e
+		}
+		if os.SameFile(up, info) {
+			return false, nil
+		}
+		p = parent
+	}
+	return false, errors.New("too deep to check against the state directory")
+}
+
 func readAllLimited(f *os.File, limit int64) ([]byte, error) {
 	var b bytes.Buffer
 	n, e := b.ReadFrom(io.LimitReader(f, limit+1))
@@ -201,10 +237,12 @@ func readAllLimited(f *os.File, limit int64) ([]byte, error) {
 }
 
 // repairEntries moves each entry's last_seen forward to its first_seen or
-// window_start when it is earlier by wall time.
+// window_start when it is earlier by wall time. Keys are visited in order, so
+// the report is the same on every run.
 func repairEntries(entries map[string]*Entry, file string, seq uint64) []RepairChange {
 	var changes []RepairChange
-	for k, v := range entries {
+	for _, k := range slices.Sorted(maps.Keys(entries)) {
+		v := entries[k]
 		if v == nil {
 			continue
 		}

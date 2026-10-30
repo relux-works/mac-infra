@@ -599,7 +599,8 @@ mac-firewall watch repair --config PATH --out DIR
 ```
 
 It refuses while a watcher holds the state directory's lock, when `DIR`
-exists, or when `DIR` is inside the state directory. It only reads the state
+exists, or when `DIR` resolves inside the state directory (checked by device
+and inode, so a symlink or a case variant of the path is caught). It only reads the state
 directory: it copies `state.json` and `state-journal.jsonl` byte for byte to
 `DIR/original` with `SHA256SUMS`, and writes to `DIR/repaired` the same files
 with each reversed time moved forward to the time it must not precede

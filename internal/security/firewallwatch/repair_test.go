@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -158,5 +159,81 @@ func TestRepairRefusals(t *testing.T) {
 	}
 	if left, _ := os.ReadDir(filepath.Join(out, "repaired")); len(left) != 0 {
 		t.Fatalf("a refused journal left %d repaired files", len(left))
+	}
+}
+
+// The output is checked against the state directory as the kernel resolves
+// it. Through a symlink to the state directory, through a symlink to a
+// directory inside it, and (on a case-insensitive volume) through a case
+// variant of its name, the repair refuses and creates nothing there. Positive
+// control: a symlinked parent that resolves outside the state directory is
+// accepted and the repair opens.
+func TestRepairOutputCheckedAsResolved(t *testing.T) {
+	c, _ := brokenStateDir(t)
+	before := dirHashes(t, c.StateDir)
+	sub := filepath.Join(c.StateDir, "sub")
+	if e := os.Mkdir(sub, 0700); e != nil {
+		t.Fatal(e)
+	}
+	links := t.TempDir()
+	toState, toSub := filepath.Join(links, "state"), filepath.Join(links, "sub")
+	for link, target := range map[string]string{toState: c.StateDir, toSub: sub} {
+		if e := os.Symlink(target, link); e != nil {
+			t.Fatal(e)
+		}
+	}
+	outs := []string{filepath.Join(toState, "repair"), filepath.Join(toSub, "repair")}
+	variant := filepath.Join(filepath.Dir(c.StateDir), strings.ToUpper(filepath.Base(c.StateDir)))
+	a, e := os.Stat(variant)
+	b, _ := os.Stat(c.StateDir)
+	if e == nil && os.SameFile(a, b) {
+		outs = append(outs, filepath.Join(variant, "repair"))
+	} else {
+		t.Log("case-sensitive volume: the case variant is not exercised")
+	}
+	for _, out := range outs {
+		if _, e := Repair(c, out); e == nil || !strings.Contains(e.Error(), "outside") {
+			t.Fatalf("%s: %v", out, e)
+		}
+	}
+	for _, dir := range []string{c.StateDir, sub} {
+		if _, e := os.Lstat(filepath.Join(dir, "repair")); !os.IsNotExist(e) {
+			t.Fatalf("a refused repair created %s/repair", dir)
+		}
+	}
+	if e := os.Remove(sub); e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(before, dirHashes(t, c.StateDir)) {
+		t.Fatal("a refused repair changed the state directory")
+	}
+	elsewhere := filepath.Join(links, "elsewhere")
+	if e := os.Symlink(t.TempDir(), elsewhere); e != nil {
+		t.Fatal(e)
+	}
+	if r, e := Repair(c, filepath.Join(elsewhere, "repair")); e != nil || !r.Opens {
+		t.Fatalf("outside through a symlink: %+v %v", r, e)
+	}
+}
+
+// The report lists entry changes in key order, so two repairs of the same
+// state give the same report (map iteration order would otherwise vary).
+func TestRepairEntriesReportInKeyOrder(t *testing.T) {
+	at := time.Now().Round(0)
+	broken := func() map[string]*Entry {
+		m := map[string]*Entry{}
+		for i := range 12 {
+			m[fmt.Sprintf("key-%02d", i)] = &Entry{FirstSeen: at, WindowStart: at, LastSeen: at.Add(-time.Second), Count: 1}
+		}
+		return m
+	}
+	first := repairEntries(broken(), journalFile, 1)
+	if len(first) != 12 {
+		t.Fatalf("%d changes; want 12", len(first))
+	}
+	for range 5 {
+		if again := repairEntries(broken(), journalFile, 1); !reflect.DeepEqual(first, again) {
+			t.Fatalf("report order changed between runs")
+		}
 	}
 }
