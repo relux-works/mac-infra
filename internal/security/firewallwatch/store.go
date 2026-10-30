@@ -755,13 +755,15 @@ func (s *Store) pruneItems(refs expiryRefs) {
 // evictFirst is the bound prune's eviction order: the earlier wall-clock
 // last-seen time first, and for equal wall times the smaller key (string
 // bytes). Comparing wall times only makes it a strict total order. The
-// previous comparison, time.Before and time.Equal, compares two in-run
-// readings by their monotonic clock and any other pair by wall time, so the
-// two orders differ exactly for two in-run readings whose monotonic order
-// differs from their wall order: after the wall clock was set back during a
-// run, or when one of the two clocks stood still while the other moved. Mixed
-// with times loaded from state.json such pairs could make the previous order
-// cyclic, and the victim then depended on map iteration order.
+// previous comparison, time.Before and time.Equal with the same key
+// tiebreak, compares two readings that both carry a monotonic clock by that
+// clock and any other pair by wall time. So the two orders can differ only
+// for two such readings whose monotonic order differs from their wall order
+// (the wall clock set back, or one clock standing still while the other
+// moved); mixed with times loaded from state.json, those could make the
+// previous order cyclic. A run stores times from the run clock, which carry
+// no monotonic reading, so within a run the two orders agree; readings from
+// time.Now (callers outside a run) can still be such pairs.
 func evictFirst(a string, at time.Time, b string, bt time.Time) bool {
 	aw, bw := at.Round(0), bt.Round(0)
 	if aw.Equal(bw) {

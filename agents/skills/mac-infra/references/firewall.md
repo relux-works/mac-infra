@@ -438,12 +438,13 @@ the per-flow log of the netfilter content-filter system extension
 retained events in total across all daily files. Dedup/events also expire by
 `retention_days`. Dedup and signature cache entries over the cap are evicted
 in a fixed order: earliest wall-clock `last_seen` first, equal times by key,
-so the same state always loses the same entry. It differs from the earlier
-comparison, which compared two in-run readings by the monotonic clock, only
-for two in-run readings whose monotonic and wall-clock order differ: after the
-wall clock was set back during a run, or when one clock stood still while the
-other moved. Mixed with times loaded from `state.json` such pairs could make
-the earlier order cyclic, with a victim that depended on map iteration. A
+so the same state always loses the same entry. The earlier comparison
+compared two readings that both carried a monotonic clock by that clock, so
+it can differ only for such readings whose monotonic and wall-clock order
+differ; mixed with times loaded from `state.json`, those could make it
+cyclic, with a victim that depended on map iteration. Times a run stores come
+from the run clock (see Clock steps) and carry no monotonic reading, so within
+a run the two orders agree, and the change there is the one-pass prune. A
 refresh never moves an entry's `last_seen` back in wall time (see Clock
 steps), so it cannot change the eviction order a crash would lose. Events are
 evicted as before, oldest timestamp first. Evicted items can become new again; evicted executable cache entries can be inspected
