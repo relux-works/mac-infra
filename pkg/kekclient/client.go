@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,6 +46,7 @@ type Options struct {
 	// SocketDir is an absolute directory owned by the caller with no group
 	// or other permissions, such as the service's data directory. The
 	// broker's socket is created in it for one request.
+	// Preflight refuses it if the generated pathname would exceed 103 bytes.
 	SocketDir string
 	// Timeout bounds the whole exchange; zero means 30 seconds.
 	Timeout time.Duration
@@ -103,10 +103,7 @@ func Rebind(ctx context.Context, opts Options, envelope []byte) ([]byte, error) 
 }
 
 func exchange(ctx context.Context, opts Options, op string, env Envelope, envelope []byte) (*Result, error) {
-	if !filepath.IsAbs(opts.Broker) {
-		return nil, fmt.Errorf("broker path %q is not absolute", opts.Broker)
-	}
-	if err := checkSocketDir(opts.SocketDir); err != nil {
+	if err := Preflight(opts); err != nil {
 		return nil, err
 	}
 	timeout := opts.Timeout
@@ -119,7 +116,7 @@ func exchange(ctx context.Context, opts Options, op string, env Envelope, envelo
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, err
 	}
-	sock := filepath.Join(opts.SocketDir, "kek-"+hex.EncodeToString(nonce[:])+".sock")
+	sock := socketPath(opts.SocketDir, nonce)
 	defer os.Remove(sock)
 
 	// exec.Command, not CommandContext: a context-driven Cancel would run
@@ -290,13 +287,17 @@ func checkSocketDir(dir string) error {
 	if err != nil {
 		return err
 	}
+	return checkSocketDirMetadata(dir, info, uint32(os.Getuid()))
+}
+
+func checkSocketDirMetadata(dir string, info os.FileInfo, uid uint32) error {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	switch {
 	case !info.IsDir():
 		return fmt.Errorf("socket dir %s is not a directory", dir)
 	case info.Mode().Perm()&0o077 != 0:
 		return fmt.Errorf("socket dir %s has group or other permissions", dir)
-	case !ok || int(st.Uid) != os.Getuid():
+	case !ok || st.Uid != uid:
 		return fmt.Errorf("socket dir %s is not owned by this user", dir)
 	}
 	return nil
