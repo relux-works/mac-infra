@@ -623,6 +623,13 @@ func (l *runLoop) run(ctx context.Context) error {
 			l.sampler.begin(ctx, l.interval)
 		case run := <-l.sampler.done:
 			start := l.sampler.finish()
+			// select picks at random among ready cases: a result that is
+			// ready together with cancellation is the shutdown's own kill,
+			// dropped as wait drops it, so a shutdown records no
+			// nettop_error and runs no extra save (PR70 review r1).
+			if ctx.Err() != nil {
+				return nil
+			}
 			if e := l.sample(run, start); e != nil {
 				return e
 			}

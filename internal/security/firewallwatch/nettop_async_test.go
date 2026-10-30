@@ -199,7 +199,9 @@ func TestNettopSamplerOneCommandNoBackToBack(t *testing.T) {
 // BUG-261030-pq91zb: cancellation while a command runs ends the loop cleanly;
 // wait cancels that command and returns once it has, and its result is never
 // collected. Positive control: the same fixture without cancellation collects
-// the command's result (TestNettopSamplerOneCommandNoBackToBack).
+// the command's result (TestNettopSamplerOneCommandNoBackToBack). Limit: here
+// cancellation usually wins the select before the result is sent; the case
+// where both are ready is TestRunLoopDropsResultReadyAtCancellation.
 func TestRunLoopCancelDuringNettop(t *testing.T) {
 	nettop := &fakeNettop{}
 	f := newLoopFixture(make(chan []byte), 50*time.Millisecond, time.Hour, nettop)
@@ -240,6 +242,30 @@ func TestRunLoopCancelDuringNettop(t *testing.T) {
 	defer nettop.mu.Unlock()
 	if nettop.running != 0 || len(nettop.sawCtx) != 1 || nettop.sawCtx[0] != context.Canceled || len(f.completed) != 0 {
 		t.Fatalf("running=%d ctx=%v collected=%d", nettop.running, nettop.sawCtx, len(f.completed))
+	}
+}
+
+// PR70 review r1: when a command result and cancellation are both ready, the
+// loop never collects the result, whichever case select picks, and the sampler
+// ends idle with no result left behind. Each of 200 rounds starts with both
+// ready; the shape without the cancellation check collects in about half of
+// them (negative control m6). Positive control: a result without cancellation
+// is collected (TestNettopSamplerOneCommandNoBackToBack).
+func TestRunLoopDropsResultReadyAtCancellation(t *testing.T) {
+	for round := 0; round < 200; round++ {
+		f := newLoopFixture(make(chan []byte), time.Hour, time.Hour, &fakeNettop{})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		sampler := f.loop.sampler
+		sampler.busy, sampler.stop, sampler.start = true, func() {}, time.Now()
+		sampler.done <- nettopRun{output: &cappedBuffer{limit: 1}, err: context.Canceled}
+		if e := f.loop.run(ctx); e != nil {
+			t.Fatal(e)
+		}
+		sampler.wait()
+		if len(f.completed) != 0 || sampler.busy || len(sampler.done) != 0 {
+			t.Fatalf("round %d: collected=%d busy=%t left=%d", round, len(f.completed), sampler.busy, len(sampler.done))
+		}
 	}
 }
 
