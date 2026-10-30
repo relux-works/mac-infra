@@ -51,6 +51,10 @@ const errSecMissingEntitlement = -34018
 
 const errSecItemNotFound = -25300
 
+// errSecParam is what ECIES decryption answers for an envelope that fails
+// its GCM tag: tampered, truncated or made for another key.
+const errSecParam = -50
+
 // StoreKind names where a key pair lives.
 type StoreKind = signerclient.StoreKind
 
@@ -212,6 +216,8 @@ func OSStatusName(status int) string {
 		return "errSecUserCanceled"
 	case -25291:
 		return "errSecNotAvailable"
+	case errSecParam:
+		return "errSecParam"
 	default:
 		return fmt.Sprintf("OSStatus %d", status)
 	}
@@ -605,11 +611,60 @@ func (m *Manager) updateMeta(addr Address, change func(map[string]any)) (Key, er
 	return key, nil
 }
 
+// StoreDecrypter is implemented by a Backend that can open ECIES envelopes
+// with a private half it holds. The plaintext leaves the backend; the key
+// does not.
+type StoreDecrypter interface {
+	Decrypt(label string, envelope []byte) ([]byte, error)
+}
+
+// ErrEnvelopeInvalid reports an envelope the key could not open: tampered,
+// truncated, or made for another key. GCM does not tell these apart.
+var ErrEnvelopeInvalid = errors.New("envelope does not open under this key")
+
+// Decrypt opens an ECIES envelope with the newest generation the address
+// names, after the same gates as Sign: address inside the namespace, readable
+// and valid record, registry row, usages ∋ decrypt, validity unexpired. An
+// envelope the key cannot open is ErrEnvelopeInvalid.
+func (m *Manager) Decrypt(addr Address, envelope []byte) (Key, []byte, error) {
+	if err := RequireOwnLabel(addr.Label()); err != nil {
+		return Key{}, nil, err
+	}
+	key, err := m.resolve(addr)
+	if err != nil {
+		return Key{}, nil, err
+	}
+	if err := m.authorize(key, OperationDecrypt); err != nil {
+		return Key{}, nil, err
+	}
+	if err := RequireOwnLabel(key.Label); err != nil {
+		return Key{}, nil, err
+	}
+	decrypter, ok := m.backend.(StoreDecrypter)
+	if !ok {
+		return Key{}, nil, &Refusal{Code: CodeUnsupportedPrimitive, Failure: true, Message: fmt.Sprintf("this vault's backend cannot decrypt with %s", key.Label), Hint: "decryption runs in mac-keyvault-kek"}
+	}
+	plain, err := decrypter.Decrypt(key.Label, envelope)
+	if err != nil {
+		var status *StatusError
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return Key{}, nil, &NotFoundError{Address: addr}
+		case errors.As(err, &status) && status.Status == errSecParam:
+			return Key{}, nil, ErrEnvelopeInvalid
+		}
+		return Key{}, nil, Translate("decrypt", err)
+	}
+	return key, plain, nil
+}
+
 // OperationSign and OperationVerify are the registry names sign and
 // verify are gated on.
 const (
 	OperationSign   = "ecdsa-sha256-sign"
 	OperationVerify = "ecdsa-sha256-verify"
+	// OperationDecrypt opens an ECIES envelope; mac-keyvault-kek performs it.
+	OperationDecrypt = "ecies-p256-decrypt"
 )
 
 // authorize is the operations gate (model §6): the named operation must be

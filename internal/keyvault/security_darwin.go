@@ -156,6 +156,40 @@ func (s *SecurityStore) Sign(label string, digest []byte) ([]byte, error) {
 	return C.GoBytes(unsafe.Pointer(out), C.int(outLen)), nil
 }
 
+// Decrypt opens an ECIES envelope (cofactor, X9.63 SHA-256, AES-GCM,
+// variable IV) with the private half under label. The C buffer that held the
+// plaintext is zeroed before it is freed.
+func (s *SecurityStore) Decrypt(label string, envelope []byte) ([]byte, error) {
+	if len(envelope) == 0 {
+		return nil, &StatusError{Op: "decrypt", Status: errSecParam}
+	}
+	cLabel := C.CString(label)
+	defer C.free(unsafe.Pointer(cLabel))
+	var out *C.uchar
+	var outLen C.size_t
+	status := int(C.MacKeyVaultDecrypt(cLabel, (*C.uchar)(unsafe.Pointer(&envelope[0])), C.size_t(len(envelope)), &out, &outLen))
+	if status == errSecItemNotFound {
+		return nil, ErrNotFound
+	}
+	if status != 0 {
+		return nil, &StatusError{Op: "decrypt", Status: status}
+	}
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(out)), int(outLen))
+	plain := bytes.Clone(raw)
+	clear(raw)
+	C.free(unsafe.Pointer(out))
+	return plain, nil
+}
+
+// DisableKeychainUI makes every later Keychain call of this process fail
+// instead of raising a dialog.
+func DisableKeychainUI() error {
+	if status := int(C.MacKeyVaultDisableUI()); status != 0 {
+		return &StatusError{Op: "disable keychain UI", Status: status}
+	}
+	return nil
+}
+
 // ExportProbe is the outcome of trying to pull private material out of a
 // keychain item through both Security.framework export paths.
 type ExportProbe struct {

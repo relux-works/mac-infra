@@ -11,13 +11,14 @@ BUILD_VERSION="dev"
 BUILD_COMMIT="unknown"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 REBUILD_KEYVAULT=0
+REBUILD_KEK=0
 ALLOW_UNPROVABLE=0
 ONLY=0
 SELECTED_BINARIES=()
 
 usage() {
   cat <<EOF
-Usage: ./scripts/setup.sh [--bin-dir PATH] [--only NAME[,NAME...]] [--rebuild-keyvault] [--allow-unprovable]
+Usage: ./scripts/setup.sh [--bin-dir PATH] [--only NAME[,NAME...]] [--rebuild-keyvault] [--rebuild-kek] [--allow-unprovable]
 
 Builds and links mac-infra Go tools. --only selects tools and tests only
 those commands and their in-module dependencies; otherwise all packages
@@ -31,6 +32,11 @@ binary, and a rebuild makes each key wait on a keychain prompt. Pass
 --rebuild-keyvault only in a planned owner sitting, after booting out
 every keyvault agent; it refuses while a process uses the binary or a
 keyvault LaunchAgent is loaded.
+An existing bin/mac-keyvault-kek is kept the same way: its KEK keys trust
+exactly that binary, and with Keychain UI disabled they refuse a rebuilt
+one silently, so the services it serves stop getting their KEK. It is built
+only when absent, or with --rebuild-kek in a planned owner sitting that
+also re-provisions its keys.
 The privileged LaunchDaemon is not installed or restarted automatically.
 After first setup and after mac-infra-core updates, run:
   mac-infra-core install
@@ -60,6 +66,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --rebuild-keyvault)
       REBUILD_KEYVAULT=1
+      shift
+      ;;
+    --rebuild-kek)
+      REBUILD_KEK=1
       shift
       ;;
     --allow-unprovable)
@@ -96,6 +106,7 @@ ALL_BINARIES=(
   "mac-netnone"
   "mac-firewall"
   "mac-keyvault"
+  "mac-keyvault-kek"
 )
 selected() {
   local name
@@ -168,6 +179,16 @@ keyvault_link_guard() {
   fi
 }
 keyvault_link_guard
+# The KEK broker is built once and then kept: a rebuilt broker is a new code
+# identity its keys' ACLs refuse.
+KEK_DECISION=skip
+if selected mac-keyvault-kek; then
+  if [[ ! -e "$BUILD_DIR/mac-keyvault-kek" || "$REBUILD_KEK" == 1 ]]; then
+    KEK_DECISION=build
+  else
+    KEK_DECISION=keep
+  fi
+fi
 if [[ ! -x /usr/bin/codesign ]]; then
   echo "/usr/bin/codesign is required for the managed browser heartbeat" >&2
   exit 1
@@ -319,6 +340,14 @@ if [[ "$KEYVAULT_DECISION" == build ]]; then
 elif [[ "$KEYVAULT_DECISION" == keep ]]; then
   echo "Keeping the existing bin/mac-keyvault (keyvault keys trust exactly this binary; see --rebuild-keyvault)"
 fi
+if [[ "$KEK_DECISION" == build ]]; then
+  echo "Building mac-keyvault-kek..."
+  go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-keyvault-kek" ./cmd/mac-keyvault-kek
+  /usr/bin/codesign --force --sign - --options runtime,library --identifier works.relux.mac-infra.keyvault-kek "$STAGE_DIR/mac-keyvault-kek"
+  /usr/bin/codesign --verify --strict "$STAGE_DIR/mac-keyvault-kek"
+elif [[ "$KEK_DECISION" == keep ]]; then
+  echo "Keeping the existing bin/mac-keyvault-kek (its KEK keys trust exactly this binary; see --rebuild-kek)"
+fi
 BUILT_BINARIES=(
   "mac-audio-reset"
   "mac-audio-sweep"
@@ -346,6 +375,9 @@ done
 BUILT_BINARIES=(${SELECTED_BUILDS[@]+"${SELECTED_BUILDS[@]}"})
 if [[ "$KEYVAULT_DECISION" == build ]]; then
   BUILT_BINARIES+=("mac-keyvault")
+fi
+if [[ "$KEK_DECISION" == build ]]; then
+  BUILT_BINARIES+=("mac-keyvault-kek")
 fi
 if [[ "$ALLOW_UNPROVABLE" == 1 ]]; then
   "$SCRIPT_DIR/provenance-guard.sh" publish "$PROJECT_ROOT" "$STAGE_DIR" "$BUILD_DIR" --allow-unprovable "${BUILT_BINARIES[@]}"
@@ -436,6 +468,9 @@ if selected mac-keyvault; then
     echo "Keeping $KEYVAULT_LINK -> $(readlink "$KEYVAULT_LINK" || echo "a regular file") (see --rebuild-keyvault)"
   fi
 fi
+if selected mac-keyvault-kek && [[ -e "$BUILD_DIR/mac-keyvault-kek" ]]; then
+  ln -sf "$BUILD_DIR/mac-keyvault-kek" "$BIN_DIR/mac-keyvault-kek"
+fi
 echo "Installed binary symlinks:"
 if selected mac-audio-reset; then
   echo "  $BIN_DIR/mac-audio-reset -> $BUILD_DIR/mac-audio-reset"
@@ -489,6 +524,9 @@ if selected mac-firewall; then
 fi
 if selected mac-keyvault; then
   echo "  $BIN_DIR/mac-keyvault    -> $BUILD_DIR/mac-keyvault"
+fi
+if selected mac-keyvault-kek; then
+  echo "  $BIN_DIR/mac-keyvault-kek -> $BUILD_DIR/mac-keyvault-kek"
 fi
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then

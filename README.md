@@ -29,7 +29,8 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `pdftotext` | Extract PDF text for sanitization | installed with `brew install poppler`; invoked internally by `mac-document-sanitize` | no intermediate raw-text artifact |
 | `go test` | Verify Go command planning and CLI behavior | `MAC_KEYVAULT_SKIP_KEYCHAIN=1 go test ./...` | test cache and temporary test fixtures |
 | Apple clang / cgo | Build the native macOS extended ACL checks used by the privileged installer and daemon | `CGO_ENABLED=1 go build -o .temp/mac-infra-core ./cmd/mac-infra-core` (requires Xcode or Command Line Tools) | `.temp/mac-infra-core`; `scripts/setup.sh` builds its normal `bin/mac-infra-core` artifact with the configured Go cgo setting |
-| `scripts/setup.sh` | Refuses worktree, dirty or unprovable builds unless `--allow-unprovable` is set for a developer checkout. Build the CLIs (and, with `--rebuild-keyvault`, the Swift Secure Enclave helper `bin/mac-keyvault-enclave` via `swiftc`) and link the selected tools. `--only NAME[,NAME...]` tests the selected commands and their in-module dependencies and builds/publishes/links only those tools; without it, setup tests all packages and installs all tools. Skills arrive through Curator profiles and the [published mirror](https://github.com/relux-works/skill-mac-infra). An existing `bin/mac-keyvault` is kept, because keyvault keys trust exactly that binary; `--rebuild-keyvault` (planned owner sitting only) rebuilds it and refuses while lsof shows a process using it, while any `mac-keyvault` process runs, while a `works.relux.mac-keyvault.*` LaunchAgent is loaded, or when those tools cannot answer (`scripts/keyvault-build-guard.sh`); an existing `~/.local/bin/mac-keyvault` link to another checkout is kept | `./scripts/setup.sh [--only NAME[,NAME...]] [--rebuild-keyvault] [--allow-unprovable]` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-firewall`, `bin/mac-keyvault`, `~/.local/bin/*` (only selected tools when `--only` is supplied) |
+| `mac-keyvault-kek` | Keep a service's 32-byte KEK wrapped to a non-extractable login-Keychain key (usage `decrypt`) and hand it back only to the code the envelope binds (`cdhash`, hardened runtime and library validation, no get-task-allow), over one Unix-socket request per process; KEK contract 1 | `mac-keyvault-kek create --address S/P [--title T] [--not-after RFC3339]`, `pub --address S/P [--version N]`, `audit-verify`; `unwrap`/`rebind --address S/P --socket PATH` are run by the Go client `pkg/kekclient` (`Wrap`, `Unwrap`, `Rebind`) | One keychain item per generation, trusting only this binary; metadata-only `0600` hash-chained audit log `~/Library/Application Support/mac-keyvault-kek/audit.jsonl`; [contract, rebind and limits](agents/skills/mac-infra/references/kek.md) |
+| `scripts/setup.sh` | Refuses worktree, dirty or unprovable builds unless `--allow-unprovable` is set for a developer checkout. Build the CLIs (and, with `--rebuild-keyvault`, the Swift Secure Enclave helper `bin/mac-keyvault-enclave` via `swiftc`) and link the selected tools. `--only NAME[,NAME...]` tests the selected commands and their in-module dependencies and builds/publishes/links only those tools; without it, setup tests all packages and installs all tools. Skills arrive through Curator profiles and the [published mirror](https://github.com/relux-works/skill-mac-infra). An existing `bin/mac-keyvault` is kept, because keyvault keys trust exactly that binary; `--rebuild-keyvault` (planned owner sitting only) rebuilds it and refuses while lsof shows a process using it, while any `mac-keyvault` process runs, while a `works.relux.mac-keyvault.*` LaunchAgent is loaded, or when those tools cannot answer (`scripts/keyvault-build-guard.sh`); an existing `~/.local/bin/mac-keyvault` link to another checkout is kept. `bin/mac-keyvault-kek` is built only when absent and is then kept the same way, because its keys trust exactly that binary; `--rebuild-kek` (planned owner sitting only) rebuilds it | `./scripts/setup.sh [--only NAME[,NAME...]] [--rebuild-keyvault] [--rebuild-kek] [--allow-unprovable]` | `bin/mac-audio-reset`, `bin/mac-audio-sweep`, `bin/mac-load-profile`, `bin/mac-video-profile`, `bin/mac-disk-profile`, `bin/mac-cleanup`, `bin/mac-safari-session`, `bin/mac-chrome-session`, `bin/mac-browser-site`, `bin/mac-document-sanitize`, `bin/mac-infra-core`, `bin/mac-security`, `bin/mac-firewall`, `bin/mac-keyvault`, `bin/mac-keyvault-kek`, `~/.local/bin/*` (only selected tools when `--only` is supplied) |
 | `scripts/provenance-guard.sh` | Offline source and structured Go buildinfo admission, then staged publication (refusal exit 3) | `./scripts/provenance-guard.sh preflight ROOT`, `./scripts/provenance-guard.sh verify ROOT BIN...`, `./scripts/provenance-guard.sh publish ROOT STAGE_DIR DEST_DIR [--allow-unprovable] NAME...` | diagnostics on stderr; publish atomically moves verified files into DEST_DIR |
 | `python3` | Parse one structured Go buildinfo object and check publication filesystem identity | invoked by `scripts/provenance-guard.sh` with `python3 -I -c` | diagnostics on stderr; no files written |
 | `scripts/deinit.sh` | Remove user-level installation without stranding managed jobs | `./scripts/deinit.sh` | stops all `works.relux.mac-infra-browser-heartbeat.*` LaunchAgents and removes the stable launcher plus legacy pinned copies before removing binary symlinks; also cleans up retired global skill paths from pre-Curator installations |
@@ -47,13 +48,18 @@ build. Unknown names are usage errors (exit 2). Selecting `mac-keyvault`
 requires `--rebuild-keyvault` and all existing rebuild guards still apply.
 Selecting `--only mac-tool-secret` also builds, independently ad-hoc signs and
 links `mac-tool-secret-probe`; neither command uses the keyvault build guard.
+Selecting `mac-keyvault-kek` builds it only when `bin/mac-keyvault-kek` is
+absent (or with `--rebuild-kek`); otherwise it is kept. Its dependencies
+include the keyvault packages, so run it with `MAC_KEYVAULT_SKIP_KEYCHAIN=1`
+after the read-only canary, as for any keyvault test outside an attended
+sitting.
 Without `--only`, setup retains the full `go test ./...` and full installation.
 
 For Go verification, set `MAC_KEYVAULT_SKIP_KEYCHAIN` to any non-empty value
 to skip integration tests using the real Security.framework backend, login Keychain
 or Secure Enclave helper (including helper compilation). Fake-backed tests
 still run. To run the real tests on demand, unset the variable and run
-`go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault` in your own
+`go test -count=1 ./internal/keyvault/... ./cmd/mac-keyvault ./cmd/mac-keyvault-kek` in your own
 attended sitting: these tests create and delete test-namespace Keychain items
 and may compile the Swift helper and require owner interaction. The gate is
 test-only and does not change installed commands. On macOS with cgo, a gated
@@ -74,14 +80,14 @@ the check cannot prevent its startup. For full coverage including native startup
 reviewers and agents should use the shipped external wrapper (macOS):
 
 ```sh
-./scripts/keyvault-test-confined.sh -count=1 ./internal/keyvault/... ./cmd/mac-keyvault
+./scripts/keyvault-test-confined.sh -count=1 ./internal/keyvault/... ./cmd/mac-keyvault ./cmd/mac-keyvault-kek
 ```
 
 The wrapper sets the gate by default, takes HOME as a sandbox profile parameter,
 and forwards all `go test` arguments. Its process tree is confined from exec;
 failed nested installation continues only after the canary confirms denial.
 The reserved `keyvault_gate_regression` tag adds read-only sandbox probes:
-`./scripts/keyvault-test-confined.sh -count=1 -tags=keyvault_gate_regression -run '^TestSandbox' ./internal/keyvault/... ./cmd/mac-keyvault`.
+`./scripts/keyvault-test-confined.sh -count=1 -tags=keyvault_gate_regression -run '^TestSandbox' ./internal/keyvault/... ./cmd/mac-keyvault ./cmd/mac-keyvault-kek`.
 
 Setup no longer installs global agent skills. Use Curator profiles backed by
 the [relux-works/skill-mac-infra mirror](https://github.com/relux-works/skill-mac-infra).

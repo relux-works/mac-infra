@@ -39,7 +39,8 @@ const ViaReserved = "reserved"
 // registry is the single table describe, list and the gates are driven from.
 // Adding a primitive is one row plus its backend implementation; no command
 // grows a special case. The Secure Enclave row signs, verifies and exports
-// its public half; nothing else is reserved for it.
+// its public half; nothing else is reserved for it. The keychain row's
+// ECIES decryption is performed by mac-keyvault-kek, not by mac-keyvault.
 var registry = map[PrimitiveKey]Primitive{
 	{Kind: KindKey, Algorithm: AlgorithmECP256, Store: StoreEnclave}: {
 		Exposure: ExposureNever,
@@ -56,7 +57,7 @@ var registry = map[PrimitiveKey]Primitive{
 			{Name: OperationVerify, Input: "sha256-digest+signature", Output: "verdict", Via: "verify"},
 			{Name: "ecdh-p256", Input: "peer-spki", Output: "shared-secret", Via: ViaReserved, requires: "wrap"},
 			{Name: "ecies-p256-encrypt", Input: "payload", Output: "envelope:ecies-x963-sha256-aesgcm", Via: ViaReserved},
-			{Name: "ecies-p256-decrypt", Input: "envelope:ecies-x963-sha256-aesgcm", Output: "payload", Via: ViaReserved, requires: "decrypt", expires: true},
+			{Name: OperationDecrypt, Input: "envelope:ecies-x963-sha256-aesgcm", Output: "payload", Via: "mac-keyvault-kek unwrap", requires: "decrypt", expires: true},
 			{Name: "export-public", Input: "", Output: "spki-der|spki-pem|jwk", Via: "pub"},
 			{Name: "export-private", Input: "", Output: "pkcs8-der|pkcs8-pem|pkcs12", Via: ViaReserved, extraction: true},
 		},

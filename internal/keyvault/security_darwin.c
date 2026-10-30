@@ -325,6 +325,46 @@ int MacKeyVaultSign(const char *label, const unsigned char *digest, size_t diges
     return 0;
 }
 
+// ECIES unwrap with the private half under label
+// (kSecKeyAlgorithmECIESEncryptionCofactorVariableIVX963SHA256AESGCM). The
+// plaintext is returned to the caller; the private key stays in
+// Security.framework. A tampered or foreign envelope fails GCM and comes back
+// as the framework's error code (errSecParam, -50).
+int MacKeyVaultDecrypt(const char *label, const unsigned char *in, size_t inLen,
+                       unsigned char **out, size_t *outLen) {
+    SecKeyRef key = NULL;
+    OSStatus status = MacKeyVaultCopyPrivateKey(label, &key);
+    if (status != errSecSuccess) return (int)status;
+    CFDataRef envelope = CFDataCreate(kCFAllocatorDefault, in, (CFIndex)inLen);
+    CFErrorRef error = NULL;
+    CFDataRef plain = SecKeyCreateDecryptedData(key, kSecKeyAlgorithmECIESEncryptionCofactorVariableIVX963SHA256AESGCM, envelope, &error);
+    CFRelease(envelope);
+    CFRelease(key);
+    if (plain == NULL) {
+        int code = MacKeyVaultErrorCode(error);
+        if (error != NULL) CFRelease(error);
+        return code;
+    }
+    size_t length = (size_t)CFDataGetLength(plain);
+    unsigned char *buffer = malloc(length == 0 ? 1 : length);
+    if (buffer == NULL) {
+        CFRelease(plain);
+        return MacKeyVaultUnknownError;
+    }
+    memcpy(buffer, CFDataGetBytePtr(plain), length);
+    CFRelease(plain);
+    *out = buffer;
+    *outLen = length;
+    return 0;
+}
+
+// Keychain access of this process never raises a dialog: a call that would
+// need one fails with errSecInteractionNotAllowed or errSecAuthFailed
+// instead. Used by unattended callers (the KEK broker).
+int MacKeyVaultDisableUI(void) {
+    return (int)SecKeychainSetUserInteractionAllowed(false);
+}
+
 // Attestation probe: tries both private-material export paths on the item and
 // reports their statuses verbatim. 0 from either would mean the private key
 // left the keychain; the tests require the documented refusals instead.

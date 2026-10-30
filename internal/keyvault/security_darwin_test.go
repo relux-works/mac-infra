@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/relux-works/mac-infra/internal/keyvault/testguard"
+	"github.com/relux-works/mac-infra/pkg/kekclient"
 )
 
 // GuardedStore wraps a Backend and fails the test process before any Create,
@@ -65,6 +66,18 @@ func (g *GuardedStore) Sign(label string, digest []byte) ([]byte, error) {
 		return nil, err
 	}
 	return g.Backend.Sign(label, digest)
+}
+
+// Decrypt is guarded like Sign: it uses the private half.
+func (g *GuardedStore) Decrypt(label string, envelope []byte) ([]byte, error) {
+	if err := g.guard(label); err != nil {
+		return nil, err
+	}
+	decrypter, ok := g.Backend.(StoreDecrypter)
+	if !ok {
+		return nil, fmt.Errorf("backend %T cannot decrypt", g.Backend)
+	}
+	return decrypter.Decrypt(label, envelope)
 }
 
 func newGuardedSecurityStore(t *testing.T) *GuardedStore {
@@ -123,6 +136,9 @@ func TestGuardedStoreRefusesNonTestLabels(t *testing.T) {
 		if sig, err := store.Sign(label, digest); !errors.Is(err, ErrGuardedLabel) || sig != nil {
 			t.Fatalf("sign %q: sig=%x err = %v", label, sig, err)
 		}
+		if plain, err := store.Decrypt(label, []byte("envelope")); !errors.Is(err, ErrGuardedLabel) || plain != nil {
+			t.Fatalf("decrypt %q: plain=%x err = %v", label, plain, err)
+		}
 	}
 	if len(inner.creates) != 0 || len(inner.deletes) != 0 || len(inner.updates) != 0 || len(inner.signs) != 0 {
 		t.Fatalf("guard leaked calls: creates=%v deletes=%v updates=%v signs=%v", inner.creates, inner.deletes, inner.updates, inner.signs)
@@ -141,6 +157,47 @@ func TestGuardedStoreRefusesNonTestLabels(t *testing.T) {
 	inner.installSigner(t, tl("ok", 1))
 	if sig, err := store.Sign(tl("ok", 1), digest); err != nil || len(sig) == 0 || len(inner.signs) != 1 || inner.signs[0] != tl("ok", 1) {
 		t.Fatalf("test label sign: err=%v sig=%x signs=%v", err, sig, inner.signs)
+	}
+}
+
+// Login-keychain ECIES on this Mac: an envelope sealed in pure Go to a new
+// non-extractable test key opens through Security.framework with the
+// payload intact, and the same envelope with one ciphertext byte or one tag
+// byte changed fails with errSecParam and no plaintext. Attended runs only,
+// like every real-keychain test.
+func TestSecurityStoreDecryptOpensGoEnvelope(t *testing.T) {
+	store := newGuardedSecurityStore(t)
+	label := testLabel(t, "kek")
+	item, err := store.Create(CreateOptions{Label: label, Tag: testTag(t, label), Store: StoreKeychain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kek := bytes.Repeat([]byte{0x5a}, kekclient.KEKLen)
+	spec := kekclient.WrapSpec{SPKI: item.SPKI, Fingerprint: kekclient.Fingerprint(item.SPKI), Address: "test/kek", Generation: 1, Requirement: `cdhash H"` + strings.Repeat("ab", 20) + `"`, InstallPath: "/opt/test/proxy"}
+	sealed, err := kekclient.Wrap(spec, kek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := kekclient.ParseEnvelope(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := store.Decrypt(label, env.ECIES)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := kekclient.ParsePayload(plain, env)
+	if err != nil || !bytes.Equal(payload.KEK, kek) || payload.Requirement != spec.Requirement {
+		t.Fatalf("payload = %+v, %v", payload, err)
+	}
+	for _, i := range []int{70, len(env.ECIES) - 1} {
+		tampered := bytes.Clone(env.ECIES)
+		tampered[i] ^= 1
+		plain, err := store.Decrypt(label, tampered)
+		var status *StatusError
+		if plain != nil || !errors.As(err, &status) || status.Status != errSecParam {
+			t.Fatalf("tampered byte %d: plain=%x err=%v", i, plain, err)
+		}
 	}
 }
 
