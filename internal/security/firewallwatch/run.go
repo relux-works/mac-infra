@@ -513,6 +513,17 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		}
 		return e
 	}
+	// saveDue is the save timer's write: pending silent changes become durable
+	// when the timer fires, whatever the run clock reads (Store.SaveDue).
+	saveDue := func() error {
+		s.State.BackendHealthy = cl.Healthy()
+		s.State.Health.ClockHeldReadings = clock.heldCount()
+		e := s.SaveDue(s.now())
+		if e == nil {
+			saveTick.Reset(duration(c.SaveInterval))
+		}
+		return e
+	}
 	flush := func(emitted bool) error {
 		previous := s.lastSave
 		s.State.BackendHealthy = cl.Healthy()
@@ -574,7 +585,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	loop := &runLoop{
 		alf: lines, netfilter: &netLines, saveTick: saveTick.C,
 		tick: tick, interval: duration(c.NettopInterval), sampler: sampler,
-		onALF: onALF, onNetfilter: onNetfilter, flush: flush,
+		onALF: onALF, onNetfilter: onNetfilter, flush: flush, saveDue: saveDue,
 		sample: func(run nettopRun, start time.Time) error {
 			return sampleTick(func() (bool, error) {
 				return s.sampleNettop(run, start, collect, flush, drain)
@@ -596,6 +607,7 @@ type runLoop struct {
 	onALF       func(line []byte, ok bool) (bool, error)
 	onNetfilter func(line []byte, ok bool) error
 	flush       func(emitted bool) error
+	saveDue     func() error
 	sample      func(run nettopRun, start time.Time) error
 }
 
@@ -610,7 +622,7 @@ func (l *runLoop) run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-l.saveTick:
-			if e := l.flush(false); e != nil {
+			if e := l.saveDue(); e != nil {
 				return e
 			}
 		case line, ok := <-l.alf:

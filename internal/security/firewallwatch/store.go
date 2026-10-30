@@ -801,6 +801,20 @@ func (s *Store) Checkpoint(now time.Time) error {
 	return s.journalOrSnapshot(now, true)
 }
 
+// SaveDue is the save timer's write. The timer runs on elapsed time and
+// restarts at every durable write that moves lastSave, so when it fires
+// save_interval has passed since the last one and pending silent changes are
+// due: they become durable now, as a heartbeat or a due snapshot. Flush's own
+// test compares wall times, and while the run clock holds during a backward
+// wall-clock step it would keep waiting, leaving a silent refresh older than
+// save_interval exposed to a crash. Without pending changes it writes nothing.
+func (s *Store) SaveDue(now time.Time) error {
+	if !s.dirty && !s.delta.urgent {
+		return nil
+	}
+	return s.Checkpoint(now)
+}
+
 func (s *Store) journalOrSnapshot(now time.Time, beat bool) error {
 	e := s.appendJournal(now, beat)
 	if e == nil {

@@ -76,7 +76,8 @@ func newLoopFixture(alf <-chan []byte, interval, saveEvery time.Duration, nettop
 			return false, nil
 		},
 		onNetfilter: func([]byte, bool) error { return nil },
-		flush: func(bool) error {
+		flush:       func(bool) error { return nil },
+		saveDue: func() error {
 			f.mu.Lock()
 			f.flushes = append(f.flushes, time.Now())
 			f.mu.Unlock()
