@@ -595,9 +595,10 @@ check and the kind; the next start records it in `write_refusals` (the last
 32), removes the marker, and the digest labels that restart's gap
 `write_refused`. If the marker cannot be written the run still ends, and
 stderr carries the refusal alone. `watch status` shows `clock_held_refreshes`,
-`clock_held_readings` (as of the latest journal heartbeat) and `write_refusals`
-(an empty list when none) in JSON, and a `clock held: … write refusals=N,
-latest: …` line in text.
+`clock_held_readings` (as of the latest durable snapshot or journal heartbeat)
+and `write_refusals` (as recorded at the latest start; an empty list when none)
+in JSON, and a `clock held: … write refusals=N, latest: …` line in text. The
+`health` of `watch digest --split` keeps its fields and does not include them.
 
 Recovery of state that a backward clock step already made unreadable (a
 watcher or `status` failing with `corrupt state` or `corrupt state journal`

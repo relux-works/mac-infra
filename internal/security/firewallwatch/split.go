@@ -143,7 +143,7 @@ type DigestSplit struct {
 func (s *Store) Split(since, asOf time.Time) DigestSplit {
 	split := DigestSplit{
 		Window:      SplitWindow{Since: since, AsOf: asOf, CoverageGaps: s.coverageGaps(since, asOf), SlowOps: windowSlowOps(s.State.Health, since, asOf)},
-		Health:      s.Status(),
+		Health:      s.health(),
 		RealDeny:    []SplitRow{},
 		KnownFP:     map[string]SplitGroup{},
 		NeedsReview: []SplitRow{},

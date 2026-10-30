@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -584,4 +586,27 @@ func TestFeedLinesBackpressureGap(t *testing.T) {
 	}
 	lw.Close()
 	<-liveDone
+}
+
+// The split digest's health keeps the digest's schema: exactly the fields it
+// carried before watch status gained the held counts and the write refusals,
+// with a refusal and held counts in the state. watch status still reports
+// all three on top of the same health fields.
+func TestSplitHealthKeepsDigestSchema(t *testing.T) {
+	now := time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
+	s := &Store{Config: testConfig(t)}
+	s.State.Health.ClockHeldRefreshes, s.State.Health.ClockHeldReadings = 2, 3
+	s.State.WriteRefusals = []WriteRefusal{{Check: checkEntryOrder, Kind: refusalKindJournal, At: now}}
+	digest := []string{"backend_healthy", "entries", "events", "health_as_of", "invalid_json", "journal_torn_tail",
+		"last_event", "line_queue_high_water", "mode", "netfilter_error", "netfilter_invalid",
+		"netfilter_rejected_sender", "nettop_error", "run_loop_timing", "shutdown_dropped_lines", "signer_cache",
+		"unrecognized", "unrecognized_samples"}
+	if got := slices.Sorted(maps.Keys(s.Split(now.Add(-time.Hour), now).Health)); !slices.Equal(got, digest) {
+		t.Fatalf("split health fields %v; want %v", got, digest)
+	}
+	status := append(slices.Clone(digest), "clock_held_readings", "clock_held_refreshes", "write_refusals")
+	slices.Sort(status)
+	if got := slices.Sorted(maps.Keys(s.Status())); !slices.Equal(got, status) {
+		t.Fatalf("status fields %v; want %v", got, status)
+	}
 }

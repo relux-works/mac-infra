@@ -1165,7 +1165,21 @@ func (s *Store) Digest(since time.Time) map[string]DigestGroup {
 	}
 	return result
 }
+
+// Status is what watch status reports: the health the split digest also
+// carries, plus the run clock's held counts and the recorded write refusals.
 func (s *Store) Status() map[string]any {
+	status := s.health()
+	status["clock_held_refreshes"] = s.State.Health.ClockHeldRefreshes
+	status["clock_held_readings"] = s.State.Health.ClockHeldReadings
+	// An empty list, not null, when nothing was refused.
+	status["write_refusals"] = append([]WriteRefusal{}, s.State.WriteRefusals...)
+	return status
+}
+
+// health is the status that watch digest --split carries as its health; its
+// fields are the digest's schema and do not grow with watch status.
+func (s *Store) health() map[string]any {
 	return map[string]any{
 		"entries":                   len(s.State.Entries),
 		"events":                    len(s.State.Events),
@@ -1185,11 +1199,7 @@ func (s *Store) Status() map[string]any {
 		"shutdown_dropped_lines":    s.State.Health.ShutdownDroppedLines,
 		"run_loop_timing": map[string]TimingSummary{"save": s.State.Health.Save,
 			"classification": s.State.Health.Classification, "maintenance": s.State.Health.Maintenance, "journal": s.State.Health.Journal},
-		"journal_torn_tail":    s.State.Health.JournalTornTail,
-		"clock_held_refreshes": s.State.Health.ClockHeldRefreshes,
-		"clock_held_readings":  s.State.Health.ClockHeldReadings,
-		// An empty list, not null, when nothing was refused.
-		"write_refusals": append([]WriteRefusal{}, s.State.WriteRefusals...),
+		"journal_torn_tail": s.State.Health.JournalTornTail,
 	}
 }
 func (s *Store) String() string {
