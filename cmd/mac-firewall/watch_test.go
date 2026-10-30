@@ -330,3 +330,41 @@ func TestWatchRepairCLIStartFailsExitsOne(t *testing.T) {
 		t.Fatalf("report %s (%v)", out.String(), e)
 	}
 }
+
+// A retained file a watcher start would refuse (here new-events.flag with
+// mode 0644, which the install leaves in place) is named in the report, and
+// the command exits 1 although the repaired copy opens and starts. Positive
+// control: with the flag private, the same state exits 0 with nothing named.
+func TestWatchRepairCLIRetainedUnsafeExitsOne(t *testing.T) {
+	config, c := watchConfig(t, 0)
+	s, e := firewallwatch.OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Save(time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	flag := filepath.Join(c.StateDir, "new-events.flag")
+	if e := os.WriteFile(flag, []byte("x\n"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	for _, mode := range []os.FileMode{0644, 0600} {
+		if e := os.Chmod(flag, mode); e != nil {
+			t.Fatal(e)
+		}
+		var out, errOut bytes.Buffer
+		dir := filepath.Join(t.TempDir(), "repair")
+		code := run([]string{"watch", "repair", "--config", config, "--out", dir}, &out, &errOut)
+		var report firewallwatch.RepairReport
+		if e := json.Unmarshal(out.Bytes(), &report); e != nil || !report.Opens || !report.Starts {
+			t.Fatalf("mode %o: report %s (%v)", mode, out.String(), e)
+		}
+		unsafe := mode == 0644
+		if unsafe != (code == 1) || (!unsafe && code != 0) {
+			t.Fatalf("mode %o: exit %d, %s", mode, code, errOut.String())
+		}
+		if unsafe != (len(report.RetainedUnsafe) == 1 && strings.HasPrefix(report.RetainedUnsafe[0], "new-events.flag: ")) || (!unsafe && len(report.RetainedUnsafe) != 0) {
+			t.Fatalf("mode %o: retained_unsafe %q", mode, report.RetainedUnsafe)
+		}
+	}
+}

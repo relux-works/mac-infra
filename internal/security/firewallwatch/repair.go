@@ -43,7 +43,13 @@ type RepairReport struct {
 	// StartCheckError is a failure to prepare or remove the start check's
 	// copy: the start was not tried, or its copy was left at the named path.
 	StartCheckError string `json:"start_check_error,omitempty"`
-	BeforeOpen      string `json:"original_open_error,omitempty"`
+	// RetainedUnsafe names the files the install leaves in the state
+	// directory (the new-events flag and the daily event files) that a
+	// watcher start would refuse to touch, with the reason: not a private
+	// regular file of the caller with one link. The start check's copy does
+	// not hold them, so they are checked in place, read-only.
+	RetainedUnsafe []string `json:"retained_unsafe,omitempty"`
+	BeforeOpen     string   `json:"original_open_error,omitempty"`
 }
 
 // Repair is the operator's recovery for state that a backward wall-clock
@@ -62,8 +68,9 @@ type RepairReport struct {
 // order or not following the snapshot) is refused, and nothing repaired is
 // written. The report lists every change, whether the repaired files open
 // with the normal reader, and whether a watcher start on them (with the
-// marker the operator leaves in place) succeeds, tried on a disposable copy;
-// installing them is the operator's separate step.
+// marker the operator leaves in place) succeeds, tried on a disposable copy,
+// and which files left in place a start would refuse; installing them is the
+// operator's separate step.
 func Repair(c Config, out string) (RepairReport, error) {
 	report := RepairReport{Out: out, Originals: map[string]string{}}
 	if e := checkDir(c.StateDir); e != nil {
@@ -93,6 +100,9 @@ func Repair(c Config, out string) (RepairReport, error) {
 	defer unlock()
 	if _, e := OpenStore(c); e != nil {
 		report.BeforeOpen = e.Error()
+	}
+	if report.RetainedUnsafe, e = retainedUnsafe(c.StateDir); e != nil {
+		return report, e
 	}
 	originals, repaired := filepath.Join(absOut, "original"), filepath.Join(absOut, "repaired")
 	for _, dir := range []string{absOut, originals, repaired} {
@@ -259,6 +269,29 @@ func checkStart(c Config, dir string, outputs map[string][]byte, marker []byte) 
 	c.StateDir = dir
 	_, startErr = openRun(c, time.Now)
 	return startErr == nil, startErr, remove()
+}
+
+// retainedUnsafe applies the startup save's file check (safeExisting) to the
+// files of dir that the save rewrites or removes and the install keeps: the
+// new-events flag and every daily event file (the save's own pattern). It
+// only reads metadata.
+func retainedUnsafe(dir string) ([]string, error) {
+	entries, e := os.ReadDir(dir)
+	if e != nil {
+		return nil, e
+	}
+	var unsafe []string
+	for _, entry := range entries {
+		name := entry.Name()
+		day, _ := filepath.Match("events-*.jsonl", name)
+		if name != "new-events.flag" && !day {
+			continue
+		}
+		if e := safeExisting(filepath.Join(dir, name)); e != nil {
+			unsafe = append(unsafe, name+": "+e.Error())
+		}
+	}
+	return unsafe, nil
 }
 
 // insideDir reports whether dir is root or lies below it. It climbs from dir

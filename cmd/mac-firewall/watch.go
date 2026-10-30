@@ -87,7 +87,7 @@ func runWatch(args []string, out, errOut io.Writer) int {
 			fmt.Fprintln(errOut, e)
 			return 1
 		}
-		if printJSON(report) != 0 || !report.Opens || !report.Starts || report.StartCheckError != "" {
+		if printJSON(report) != 0 || !report.Opens || !report.Starts || report.StartCheckError != "" || len(report.RetainedUnsafe) > 0 {
 			return 1
 		}
 		return 0

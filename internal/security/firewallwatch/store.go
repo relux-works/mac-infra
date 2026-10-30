@@ -162,7 +162,11 @@ type Store struct {
 // checkDir applies safeDir's checks to an existing state dir without
 // creating it; a missing dir is os.ErrNotExist.
 func checkDir(dir string) error {
-	s, e := os.Lstat(dir)
+	leaf, e := stateDirLeaf(dir)
+	if e != nil {
+		return e
+	}
+	s, e := os.Lstat(leaf)
 	if e != nil {
 		return e
 	}
@@ -173,11 +177,33 @@ func checkDir(dir string) error {
 	return nil
 }
 
+// stateDirLeaf is the state dir's spelling for the symlink check: without
+// trailing separators, with which Lstat follows a final symlink ("link/"
+// passed as a directory). A spelling ending in "." or ".." names no entry to
+// check and is refused.
+func stateDirLeaf(dir string) (string, error) {
+	if dir == "" {
+		return dir, nil
+	}
+	leaf := strings.TrimRight(dir, string(filepath.Separator))
+	if leaf == "" {
+		leaf = string(filepath.Separator)
+	}
+	if base := filepath.Base(leaf); base == "." || base == ".." {
+		return "", errors.New("state dir must name its directory, not end in . or ..")
+	}
+	return leaf, nil
+}
+
 func safeDir(dir string) error {
+	leaf, e := stateDirLeaf(dir)
+	if e != nil {
+		return e
+	}
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return e
 	}
-	s, e := os.Lstat(dir)
+	s, e := os.Lstat(leaf)
 	if e != nil {
 		return e
 	}

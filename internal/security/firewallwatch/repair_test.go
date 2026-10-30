@@ -488,3 +488,138 @@ func TestRepairStartCheckFaults(t *testing.T) {
 		}
 	}
 }
+
+// The install keeps the new-events flag and the daily event files, which the
+// startup save rewrites or removes after the same file check as every state
+// artifact. The repair checks them in place and names each one a start would
+// refuse: a flag or an obsolete day file with mode 0644, a day file that is a
+// symlink, a flag with a second hard link. Each prediction is checked against
+// a real start after the documented install (repaired state.json and journal
+// copied in, the rest left): it refuses exactly when the report names a file.
+// Positive control: private files are not named and the start succeeds. The
+// state directory's names, bytes and modes are unchanged by the repair.
+func TestRepairReportsUnsafeRetainedFiles(t *testing.T) {
+	plant := map[string]func(t *testing.T, dir string){
+		"flag mode 0644": func(t *testing.T, dir string) {
+			writeMode(t, filepath.Join(dir, "new-events.flag"), "x\n", 0644)
+		},
+		"obsolete day mode 0644": func(t *testing.T, dir string) {
+			writeMode(t, filepath.Join(dir, "events-1900-01-01.jsonl"), "{}\n", 0644)
+		},
+		"day symlink": func(t *testing.T, dir string) {
+			target := filepath.Join(t.TempDir(), "day")
+			writeMode(t, target, "{}\n", 0600)
+			if e := os.Symlink(target, filepath.Join(dir, "events-1900-01-01.jsonl")); e != nil {
+				t.Fatal(e)
+			}
+		},
+		"flag hard link": func(t *testing.T, dir string) {
+			path := filepath.Join(dir, "new-events.flag")
+			writeMode(t, path, "x\n", 0600)
+			if e := os.Link(path, filepath.Join(t.TempDir(), "flag")); e != nil {
+				t.Fatal(e)
+			}
+		},
+		"private control": func(t *testing.T, dir string) {
+			writeMode(t, filepath.Join(dir, "new-events.flag"), "x\n", 0600)
+			writeMode(t, filepath.Join(dir, "events-1900-01-01.jsonl"), "{}\n", 0600)
+		},
+	}
+	for name, setup := range plant {
+		c, _ := brokenStateDir(t)
+		setup(t, c.StateDir)
+		before, modes := dirHashes(t, c.StateDir), dirModes(t, c.StateDir)
+		out := filepath.Join(t.TempDir(), "repair")
+		report, e := Repair(c, out)
+		if e != nil || !report.Opens || !report.Starts {
+			t.Fatalf("%s: %+v %v", name, report, e)
+		}
+		if !reflect.DeepEqual(before, dirHashes(t, c.StateDir)) || !reflect.DeepEqual(modes, dirModes(t, c.StateDir)) {
+			t.Fatalf("%s: the state directory changed", name)
+		}
+		control := name == "private control"
+		if control != (len(report.RetainedUnsafe) == 0) {
+			t.Fatalf("%s: retained_unsafe %q", name, report.RetainedUnsafe)
+		}
+		if !control && (len(report.RetainedUnsafe) != 1 || !strings.Contains(report.RetainedUnsafe[0], "private regular files")) {
+			t.Fatalf("%s: retained_unsafe %q", name, report.RetainedUnsafe)
+		}
+		for _, f := range []string{"state.json", journalFile} {
+			b, e := os.ReadFile(filepath.Join(out, "repaired", f))
+			if e != nil {
+				t.Fatal(e)
+			}
+			writeMode(t, filepath.Join(c.StateDir, f), string(b), 0600)
+		}
+		if _, e := openRun(c, time.Now); control != (e == nil) {
+			t.Fatalf("%s: start after install: %v", name, e)
+		}
+	}
+}
+
+// A state directory is checked as the entry it names, whatever its spelling.
+// A symlink to it is refused by checkDir, safeDir and the repair with or
+// without trailing separators, and a spelling ending in "." or ".." is
+// refused; the repair creates no output. Positive control: the directory
+// itself, with or without a trailing separator, is accepted and repairs.
+func TestStateDirSpellingsCheckTheEntry(t *testing.T) {
+	c, _ := brokenStateDir(t)
+	link := filepath.Join(t.TempDir(), "link")
+	if e := os.Symlink(c.StateDir, link); e != nil {
+		t.Fatal(e)
+	}
+	for _, dir := range []string{link, link + "/", link + "//", link + "/.", c.StateDir + "/.", c.StateDir + "/sub/.."} {
+		if checkDir(dir) == nil || safeDir(dir) == nil {
+			t.Fatalf("%s: accepted", dir)
+		}
+		rc := c
+		rc.StateDir = dir
+		out := filepath.Join(t.TempDir(), "repair")
+		if _, e := Repair(rc, out); e == nil {
+			t.Fatalf("%s: repaired", dir)
+		}
+		if _, e := os.Lstat(out); !os.IsNotExist(e) {
+			t.Fatalf("%s: output created: %v", dir, e)
+		}
+	}
+	for _, dir := range []string{c.StateDir, c.StateDir + "/"} {
+		if e := checkDir(dir); e != nil {
+			t.Fatalf("%s: %v", dir, e)
+		}
+		if e := safeDir(dir); e != nil {
+			t.Fatalf("%s: %v", dir, e)
+		}
+		rc := c
+		rc.StateDir = dir
+		if report, e := Repair(rc, filepath.Join(t.TempDir(), "repair")); e != nil || !report.Opens || !report.Starts {
+			t.Fatalf("%s: %+v %v", dir, report, e)
+		}
+	}
+}
+
+func writeMode(t *testing.T, path, data string, mode os.FileMode) {
+	t.Helper()
+	if e := os.WriteFile(path, []byte(data), mode); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Chmod(path, mode); e != nil {
+		t.Fatal(e)
+	}
+}
+
+func dirModes(t *testing.T, dir string) map[string]os.FileMode {
+	t.Helper()
+	files, e := os.ReadDir(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	modes := map[string]os.FileMode{}
+	for _, f := range files {
+		info, e := f.Info()
+		if e != nil {
+			t.Fatal(e)
+		}
+		modes[f.Name()] = info.Mode()
+	}
+	return modes
+}
