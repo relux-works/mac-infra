@@ -385,3 +385,106 @@ func TestRepairChecksStartWithMarker(t *testing.T) {
 		}
 	}
 }
+
+// Repaired spans never count as covered a time that a recorded stall marked
+// unavailable, and keep their start. For a stall beginning before the span,
+// at its start, inside it, at its end and after it: the repaired span passes
+// the reader's stall check, its end is no later than the original end nor
+// than the stall's start (or the span's start if the stall began earlier),
+// and the stall keeps its end.
+func TestRepairSpansKeepStallsUnavailable(t *testing.T) {
+	at := time.Date(2026, 10, 30, 6, 0, 0, 0, time.UTC)
+	for _, from := range []time.Duration{-time.Second, 0, time.Second, 2 * time.Second, 3 * time.Second} {
+		sp := CoverageSpan{Start: at, End: at.Add(2 * time.Second), StallAfter: &CoverageStall{From: at.Add(from), To: at.Add(4 * time.Second)}}
+		orig := sp
+		origStall := *sp.StallAfter
+		spans := []CoverageSpan{sp}
+		repairSpans(spans, "state.json", 0, nil)
+		got := spans[0]
+		limit := origStall.From
+		if limit.Before(orig.Start) {
+			limit = orig.Start
+		}
+		if !got.Start.Equal(orig.Start) || got.End.After(orig.End) || (origStall.From.Before(orig.End) && got.End.After(limit)) {
+			t.Fatalf("stall from %v: span %v-%v", from, got.Start, got.End)
+		}
+		if !got.StallAfter.From.Equal(got.End) || !got.StallAfter.To.Equal(origStall.To) {
+			t.Fatalf("stall from %v: stall %v-%v, span end %v", from, got.StallAfter.From, got.StallAfter.To, got.End)
+		}
+	}
+}
+
+// A journal whose records are contiguous but whose first record after the
+// snapshot does not follow the snapshot's journal_seq (or 1, without a
+// snapshot) is refused before anything repaired is written, as the reader
+// refuses it.
+func TestRepairRefusesSeqNotFollowingSnapshot(t *testing.T) {
+	for _, withSnapshot := range []bool{true, false} {
+		c, _ := brokenStateDir(t)
+		path := filepath.Join(c.StateDir, journalFile)
+		raw, _ := os.ReadFile(path)
+		var out [][]byte
+		for _, line := range bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n")) {
+			var r journalRecord
+			if e := json.Unmarshal(line, &r); e != nil {
+				t.Fatal(e)
+			}
+			r.Seq += 10
+			b, _ := json.Marshal(r)
+			out = append(out, b)
+		}
+		if e := os.WriteFile(path, append(bytes.Join(out, []byte("\n")), '\n'), 0600); e != nil {
+			t.Fatal(e)
+		}
+		if !withSnapshot {
+			if e := os.Remove(filepath.Join(c.StateDir, "state.json")); e != nil {
+				t.Fatal(e)
+			}
+		}
+		dir := filepath.Join(t.TempDir(), "repair")
+		if _, e := Repair(c, dir); e == nil || !strings.Contains(e.Error(), "does not follow the snapshot") {
+			t.Fatalf("snapshot=%t: want a refusal, got %v", withSnapshot, e)
+		}
+		if left, _ := os.ReadDir(filepath.Join(dir, "repaired")); len(left) != 0 {
+			t.Fatalf("snapshot=%t: %d repaired files written", withSnapshot, len(left))
+		}
+	}
+}
+
+// A failure to prepare the start check's copy is reported as the check's
+// failure, not as a start refusal: the start was not tried. A failure to
+// remove the copy after a start is reported with its path, never as an
+// unqualified success. Faults are fixture permissions set from the reader
+// hook: the output made read-only before the copy is made (the repaired
+// files' own check, the second open), or after the copy's start began (the
+// third open).
+func TestRepairStartCheckFaults(t *testing.T) {
+	for _, faultAt := range []int{2, 3} {
+		c, _ := brokenStateDir(t)
+		out := filepath.Join(t.TempDir(), "repair")
+		opens := 0
+		afterJournalOpen = func() {
+			if opens++; opens == faultAt {
+				if e := os.Chmod(out, 0500); e != nil {
+					t.Error(e)
+				}
+			}
+		}
+		report, e := Repair(c, out)
+		afterJournalOpen = nil
+		os.Chmod(out, 0700)
+		if e != nil || !report.Opens {
+			t.Fatalf("fault at open %d: %+v %v", faultAt, report, e)
+		}
+		switch faultAt {
+		case 2:
+			if report.Starts || report.StartError != "" || !strings.Contains(report.StartCheckError, "was not tried") {
+				t.Fatalf("preparation fault: %+v", report)
+			}
+		case 3:
+			if !report.Starts || report.StartError != "" || !strings.Contains(report.StartCheckError, "was not removed") || !strings.Contains(report.StartCheckError, "startup-check") {
+				t.Fatalf("cleanup fault: %+v", report)
+			}
+		}
+	}
+}

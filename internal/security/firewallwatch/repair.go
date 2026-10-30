@@ -40,7 +40,10 @@ type RepairReport struct {
 	// on a disposable copy only when the repaired files open.
 	Starts     bool   `json:"repaired_starts"`
 	StartError string `json:"repaired_start_error,omitempty"`
-	BeforeOpen string `json:"original_open_error,omitempty"`
+	// StartCheckError is a failure to prepare or remove the start check's
+	// copy: the start was not tried, or its copy was left at the named path.
+	StartCheckError string `json:"start_check_error,omitempty"`
+	BeforeOpen      string `json:"original_open_error,omitempty"`
 }
 
 // Repair is the operator's recovery for state that a backward wall-clock
@@ -56,11 +59,11 @@ type RepairReport struct {
 // backward). Lines and records it does not change keep their bytes, and a
 // torn tail is kept as the reader treats it. A journal line the reader would
 // refuse as not a record of this journal (not JSON, not a delta, a seq out of
-// order) is refused, and nothing repaired is written. The report lists every
-// change, whether the repaired files open with the normal reader, and whether
-// a watcher start on them (with the marker the operator leaves in place)
-// succeeds, tried on a disposable copy; installing them is the operator's
-// separate step.
+// order or not following the snapshot) is refused, and nothing repaired is
+// written. The report lists every change, whether the repaired files open
+// with the normal reader, and whether a watcher start on them (with the
+// marker the operator leaves in place) succeeds, tried on a disposable copy;
+// installing them is the operator's separate step.
 func Repair(c Config, out string) (RepairReport, error) {
 	report := RepairReport{Out: out, Originals: map[string]string{}}
 	if e := checkDir(c.StateDir); e != nil {
@@ -124,11 +127,15 @@ func Repair(c Config, out string) (RepairReport, error) {
 		return report, e
 	}
 	outputs := map[string][]byte{}
+	// The last journal record the snapshot holds; replay applies only later
+	// records, starting with the next seq.
+	var folded uint64
 	if b, ok := files["state.json"]; ok {
 		var st State
 		if e := json.Unmarshal(b, &st); e != nil {
 			return report, fmt.Errorf("state.json: %w", e)
 		}
+		folded = st.JournalSeq
 		changes := repairEntries(st.Entries, "state.json", 0)
 		changes = append(changes, repairSpans(st.Coverage, "state.json", 0, nil)...)
 		if len(changes) > 0 {
@@ -164,6 +171,11 @@ func Repair(c Config, out string) (RepairReport, error) {
 			// reader's identity checks, before anything repaired is written.
 			if r.Type != recordDelta || r.Seq == 0 || (i > 0 && r.Seq != prev+1) {
 				return report, fmt.Errorf("journal record %d is not repairable (not a record of this journal: type %q, seq %d); nothing was repaired", i+1, r.Type, r.Seq)
+			}
+			// The first record after the snapshot's must follow it (records
+			// the snapshot already holds are skipped by replay).
+			if r.Seq > folded && (i == 0 || prev <= folded) && r.Seq != folded+1 {
+				return report, fmt.Errorf("journal record %d is not repairable (seq %d does not follow the snapshot's %d); nothing was repaired", i+1, r.Seq, folded)
 			}
 			prev = r.Seq
 			report.Records++
@@ -209,34 +221,44 @@ func Repair(c Config, out string) (RepairReport, error) {
 		return report, nil
 	}
 	report.Opens = true
-	if e := checkStart(c, filepath.Join(absOut, "startup-check"), outputs, files[refusalMarker]); e != nil {
-		report.StartError = e.Error()
-		return report, nil
+	started, startErr, checkErr := checkStart(c, filepath.Join(absOut, "startup-check"), outputs, files[refusalMarker])
+	report.Starts = started
+	if startErr != nil {
+		report.StartError = startErr.Error()
 	}
-	report.Starts = true
+	if checkErr != nil {
+		report.StartCheckError = checkErr.Error()
+	}
 	return report, nil
 }
 
 // checkStart tries a watcher start (openRun: record the marker, then save)
 // on a disposable copy of the repaired files plus the marker, which the
-// install leaves in the state directory. The copy is removed afterwards.
-func checkStart(c Config, dir string, outputs map[string][]byte, marker []byte) error {
+// install leaves in the state directory, and removes the copy. startErr is
+// openRun's refusal; checkErr is a failure to prepare or remove the copy, in
+// which case the start was not tried or the copy was left behind (named).
+func checkStart(c Config, dir string, outputs map[string][]byte, marker []byte) (started bool, startErr, checkErr error) {
 	if e := os.Mkdir(dir, 0700); e != nil {
-		return e
+		return false, nil, fmt.Errorf("the start was not tried: %w", e)
 	}
-	defer os.RemoveAll(dir)
+	remove := func() error {
+		if e := os.RemoveAll(dir); e != nil {
+			return fmt.Errorf("the start check's copy %s was not removed: %w", dir, e)
+		}
+		return nil
+	}
 	files := maps.Clone(outputs)
 	if marker != nil {
 		files[refusalMarker] = marker
 	}
 	for name, b := range files {
 		if e := os.WriteFile(filepath.Join(dir, name), b, 0600); e != nil {
-			return e
+			return false, nil, errors.Join(fmt.Errorf("the start was not tried: %w", e), remove())
 		}
 	}
 	c.StateDir = dir
-	_, e := openRun(c, time.Now)
-	return e
+	_, startErr = openRun(c, time.Now)
+	return startErr == nil, startErr, remove()
 }
 
 // insideDir reports whether dir is root or lies below it. It climbs from dir
@@ -311,8 +333,9 @@ func repairEntries(entries map[string]*Entry, file string, seq uint64) []RepairC
 // repairSpans makes each span's wall times run forward, erring toward
 // "unavailable": an end before the start moves to the start; a stall that
 // starts before the span's end shortens the covered span to the stall's
-// start (never before the span's start), one that starts after it extends
-// back to the span's end; a stall end before its start moves to the start.
+// start, or to the span's own start if the stall began earlier (the stall then
+// starts there); one that starts after the span's end extends back to it; a
+// stall end before its start moves to the start.
 // position names a span for the report.
 func repairSpans(spans []CoverageSpan, file string, seq uint64, position func(int) int) []RepairChange {
 	var changes []RepairChange
@@ -330,7 +353,17 @@ func repairSpans(spans []CoverageSpan, file string, seq uint64, position func(in
 		}
 		if st := sp.StallAfter; st != nil {
 			switch {
-			case wallBefore(st.From, sp.End) && !wallBefore(st.From, sp.Start):
+			case wallBefore(st.From, sp.Start):
+				// The stall began before the span did: none of the span is
+				// known covered. The span keeps its start and the stall starts
+				// there, so the whole recorded stall stays unavailable.
+				if !sp.End.Round(0).Equal(sp.Start.Round(0)) {
+					changes = append(changes, RepairChange{File: file, Seq: seq, Check: checkStallOrder, Item: name(i), Field: "end"})
+					sp.End = sp.Start
+				}
+				changes = append(changes, RepairChange{File: file, Seq: seq, Check: checkStallOrder, Item: name(i), Field: "stall_after.from"})
+				st.From = sp.End
+			case wallBefore(st.From, sp.End):
 				changes = append(changes, RepairChange{File: file, Seq: seq, Check: checkStallOrder, Item: name(i), Field: "end"})
 				sp.End = st.From
 			case !st.From.Round(0).Equal(sp.End.Round(0)):

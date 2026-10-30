@@ -606,18 +606,24 @@ a `last-write-refusal.json` marker byte for byte to `DIR/original` with
 `SHA256SUMS`, and writes to `DIR/repaired` `state.json` and the journal with
 each reversed time moved forward to the time it must not precede
 (`last_seen` to `first_seen` or `window_start`; a span's end to its start; a
-stall that starts before the span's end shortens the covered span, one that
+stall that starts before the span's end shortens the covered span to the
+stall's start, or to the span's own start if the stall began earlier; one that
 starts after it extends back to the span's end, so the repair errs toward
-unavailable coverage; a stall's end to its start). Records and lines it does
+unavailable coverage and never counts a recorded stall as covered; a stall's
+end to its start). Records and lines it does
 not change keep their bytes, and a torn journal tail is kept as the reader
 treats it (an unterminated last segment, or a last complete line that is not
 JSON). A journal line the reader would refuse as not a record of this journal
-(not JSON, not a delta, a seq out of order) is refused, and nothing repaired
-is written. It prints a JSON report of every change (an entry by a hash of
+(not JSON, not a delta, a seq out of order, or a first record that does not
+follow the snapshot's `journal_seq`) is refused, and nothing repaired is
+written. It prints a JSON report of every change (an entry by a hash of
 its key, never the key), whether `DIR/repaired` opens with the normal reader,
 and whether a watcher start on it succeeds: the start records the marker and
-saves, tried on a disposable copy with the marker. It exits 0 only if the
-copy opens and starts.
+saves, tried on a disposable copy with the marker that is removed afterwards.
+A copy that could not be made or removed is reported separately
+(`start_check_error`, naming a copy left behind), never as a start refusal or
+a success. It exits 0 only if the copy opens and starts and the check
+completed.
 Installing the repaired files is a separate step in a window, with the
 watcher kept stopped from the repair to the install so the copies stay
 current: copy `DIR/repaired/*` into the state directory (it stays the
