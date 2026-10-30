@@ -112,6 +112,12 @@ func runWatch(args []string, out, errOut io.Writer) int {
 				return at.Format(time.RFC3339Nano)
 			}
 			fmt.Fprintf(out, "maxima at: line queue alf=%s netfilter=%s; save=%s classification=%s maintenance=%s\n", maxAt(h.LineQueueHighWater.MaxAt.ALF), maxAt(h.LineQueueHighWater.MaxAt.Netfilter), maxAt(h.Save.MaxAt), maxAt(h.Classification.MaxAt), maxAt(h.Maintenance.MaxAt))
+			latest := "none"
+			if n := len(s.State.WriteRefusals); n > 0 {
+				r := s.State.WriteRefusals[n-1]
+				latest = fmt.Sprintf("%s %s at %s repeats=%d", r.Check, r.Kind, r.At.Format(time.RFC3339Nano), r.Repeats)
+			}
+			fmt.Fprintf(out, "clock held: refreshes=%d readings=%d; write refusals=%d, latest: %s\n", h.ClockHeldRefreshes, h.ClockHeldReadings, len(s.State.WriteRefusals), latest)
 			return 0
 		}
 		if split {

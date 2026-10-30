@@ -427,3 +427,61 @@ func TestWatchRepairCLIRefusesAmbiguousStateDir(t *testing.T) {
 		t.Fatalf("clean state_dir: exit %d, %s", code, errOut.String())
 	}
 }
+
+// watch status shows the run clock's held counts and the recorded write
+// refusals, in JSON and text (TestStatusShowsHeartbeatHealth covers values
+// that only a journal heartbeat holds). Negative control: with nothing held
+// or refused, JSON prints zeros and an empty list (not null) and text says
+// "latest: none".
+func TestWatchStatusClockAndRefusals(t *testing.T) {
+	config, c := watchConfig(t, 0)
+	status := func() (map[string]any, string) {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		if code := run([]string{"watch", "status", "--config", config, "--json"}, &out, &errOut); code != 0 {
+			t.Fatal(code, errOut.String())
+		}
+		var m map[string]any
+		if e := json.Unmarshal(out.Bytes(), &m); e != nil {
+			t.Fatal(e)
+		}
+		out.Reset()
+		if code := run([]string{"watch", "status", "--config", config}, &out, &errOut); code != 0 {
+			t.Fatal(code, errOut.String())
+		}
+		return m, out.String()
+	}
+	s, e := firewallwatch.OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	at := time.Date(2026, 10, 30, 6, 0, 0, 0, time.UTC)
+	if e = s.Save(at); e != nil {
+		t.Fatal(e)
+	}
+	m, text := status()
+	if refusals, ok := m["write_refusals"].([]any); !ok || len(refusals) != 0 || m["clock_held_refreshes"] != float64(0) || m["clock_held_readings"] != float64(0) {
+		t.Fatalf("empty state: %v", m)
+	}
+	if !strings.Contains(text, "clock held: refreshes=0 readings=0; write refusals=0, latest: none") {
+		t.Fatalf("empty state text: %s", text)
+	}
+	refused := time.Date(2026, 10, 30, 5, 59, 0, 0, time.UTC)
+	s.State.WriteRefusals = []firewallwatch.WriteRefusal{{At: refused, Check: "entry.time_order", Kind: "journal", Repeats: 1}}
+	s.State.Health.ClockHeldRefreshes = 2
+	s.State.Health.ClockHeldReadings = 5
+	if e = s.Save(at.Add(time.Second)); e != nil {
+		t.Fatal(e)
+	}
+	m, text = status()
+	refusals, _ := m["write_refusals"].([]any)
+	if len(refusals) != 1 || m["clock_held_refreshes"] != float64(2) || m["clock_held_readings"] != float64(5) {
+		t.Fatalf("status %v", m)
+	}
+	if r := refusals[0].(map[string]any); r["check"] != "entry.time_order" || r["kind"] != "journal" || r["repeats"] != float64(1) || r["at"] != refused.Format(time.RFC3339) {
+		t.Fatalf("refusal %v", r)
+	}
+	if !strings.Contains(text, "clock held: refreshes=2 readings=5; write refusals=1, latest: entry.time_order journal at 2026-10-30T05:59:00Z repeats=1") {
+		t.Fatalf("text: %s", text)
+	}
+}

@@ -1185,7 +1185,11 @@ func (s *Store) Status() map[string]any {
 		"shutdown_dropped_lines":    s.State.Health.ShutdownDroppedLines,
 		"run_loop_timing": map[string]TimingSummary{"save": s.State.Health.Save,
 			"classification": s.State.Health.Classification, "maintenance": s.State.Health.Maintenance, "journal": s.State.Health.Journal},
-		"journal_torn_tail": s.State.Health.JournalTornTail,
+		"journal_torn_tail":    s.State.Health.JournalTornTail,
+		"clock_held_refreshes": s.State.Health.ClockHeldRefreshes,
+		"clock_held_readings":  s.State.Health.ClockHeldReadings,
+		// An empty list, not null, when nothing was refused.
+		"write_refusals": append([]WriteRefusal{}, s.State.WriteRefusals...),
 	}
 }
 func (s *Store) String() string {

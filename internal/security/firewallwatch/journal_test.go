@@ -1016,3 +1016,35 @@ func TestCompactionKeepsOpenSpan(t *testing.T) {
 		t.Fatalf("control: the pair should merge without a running source, got %+v", merged)
 	}
 }
+
+// Status reads health from the replayed journal: a held-clock count written
+// in a heartbeat after the snapshot is shown although state.json still holds
+// the older value.
+func TestStatusShowsHeartbeatHealth(t *testing.T) {
+	s, c := journalStore(t)
+	at := time.Now().Round(0)
+	if e := s.Save(at); e != nil {
+		t.Fatal(e)
+	}
+	s.State.Health.ClockHeldReadings = 5
+	s.dirty = true
+	// Past save_interval (a heartbeat is due), before a snapshot is due.
+	if e := s.Flush(at.Add(30*time.Second), false, false); e != nil {
+		t.Fatal(e)
+	}
+	var onDisk State
+	raw, _ := os.ReadFile(filepath.Join(c.StateDir, "state.json"))
+	if e := json.Unmarshal(raw, &onDisk); e != nil || onDisk.Health.ClockHeldReadings != 0 {
+		t.Fatalf("fixture: the value is already in state.json (%v)", e)
+	}
+	if _, e := os.Stat(s.journalPath()); e != nil {
+		t.Fatalf("fixture: no journal: %v", e)
+	}
+	reopened, e := OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if got := reopened.Status()["clock_held_readings"]; got != uint64(5) {
+		t.Fatalf("clock_held_readings %v; want 5 from the heartbeat", got)
+	}
+}
