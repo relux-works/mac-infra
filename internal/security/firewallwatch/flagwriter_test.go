@@ -497,3 +497,34 @@ func TestRunStartAndFinishOwnTheWriter(t *testing.T) {
 		t.Fatalf("finish: %v, writer left %t, flag %q; want %q", e, g.flags != nil, readFlag(c), stamp)
 	}
 }
+
+// stop writes a stamp posted just before it. With the stamp's wake and the
+// quit both ready, the writer may take either first, so the stop branch must
+// write what is pending too; 200 rounds make a writer that drops it on quit
+// fail with near certainty. Positive control: every round ends with the
+// posted stamp written, once at most.
+func TestFlagWriterStopWritesPostedStamp(t *testing.T) {
+	for i := range 200 {
+		var mu sync.Mutex
+		var written [][]byte
+		w := startFlagWriter(func(stamp []byte) error {
+			mu.Lock()
+			defer mu.Unlock()
+			written = append(written, stamp)
+			return nil
+		})
+		stamp := []byte(fmt.Sprintf("stamp %d\n", i))
+		if e := w.post(stamp); e != nil {
+			t.Fatal(e)
+		}
+		if e := w.stop(); e != nil {
+			t.Fatal(e)
+		}
+		mu.Lock()
+		got := written
+		mu.Unlock()
+		if len(got) != 1 || string(got[0]) != string(stamp) {
+			t.Fatalf("round %d: wrote %q, want exactly %q", i, got, stamp)
+		}
+	}
+}
