@@ -474,8 +474,13 @@ heartbeat carries, of the coverage, what changed since the last snapshot, by
 position: the current value of each source's open span there, and the spans
 appended since. Only snapshots prune or reorder coverage, so nothing else can
 change in between, and positions are independent of span times (a clock step
-across a restart cannot hide a new run's span). The journal never grows past 8 MiB or `max_state_bytes`,
-whichever is smaller; an append that would cross it takes a snapshot instead.
+across a restart cannot hide a new run's span). The journal never grows past 8 MiB, nor past `max_state_bytes`
+minus the snapshot's size: every record carries the values it changes, so the
+state replay rebuilds always fits the watcher's startup snapshot. An append
+that would cross the limit takes a snapshot instead, which refuses a state
+over `max_state_bytes` as before. Before an append, the record's entries,
+signers, events and coverage pass the same checks a reader applies, so an
+append never acknowledges what a reader would refuse.
 
 A snapshot rewrites `state.json` (with `journal_seq`, the last record folded
 in) by a same-directory temporary file, full sync and rename, then the day

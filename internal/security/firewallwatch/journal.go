@@ -181,13 +181,19 @@ func (s *Store) heartbeat(now time.Time) (*heartbeat, bool) {
 }
 
 // markSnapshot records the coverage of the snapshot on disk: its span count
-// and each source's open span (its last span) by position. Later heartbeats
-// carry the changes from there.
+// and the position of each collecting source's open span. Only those spans,
+// and spans appended later, change before the next snapshot, so later
+// heartbeats carry the changes from there. The open span is found by its
+// tracker, not as the source's last span (PR69 review r6).
 func (s *Store) markSnapshot() {
 	s.snapLen = len(s.State.Coverage)
 	s.snapOpen = map[string]int{}
-	for i, span := range s.State.Coverage {
-		s.snapOpen[span.Source] = i
+	for source, c := range s.coverage {
+		if c.covering {
+			if i := c.openIndex(s.State.Coverage); i >= 0 {
+				s.snapOpen[source] = i
+			}
+		}
 	}
 }
 
@@ -197,9 +203,35 @@ func (s *Store) snapshotDue(now time.Time) bool {
 		(!s.lastSnapshot.IsZero() && !now.Before(s.lastSnapshot.Add(journalSnapshotInterval)))
 }
 
-// journalLimit is the most bytes the journal may hold: the writer's own bound
-// and never more than a reader accepts.
-func (s *Store) journalLimit() int64 { return min(journalSnapshotBytes, s.Config.MaxStateBytes) }
+// journalLimit is the most bytes the journal may hold: the writer's own bound,
+// and no more than max_state_bytes minus the snapshot's size. Every record
+// carries each value it changes, so the state replay rebuilds is never larger
+// than snapshot plus journal, and the watcher's startup snapshot can always
+// write it (PR69 review r6).
+func (s *Store) journalLimit() int64 {
+	return min(journalSnapshotBytes, s.Config.MaxStateBytes-s.snapshotBytes)
+}
+
+// validateRecord applies the reader's per-item checks to a record before it is
+// appended, so an append never acknowledges what OpenStore would refuse.
+func (s *Store) validateRecord(r journalRecord) error {
+	v := &Store{Config: s.Config}
+	v.State = State{Entries: map[string]*Entry{}, Signers: map[string]SignerEntry{}, Events: r.Events, CoverageVersion: s.State.CoverageVersion, Parser: s.State.Parser, Netfilter: s.State.Netfilter, Health: s.State.Health}
+	for k, e := range r.Entries {
+		v.State.Entries[k] = e
+	}
+	for k, e := range r.Signers {
+		v.State.Signers[k] = e
+	}
+	if h := r.Heartbeat; h != nil {
+		v.State.Parser, v.State.Netfilter, v.State.NetfilterError, v.State.NettopError, v.State.Health = h.Parser, h.Netfilter, h.NetfilterError, h.NettopError, h.Health
+		for _, o := range h.Coverage.Open {
+			v.State.Coverage = append(v.State.Coverage, o.Span)
+		}
+		v.State.Coverage = append(v.State.Coverage, h.Coverage.Appended...)
+	}
+	return v.validateShape(false, 0)
+}
 
 var (
 	errJournalFull = errors.New("journal record does not fit the journal limit")
@@ -250,6 +282,9 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 			return errJournalTail
 		}
 		r.Heartbeat = h
+	}
+	if e := s.validateRecord(r); e != nil {
+		return fmt.Errorf("refusing invalid journal record: %w", e)
 	}
 	line, e := json.Marshal(r)
 	if e != nil {

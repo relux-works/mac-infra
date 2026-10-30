@@ -32,9 +32,11 @@ func (s *Store) pruneCoverageBy(expired func(time.Time) bool) {
 		spans = compactCoverage(spans, s.coverage)
 	}
 	active := map[string]int{}
-	for i, span := range spans {
-		if c := s.coverage[span.Source]; c != nil && c.covering {
-			active[span.Source] = i
+	for source, c := range s.coverage {
+		if c.covering {
+			if i := c.openIndex(spans); i >= 0 {
+				active[source] = i
+			}
 		}
 	}
 	isActive := func(i int) bool {
@@ -87,20 +89,30 @@ func (s *Store) pruneCoverageBy(expired func(time.Time) bool) {
 
 // compactCoverage keeps long stalls and run boundaries exact. Only a recorded
 // sub-second stall joining two spans of the same source can be coalesced.
-// A running source's newest span stays separate: extending a historical span
+// A running source's open span stays separate: extending a historical span
 // with coalesced stalls would make even later, complete windows truncated.
 func compactCoverage(spans []CoverageSpan, active map[string]*SourceCoverage) []CoverageSpan {
 	newest := map[string]int{}
-	for i, span := range spans {
-		if c := active[span.Source]; c != nil && c.covering {
-			newest[span.Source] = i
+	for source, c := range active {
+		if c.covering {
+			if i := c.openIndex(spans); i >= 0 {
+				newest[source] = i
+			}
 		}
 	}
 	result := make([]CoverageSpan, 0, len(spans))
 	last := map[string]int{}
+	openAt := map[string]int{} // result index of a running source's open span
 	for n, v := range spans {
 		tail, running := newest[v.Source]
-		if i, ok := last[v.Source]; ok && (!running || n != tail) {
+		// The open span is neither merged into an earlier span nor extended
+		// by a later one: after a backward clock step a historical span can
+		// sort after it (PR69 review r6).
+		i, ok := last[v.Source]
+		if open, has := openAt[v.Source]; ok && has && open == i {
+			ok = false
+		}
+		if ok && (!running || n != tail) {
 			prev := &result[i]
 			stall := prev.StallAfter
 			if stall != nil && stall.From.Equal(prev.End) && stall.To.Equal(v.Start) && stall.To.Sub(stall.From) < shortStallThreshold {
@@ -113,6 +125,9 @@ func compactCoverage(spans []CoverageSpan, active map[string]*SourceCoverage) []
 			}
 		}
 		last[v.Source] = len(result)
+		if running && n == tail {
+			openAt[v.Source] = len(result)
+		}
 		result = append(result, v)
 	}
 	return result

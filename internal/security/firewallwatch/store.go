@@ -101,7 +101,14 @@ type SourceCoverage struct {
 	covering bool
 	// evictedSpan is owned by the run loop, like covering. Feeders only write
 	// observations protected by mu; they never access this recovery snapshot.
-	evictedSpan      *CoverageSpan
+	evictedSpan *CoverageSpan
+	// openStart identifies the source's open span by its start, once
+	// collection began (hasOpen). The open span is not always the source's
+	// last span: snapshots order spans by start, and after a backward clock
+	// step across a restart a historical span can sort after it (PR69
+	// review r6). Owned by the run loop, like covering.
+	openStart        time.Time
+	hasOpen          bool
 	mu               sync.Mutex
 	stalls           []pendingStall
 	stalledAt        time.Time
@@ -139,6 +146,8 @@ type Store struct {
 	// count and each source's open span position (markSnapshot).
 	snapLen  int
 	snapOpen map[string]int
+	// snapshotBytes is the size of the snapshot on disk (journalLimit).
+	snapshotBytes int64
 	// replayDrop collects the event removals of the records replayed so far;
 	// replayIDs counts the identities replay computed (a cost test reads it).
 	replayDrop map[string]int
@@ -261,6 +270,7 @@ func OpenStore(c Config) (*Store, error) {
 		if int64(len(raw)) > c.MaxStateBytes {
 			return nil, errors.New("corrupt state: max_state_bytes exceeded")
 		}
+		s.snapshotBytes = int64(len(raw))
 		if e = json.Unmarshal(raw, &s.State); e != nil {
 			return nil, fmt.Errorf("corrupt state: %w", e)
 		}
@@ -737,7 +747,8 @@ func (s *Store) EndCoverage(at time.Time)    { s.Coverage("").EndCoverage(at) }
 // BeginSourceCoverage opens a coverage span for one source.
 func (s *Store) BeginSourceCoverage(source string, now time.Time) {
 	s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: now, End: now, Source: source})
-	s.Coverage(source).covering = true
+	c := s.Coverage(source)
+	c.covering, c.openStart, c.hasOpen = true, now, true
 }
 
 // StallCoverage records that the collector's line queue is full from at: the
@@ -785,6 +796,18 @@ func (c *SourceCoverage) EndCoverage(at time.Time) {
 	}
 }
 
+// openIndex finds the source's open span: the latest span of the source that
+// starts at openStart, or before collection began the source's last span.
+// It returns -1 when there is none.
+func (c *SourceCoverage) openIndex(spans []CoverageSpan) int {
+	for i := len(spans) - 1; i >= 0; i-- {
+		if spans[i].Source == c.source && (!c.hasOpen || spans[i].Start.Equal(c.openStart)) {
+			return i
+		}
+	}
+	return -1
+}
+
 // extendCoverage applies one source's collector observations to its open span
 // (the source's last span) at a save: each closed stall ends the span at its
 // start and opens a new one at its end; the span then reaches now, but never
@@ -810,13 +833,7 @@ func (s *Store) extendCoverage(c *SourceCoverage, now time.Time) {
 		*high = highWater
 		*highAt = highWaterAt
 	}
-	open := -1
-	for i := len(s.State.Coverage) - 1; i >= 0; i-- {
-		if s.State.Coverage[i].Source == c.source {
-			open = i
-			break
-		}
-	}
+	open := c.openIndex(s.State.Coverage)
 	if open < 0 {
 		return
 	}
@@ -847,12 +864,14 @@ func (s *Store) extendCoverage(c *SourceCoverage, now time.Time) {
 			last.End = stall.End
 			s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: stall.End, End: stall.End, Source: c.source})
 			open = len(s.State.Coverage) - 1
+			c.openStart = stall.End
 			continue
 		}
 		extend(stall.Start)
 		setStall(stall.Start, stall.End)
 		s.State.Coverage = append(s.State.Coverage, CoverageSpan{Start: stall.End, End: stall.End, Source: c.source})
 		open = len(s.State.Coverage) - 1
+		c.openStart = stall.End
 	}
 	end := now
 	if !endedAt.IsZero() && endedAt.Before(end) {
@@ -905,6 +924,7 @@ func (s *Store) Save(now time.Time) (err error) {
 	if e = s.write(filepath.Join(s.Config.StateDir, "state.json"), data); e != nil {
 		return e
 	}
+	s.snapshotBytes = int64(len(data))
 	return s.saveProjections(now, start)
 }
 

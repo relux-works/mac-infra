@@ -971,3 +971,44 @@ func TestJournalCoverageBaseMismatchRefused(t *testing.T) {
 		})
 	}
 }
+
+// An append never acknowledges what a reader would refuse: a record carrying
+// an invalid entry is refused before it is written, the fallback snapshot
+// refuses the same state, and the store on disk still opens (PR69 review r6).
+func TestJournalAppendRefusesInvalidRecord(t *testing.T) {
+	s, c := journalStore(t)
+	now := time.Now()
+	if e := s.Save(now); e != nil {
+		t.Fatal(e)
+	}
+	s.Observe(newKey(1), now, ruleClassify)
+	k := key(cleanItem(newKey(1)))
+	s.State.Entries[k].Count = 0 // invalid: a reader refuses it
+	if e := s.Flush(now, true, false); e == nil {
+		t.Fatal("invalid record acknowledged")
+	}
+	if len(readJournal(t, s.journalPath())) != 0 {
+		t.Fatal("invalid record written")
+	}
+	if _, e := OpenStore(c); e != nil {
+		t.Fatal("the store on disk no longer opens:", e)
+	}
+}
+
+// Compaction never merges a later span into a running source's open span:
+// after a backward clock step a historical span can sort after the open span,
+// and a short stall link would otherwise extend the open span over history
+// (PR69 review r6). Control: without a running source the same pair merges.
+func TestCompactionKeepsOpenSpan(t *testing.T) {
+	t0 := time.Now().Add(-time.Hour).Round(0)
+	open := CoverageSpan{Start: t0, End: t0.Add(time.Second), StallAfter: &CoverageStall{From: t0.Add(time.Second), To: t0.Add(1100 * time.Millisecond)}}
+	history := CoverageSpan{Start: t0.Add(1100 * time.Millisecond), End: t0.Add(time.Minute)}
+	tracker := &SourceCoverage{covering: true, hasOpen: true, openStart: t0}
+	got := compactCoverage([]CoverageSpan{open, history}, map[string]*SourceCoverage{"": tracker})
+	if len(got) != 2 || !got[0].End.Equal(open.End) {
+		t.Fatalf("open span merged with later history: %+v", got)
+	}
+	if merged := compactCoverage([]CoverageSpan{open, history}, map[string]*SourceCoverage{}); len(merged) != 1 {
+		t.Fatalf("control: the pair should merge without a running source, got %+v", merged)
+	}
+}
