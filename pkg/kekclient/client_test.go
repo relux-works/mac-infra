@@ -28,6 +28,10 @@ const (
 	fakeReadyEnv  = "KEKCLIENT_FAKE_READY"
 	fakeLingerEnv = "KEKCLIENT_FAKE_LINGER"
 	fakeChildEnv  = "KEKCLIENT_FAKE_CHILD"
+	// fakeAfterReadEnv makes the fake stall ("stall") or answer 350 ms late
+	// ("delay") after reading the request; it writes fakeMarkerEnv first.
+	fakeAfterReadEnv = "KEKCLIENT_FAKE_AFTER_READ"
+	fakeMarkerEnv    = "KEKCLIENT_FAKE_MARKER"
 )
 
 func TestMain(m *testing.M) {
@@ -82,6 +86,16 @@ func fakeBroker(args []string) int {
 	if err != nil {
 		return 1
 	}
+	// After the request: tell the test, then stall or answer late.
+	switch os.Getenv(fakeAfterReadEnv) {
+	case "stall":
+		os.WriteFile(os.Getenv(fakeMarkerEnv), []byte("read"), 0o600)
+		time.Sleep(30 * time.Second)
+		return 0
+	case "delay":
+		os.WriteFile(os.Getenv(fakeMarkerEnv), []byte("read"), 0o600)
+		time.Sleep(350 * time.Millisecond)
+	}
 	answer := os.Getenv(fakeAnswerEnv)
 	if answer == "echo-kek" {
 		var req Request
@@ -118,6 +132,7 @@ func fakeOptions(t *testing.T, answer, ready string) Options {
 	t.Setenv(fakeAnswerEnv, answer)
 	t.Setenv(fakeReadyEnv, ready)
 	t.Setenv(fakeLingerEnv, "")
+	t.Setenv(fakeAfterReadEnv, "")
 	// The fake broker is this test binary. Under -race its runtime sleeps
 	// a second at exit by default, longer than exitGrace, and a correctly
 	// answering fake would be killed; a real broker is not race-built.
@@ -338,6 +353,55 @@ func TestGroupSignalPrecedesReaping(t *testing.T) {
 	}
 	if calls != 3 || late != 0 {
 		t.Fatalf("group signals: %d, after the broker was reaped: %d", calls, late)
+	}
+}
+
+// Cancelling the caller's context ends an exchange that is already
+// connected, long before the deadline, and yields no KEK: when the broker
+// stalls after reading the request, and when it would still answer
+// correctly 350 ms later. Review r4's witness. The deadline is far away
+// (10 s), so only cancellation can explain a quick return.
+func TestUnwrapStopsOnCancellationAfterConnect(t *testing.T) {
+	sealed, _ := testEnvelope(t)
+	for _, mode := range []string{"stall", "delay"} {
+		t.Run(mode, func(t *testing.T) {
+			opts := fakeOptions(t, "echo-kek", "")
+			opts.Timeout = 10 * time.Second
+			marker := filepath.Join(t.TempDir(), "read")
+			t.Setenv(fakeAfterReadEnv, mode)
+			t.Setenv(fakeMarkerEnv, marker)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type outcome struct {
+				kek []byte
+				err error
+				at  time.Time
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				kek, err := Unwrap(ctx, opts, sealed)
+				done <- outcome{kek, err, time.Now()}
+			}()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, err := os.Stat(marker); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the fake broker never read the request")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			cancelled := time.Now()
+			cancel()
+			o := <-done
+			if o.kek != nil || o.err == nil {
+				t.Fatalf("after cancellation: kek=%x err=%v", o.kek, o.err)
+			}
+			if took := o.at.Sub(cancelled); took > 300*time.Millisecond {
+				t.Fatalf("cancellation took effect after %v", took)
+			}
+		})
 	}
 }
 

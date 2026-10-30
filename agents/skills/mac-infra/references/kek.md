@@ -82,7 +82,7 @@ Pipes and inherited descriptors are not a transport: a same-user parent can keep
 - after a protocol error or at the deadline, at once;
 - after a correct answer, once the broker has exited by itself, or after one second. A broker that does not exit in that time is killed, and its answer is refused.
 
-The broker's pid, which is also the group id, cannot be reused before it is reaped, so the signal reaches only the broker's own group. No signal is sent from another goroutine. Pipes a descendant still holds are given up after two seconds. A process that leaves the group on purpose is not contained.
+The broker's pid, which is also the group id, cannot be reused before it is reaped, so the signal reaches only the broker's own group. No signal is sent from another goroutine. Cancelling the caller's context ends the exchange at once, even after the request was sent: it closes only the connection, and no KEK is returned. Pipes a descendant still holds are given up after two seconds. A process that leaves the group on purpose is not contained.
 
 ### Error codes (closed set)
 

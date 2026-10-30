@@ -192,6 +192,11 @@ func talk(ctx context.Context, stdout io.Reader, sock, op string, env Envelope, 
 	if deadline, ok := ctx.Deadline(); ok {
 		conn.SetDeadline(deadline)
 	}
+	// Cancellation before the deadline ends a connected exchange too: it
+	// closes only the connection, so the blocked write or read returns. The
+	// broker's group is still signalled once, by exchange, before Wait.
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 	line, err := json.Marshal(Request{Contract: Contract, Op: op, Address: env.Address, Envelope: envelope})
 	if err != nil {
 		return nil, err
@@ -204,6 +209,9 @@ func talk(ctx context.Context, stdout io.Reader, sock, op string, env Envelope, 
 		return nil, fmt.Errorf("%w: no answer line: %v", ErrProtocol, err)
 	}
 	defer clear(answer)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("exchange cancelled: %w", err)
+	}
 	return checkResponse(answer, env)
 }
 
