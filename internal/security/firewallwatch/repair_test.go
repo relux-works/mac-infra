@@ -73,8 +73,8 @@ func brokenStateDir(t *testing.T) (Config, []byte) {
 // Recovery, with a negative control: the broken directory fails to open
 // before the repair; the repaired copy opens with the normal reader; the
 // originals are copied byte for byte with their SHA-256; the state directory
-// is not changed; the untouched journal record keeps its bytes; and every
-// change is reported, an entry by key hash only.
+// is not changed; the untouched journal record keeps its bytes; exactly the
+// broken span and entry are reported, and no key appears in the report.
 func TestRepairMakesABrokenStateReadable(t *testing.T) {
 	c, untouched := brokenStateDir(t)
 	before := dirHashes(t, c.StateDir)
@@ -111,15 +111,34 @@ func TestRepairMakesABrokenStateReadable(t *testing.T) {
 	if !bytes.Contains(journal, append(append([]byte("\n"), untouched...), '\n')) {
 		t.Fatal("an untouched journal record lost its bytes")
 	}
-	checks := map[string]bool{}
+	// The fixture broke exactly one span in state.json and one entry in the
+	// first journal record.
+	var got []string
 	for _, ch := range report.Changes {
-		checks[ch.File+" "+ch.Check] = true
-		if strings.Contains(ch.Item, "app") {
-			t.Fatalf("change %+v names a key", ch)
-		}
+		got = append(got, fmt.Sprintf("%s %d %s %s", ch.File, ch.Seq, ch.Check, ch.Field))
 	}
-	if !checks["state.json "+checkSpanOrder] || !checks[journalFile+" "+checkEntryOrder] {
-		t.Fatalf("changes %+v; want the span and the entry", report.Changes)
+	var first journalRecord
+	if e := json.Unmarshal(bytes.SplitN(brokenJournal, []byte("\n"), 2)[0], &first); e != nil || len(first.Entries) != 1 {
+		t.Fatalf("fixture record: %v", e)
+	}
+	want := []string{"state.json 0 " + checkSpanOrder + " end", fmt.Sprintf("%s %d %s last_seen", journalFile, first.Seq, checkEntryOrder)}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("changes %q; want %q", got, want)
+	}
+	reportJSON, _ := json.Marshal(report)
+	var st State
+	if e := json.Unmarshal(brokenState, &st); e != nil {
+		t.Fatal(e)
+	}
+	for k := range first.Entries {
+		st.Entries[k] = nil
+	}
+	for k := range st.Entries {
+		// Keys hold characters JSON escapes: look for the encoded form.
+		encoded, _ := json.Marshal(k)
+		if bytes.Contains(reportJSON, encoded[1:len(encoded)-1]) {
+			t.Fatalf("the report names key %q", k)
+		}
 	}
 }
 
@@ -234,6 +253,135 @@ func TestRepairEntriesReportInKeyOrder(t *testing.T) {
 	for range 5 {
 		if again := repairEntries(broken(), journalFile, 1); !reflect.DeepEqual(first, again) {
 			t.Fatalf("report order changed between runs")
+		}
+	}
+}
+
+// The repair applies the reader's tail rule (replayJournal). A final segment
+// without a newline is ignored whatever it holds, even a decodable record or
+// valid JSON that is not one; with none, a last complete line that is not
+// valid JSON is a torn write. Each is kept byte for byte, reported as a torn
+// tail, not counted as a record, and the repaired directory opens. Negative
+// control: a last complete line that is valid JSON but not a record is
+// corruption to the reader, so the repair refuses it.
+func TestRepairJournalTailMatchesReader(t *testing.T) {
+	cases := []struct {
+		name, tail string
+		refused    bool
+	}{
+		{"incomplete record", `{"seq":3,"type":"delta"}`, false},
+		{"incomplete record with reversed times", `{"seq":3,"type":"delta","entries":{"k":{"first_seen":"2026-10-30T06:00:00Z","last_seen":"2026-10-30T05:00:00Z","count":1,"window_start":"2026-10-30T06:00:00Z","denies":0,"spike_emitted":false}}}`, false},
+		{"incomplete non-record JSON", `{"seq":"x"}`, false},
+		{"incomplete array", `[]`, false},
+		{"incomplete garbage", `{"seq":3,"ty`, false},
+		{"complete garbage", "garbage\n", false},
+		{"complete blank line", "\n", false},
+		{"complete non-record JSON", `{"seq":"x"}` + "\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := brokenStateDir(t)
+			journalPath := filepath.Join(c.StateDir, journalFile)
+			appendRaw(t, journalPath, tc.tail)
+			out := filepath.Join(t.TempDir(), "repair")
+			report, e := Repair(c, out)
+			if tc.refused {
+				if e == nil || !strings.Contains(e.Error(), "not repairable") {
+					t.Fatalf("want a refusal, got %v", e)
+				}
+				return
+			}
+			if e != nil || !report.Opens || !report.TornTail || report.Records != 2 {
+				t.Fatalf("report %+v, %v", report, e)
+			}
+			for _, ch := range report.Changes {
+				if ch.Seq == 3 {
+					t.Fatalf("a change in the ignored tail: %+v", ch)
+				}
+			}
+			got, _ := os.ReadFile(filepath.Join(out, "repaired", journalFile))
+			if !bytes.HasSuffix(got, []byte(tc.tail)) {
+				t.Fatalf("tail not kept: %q", got[max(0, len(got)-40):])
+			}
+		})
+	}
+}
+
+// Decoding is not enough to be a record: a line the reader refuses as not a
+// record of this journal (null, another type, a seq out of order) is refused
+// before anything repaired is written. The plain broken directory repairs
+// (TestRepairMakesABrokenStateReadable) is the positive control.
+func TestRepairRefusesNonRecords(t *testing.T) {
+	for name, edit := range map[string]func(lines [][]byte) [][]byte{
+		"null first":   func(l [][]byte) [][]byte { return append([][]byte{[]byte("null")}, l...) },
+		"null between": func(l [][]byte) [][]byte { return [][]byte{l[0], []byte("null"), l[1]} },
+		"other type": func(l [][]byte) [][]byte {
+			return [][]byte{l[0], bytes.Replace(l[1], []byte(`"type":"delta"`), []byte(`"type":"other"`), 1)}
+		},
+		"seq gap": func(l [][]byte) [][]byte { return [][]byte{l[1], l[0]} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, _ := brokenStateDir(t)
+			path := filepath.Join(c.StateDir, journalFile)
+			raw, _ := os.ReadFile(path)
+			lines := edit(bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n")))
+			if e := os.WriteFile(path, append(bytes.Join(lines, []byte("\n")), '\n'), 0600); e != nil {
+				t.Fatal(e)
+			}
+			out := filepath.Join(t.TempDir(), "repair")
+			if _, e := Repair(c, out); e == nil || !strings.Contains(e.Error(), "not repairable") {
+				t.Fatalf("want a refusal, got %v", e)
+			}
+			if left, _ := os.ReadDir(filepath.Join(out, "repaired")); len(left) != 0 {
+				t.Fatalf("%d repaired files written", len(left))
+			}
+		})
+	}
+}
+
+// A watcher start on the installed repair records the refusal marker the
+// install leaves in place and saves; the repair checks that start on a
+// disposable copy that includes the marker. With a max_state_bytes the
+// repaired files fit but the startup save (the journal folded in, the refusal
+// added) does not, the copy opens but does not start, and the report says so
+// with the error. The marker is kept among the
+// originals with its hash, the check's copy is removed and the state
+// directory is unchanged. Positive control: with room for the startup save,
+// the same state starts.
+func TestRepairChecksStartWithMarker(t *testing.T) {
+	for _, tight := range []bool{true, false} {
+		c, _ := brokenStateDir(t)
+		marker, _ := json.Marshal(refusalMarkerFile{At: time.Now().Round(0), Field: checkEntryOrder, Kind: refusalKindJournal})
+		if e := os.WriteFile(filepath.Join(c.StateDir, refusalMarker), marker, 0600); e != nil {
+			t.Fatal(e)
+		}
+		if tight {
+			st, _ := os.Stat(filepath.Join(c.StateDir, "state.json"))
+			j, _ := os.Stat(filepath.Join(c.StateDir, journalFile))
+			c.MaxStateBytes = max(st.Size(), j.Size()) + 64
+		}
+		before := dirHashes(t, c.StateDir)
+		out := filepath.Join(t.TempDir(), "repair")
+		report, e := Repair(c, out)
+		if e != nil || !report.Opens {
+			t.Fatalf("tight=%t: %+v %v", tight, report, e)
+		}
+		if tight && (report.Starts || !strings.Contains(report.StartError, "max_state_bytes")) {
+			t.Fatalf("tight: %+v", report)
+		}
+		if !tight && (!report.Starts || report.StartError != "") {
+			t.Fatalf("control: %+v", report)
+		}
+		got, _ := os.ReadFile(filepath.Join(out, "original", refusalMarker))
+		sum := sha256.Sum256(marker)
+		if !bytes.Equal(got, marker) || report.Originals[refusalMarker] != hex.EncodeToString(sum[:]) {
+			t.Fatalf("tight=%t: marker not kept among the originals", tight)
+		}
+		if _, e := os.Lstat(filepath.Join(out, "startup-check")); !os.IsNotExist(e) {
+			t.Fatalf("tight=%t: the start check's copy is left: %v", tight, e)
+		}
+		if !reflect.DeepEqual(before, dirHashes(t, c.StateDir)) {
+			t.Fatalf("tight=%t: the state directory changed", tight)
 		}
 	}
 }

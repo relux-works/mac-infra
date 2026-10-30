@@ -28,30 +28,39 @@ type RepairChange struct {
 
 // RepairReport is the result of Repair.
 type RepairReport struct {
-	Out        string            `json:"out"`
-	Originals  map[string]string `json:"originals_sha256"`
-	Changes    []RepairChange    `json:"changes"`
-	Records    int               `json:"journal_records"`
-	TornTail   bool              `json:"journal_torn_tail"`
-	Opens      bool              `json:"repaired_opens"`
-	OpenError  string            `json:"repaired_open_error,omitempty"`
-	BeforeOpen string            `json:"original_open_error,omitempty"`
+	Out       string            `json:"out"`
+	Originals map[string]string `json:"originals_sha256"`
+	Changes   []RepairChange    `json:"changes"`
+	Records   int               `json:"journal_records"`
+	TornTail  bool              `json:"journal_torn_tail"`
+	Opens     bool              `json:"repaired_opens"`
+	OpenError string            `json:"repaired_open_error,omitempty"`
+	// Starts is whether a watcher start on the repaired files succeeds: it
+	// records a refusal marker left in the state directory and saves. Checked
+	// on a disposable copy only when the repaired files open.
+	Starts     bool   `json:"repaired_starts"`
+	StartError string `json:"repaired_start_error,omitempty"`
+	BeforeOpen string `json:"original_open_error,omitempty"`
 }
 
 // Repair is the operator's recovery for state that a backward wall-clock
 // step made unreadable (a last_seen before first_seen or window_start, a
 // coverage span or stall whose wall times run backward). It never writes the
 // state directory's files (only the watcher's lock file is opened, and
-// created if missing, as a watcher run does): it refuses while a watcher holds the directory's lock
-// or when out exists, copies state.json and the journal byte for byte to
-// out/original with their SHA-256, and writes to out/repaired the same files
-// with each reversed time moved forward to the earlier time it must not
-// precede (the watcher's own rule: last_seen never moves back, spans and
-// stalls never run backward). Lines and records it does not change keep their
-// bytes. A journal line that is not a valid record, other than a torn last
-// line, is refused as before, and nothing is repaired. The report lists every
-// change and whether the repaired directory opens with the normal reader;
-// installing it is the operator's separate step.
+// created if missing, as a watcher run does): it refuses while a watcher
+// holds the directory's lock or when out exists, copies state.json, the
+// journal and a refusal marker byte for byte to out/original with their
+// SHA-256, and writes to out/repaired state.json and the journal with each
+// reversed time moved forward to the earlier time it must not precede (the
+// watcher's own rule: last_seen never moves back, spans and stalls never run
+// backward). Lines and records it does not change keep their bytes, and a
+// torn tail is kept as the reader treats it. A journal line the reader would
+// refuse as not a record of this journal (not JSON, not a delta, a seq out of
+// order) is refused, and nothing repaired is written. The report lists every
+// change, whether the repaired files open with the normal reader, and whether
+// a watcher start on them (with the marker the operator leaves in place)
+// succeeds, tried on a disposable copy; installing them is the operator's
+// separate step.
 func Repair(c Config, out string) (RepairReport, error) {
 	report := RepairReport{Out: out, Originals: map[string]string{}}
 	if e := checkDir(c.StateDir); e != nil {
@@ -90,7 +99,7 @@ func Repair(c Config, out string) (RepairReport, error) {
 	}
 	files := map[string][]byte{}
 	var sums bytes.Buffer
-	for _, name := range []string{"state.json", journalFile} {
+	for _, name := range []string{"state.json", journalFile, refusalMarker} {
 		f, e := openPrivate(filepath.Join(c.StateDir, name))
 		if e != nil {
 			return report, e
@@ -131,23 +140,32 @@ func Repair(c Config, out string) (RepairReport, error) {
 		outputs["state.json"] = b
 	}
 	if b, ok := files[journalFile]; ok {
+		// The reader's rule (replayJournal): only newline-terminated lines
+		// count; a final segment without a newline is an incomplete append and
+		// ignored, whatever it holds; with none, a last complete line that is
+		// not valid JSON is a torn write and ignored. Either is kept as is.
 		lines := bytes.Split(b, []byte("\n"))
-		torn := len(lines[len(lines)-1]) > 0
+		tail := lines[len(lines)-1]
+		lines = lines[:len(lines)-1]
 		var outBuf bytes.Buffer
+		var prev uint64
 		for i, line := range lines {
-			last := i == len(lines)-1
-			if last && !torn {
-				break
-			}
 			var r journalRecord
 			if e := json.Unmarshal(line, &r); e != nil {
-				if last && !json.Valid(line) {
+				if i == len(lines)-1 && len(tail) == 0 && !json.Valid(line) {
 					report.TornTail = true
-					outBuf.Write(line) // kept: the reader drops a torn last line
+					outBuf.Write(line)
+					outBuf.WriteByte('\n')
 					break
 				}
 				return report, fmt.Errorf("journal record %d is not repairable (%v); nothing was repaired", i+1, e)
 			}
+			// Decoding alone does not make a record (null decodes): the
+			// reader's identity checks, before anything repaired is written.
+			if r.Type != recordDelta || r.Seq == 0 || (i > 0 && r.Seq != prev+1) {
+				return report, fmt.Errorf("journal record %d is not repairable (not a record of this journal: type %q, seq %d); nothing was repaired", i+1, r.Type, r.Seq)
+			}
+			prev = r.Seq
 			report.Records++
 			changes := repairEntries(r.Entries, journalFile, r.Seq)
 			if h := r.Heartbeat; h != nil {
@@ -169,9 +187,11 @@ func Repair(c Config, out string) (RepairReport, error) {
 				}
 			}
 			outBuf.Write(line)
-			if !last {
-				outBuf.WriteByte('\n')
-			}
+			outBuf.WriteByte('\n')
+		}
+		if len(tail) > 0 {
+			report.TornTail = true
+			outBuf.Write(tail)
 		}
 		outputs[journalFile] = outBuf.Bytes()
 	}
@@ -189,7 +209,34 @@ func Repair(c Config, out string) (RepairReport, error) {
 		return report, nil
 	}
 	report.Opens = true
+	if e := checkStart(c, filepath.Join(absOut, "startup-check"), outputs, files[refusalMarker]); e != nil {
+		report.StartError = e.Error()
+		return report, nil
+	}
+	report.Starts = true
 	return report, nil
+}
+
+// checkStart tries a watcher start (openRun: record the marker, then save)
+// on a disposable copy of the repaired files plus the marker, which the
+// install leaves in the state directory. The copy is removed afterwards.
+func checkStart(c Config, dir string, outputs map[string][]byte, marker []byte) error {
+	if e := os.Mkdir(dir, 0700); e != nil {
+		return e
+	}
+	defer os.RemoveAll(dir)
+	files := maps.Clone(outputs)
+	if marker != nil {
+		files[refusalMarker] = marker
+	}
+	for name, b := range files {
+		if e := os.WriteFile(filepath.Join(dir, name), b, 0600); e != nil {
+			return e
+		}
+	}
+	c.StateDir = dir
+	_, e := openRun(c, time.Now)
+	return e
 }
 
 // insideDir reports whether dir is root or lies below it. It climbs from dir

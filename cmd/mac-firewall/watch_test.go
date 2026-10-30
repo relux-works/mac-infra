@@ -294,3 +294,39 @@ func TestWatchRepairCLIUnrepairedExitsOne(t *testing.T) {
 		t.Fatalf("repaired copy: %v", e)
 	}
 }
+
+// A repaired copy that opens but on which a watcher start fails (here the
+// startup save exceeds max_state_bytes) is reported with the start error, and
+// the command exits 1, not 0.
+func TestWatchRepairCLIStartFailsExitsOne(t *testing.T) {
+	config, c := watchConfig(t, 0)
+	s, e := firewallwatch.OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Save(time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	st, e := os.Stat(filepath.Join(c.StateDir, "state.json"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	marker := `{"at":"2026-10-30T06:00:00Z","field":"entry.time_order","kind":"journal"}` + "\n"
+	if e := os.WriteFile(filepath.Join(c.StateDir, "last-write-refusal.json"), []byte(marker), 0600); e != nil {
+		t.Fatal(e)
+	}
+	c.MaxStateBytes = st.Size() + 8
+	raw, _ := json.Marshal(c)
+	if e := os.WriteFile(config, raw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	var out, errOut bytes.Buffer
+	dir := filepath.Join(t.TempDir(), "repair")
+	if code := run([]string{"watch", "repair", "--config", config, "--out", dir}, &out, &errOut); code != 1 {
+		t.Fatalf("start fails: exit %d, %s", code, errOut.String())
+	}
+	var report firewallwatch.RepairReport
+	if e := json.Unmarshal(out.Bytes(), &report); e != nil || !report.Opens || report.Starts || !strings.Contains(report.StartError, "max_state_bytes") {
+		t.Fatalf("report %s (%v)", out.String(), e)
+	}
+}

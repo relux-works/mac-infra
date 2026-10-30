@@ -600,21 +600,30 @@ mac-firewall watch repair --config PATH --out DIR
 
 It refuses while a watcher holds the state directory's lock, when `DIR`
 exists, or when `DIR` resolves inside the state directory (checked by device
-and inode, so a symlink or a case variant of the path is caught). It only reads the state
-directory: it copies `state.json` and `state-journal.jsonl` byte for byte to
-`DIR/original` with `SHA256SUMS`, and writes to `DIR/repaired` the same files
-with each reversed time moved forward to the time it must not precede
+and inode, so a symlink or a case variant of the path is caught). It only
+reads the state directory: it copies `state.json`, `state-journal.jsonl` and
+a `last-write-refusal.json` marker byte for byte to `DIR/original` with
+`SHA256SUMS`, and writes to `DIR/repaired` `state.json` and the journal with
+each reversed time moved forward to the time it must not precede
 (`last_seen` to `first_seen` or `window_start`; a span's end to its start; a
 stall that starts before the span's end shortens the covered span, one that
 starts after it extends back to the span's end, so the repair errs toward
 unavailable coverage; a stall's end to its start). Records and lines it does
-not change keep their bytes. A journal line in the middle that is not a record
-is refused as before, and nothing repaired is written. It prints a JSON report
-of every change (an entry by a hash of its key, never the key) and whether
-`DIR/repaired` opens with the normal reader, and exits 0 only if it does.
-Installing the repaired files is a separate step in a window: stop the
-watcher, copy `DIR/repaired/*` into the state directory (keeping `DIR/original`),
-start the watcher, and check `watch status`.
+not change keep their bytes, and a torn journal tail is kept as the reader
+treats it (an unterminated last segment, or a last complete line that is not
+JSON). A journal line the reader would refuse as not a record of this journal
+(not JSON, not a delta, a seq out of order) is refused, and nothing repaired
+is written. It prints a JSON report of every change (an entry by a hash of
+its key, never the key), whether `DIR/repaired` opens with the normal reader,
+and whether a watcher start on it succeeds: the start records the marker and
+saves, tried on a disposable copy with the marker. It exits 0 only if the
+copy opens and starts.
+Installing the repaired files is a separate step in a window, with the
+watcher kept stopped from the repair to the install so the copies stay
+current: copy `DIR/repaired/*` into the state directory (it stays the
+caller's, mode 0700; the files are regular, mode 0600), keep `DIR/original`,
+and leave `last-write-refusal.json` in place, since the next start records it
+as refusal evidence. Then start the watcher and check `watch status`.
 
 A per-directory advisory lock is acquired before loading state and refuses
 concurrent collectors. Directory ancestors and same-user concurrent replacement
