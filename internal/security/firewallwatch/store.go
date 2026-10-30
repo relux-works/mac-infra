@@ -29,14 +29,15 @@ type Entry struct {
 }
 type SignerEntry struct {
 	Value string `json:"value"`
-	// CDHash is the code directory hash read from the file's signature,
-	// noCDHash when the signature has none, "" when the entry holds no
-	// signature facts (codesign text, or recorded before hashes were kept).
-	CDHash    string    `json:"cdhash,omitempty"`
-	Identity  string    `json:"identity"`
-	Failed    bool      `json:"failed"`
-	Inspected time.Time `json:"inspected"`
-	LastSeen  time.Time `json:"last_seen"`
+	// CDHash alone does not attest provenance: older writers paired hashes
+	// with forgeable codesign text. SignatureSource identifies facts read
+	// together through the signature inspector; absent means legacy/text.
+	CDHash          string    `json:"cdhash,omitempty"`
+	SignatureSource string    `json:"signature_source,omitempty"`
+	Identity        string    `json:"identity"`
+	Failed          bool      `json:"failed"`
+	Inspected       time.Time `json:"inspected"`
+	LastSeen        time.Time `json:"last_seen"`
 }
 
 type State struct {
@@ -436,7 +437,7 @@ func (s *Store) validateShape(bounded bool, coverageSlack int) error {
 		}
 	}
 	for k, v := range st.Signers {
-		if len(k) == 0 || len(k) > 1024 || len(v.Value) > 1024 || len(v.Identity) > 1024 || v.LastSeen.IsZero() || (v.CDHash != "" && v.CDHash != noCDHash && !validCDHash(v.CDHash)) {
+		if len(k) == 0 || len(k) > 1024 || len(v.Value) > 1024 || len(v.Identity) > 1024 || v.LastSeen.IsZero() || (v.CDHash != "" && v.CDHash != noCDHash && !validCDHash(v.CDHash)) || (v.SignatureSource != "" && v.SignatureSource != signatureSourceV1) || (v.SignatureSource == signatureSourceV1 && v.CDHash == "") {
 			return bad()
 		}
 	}

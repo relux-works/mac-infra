@@ -73,13 +73,21 @@ static int fwCodeFacts(const char *path, int *kind, unsigned char *hash, int *ha
 	if (st != errSecSuccess) {
 		return -1;
 	}
-	CFDictionaryRef info = NULL;
-	st = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info);
+	// Install the offline policy before requesting signing metadata: that
+	// request can itself evaluate the certificate chain. Refuse invalid code
+	// here, rather than treating partial metadata as validated signer facts.
+	st = SecStaticCodeCheckValidity(code, fwCheckFlags, NULL);
 	if (st == errSecCSUnsigned) {
 		*kind = fwUnsigned;
 		CFRelease(code);
 		return 0;
 	}
+	if (st != errSecSuccess) {
+		CFRelease(code);
+		return -1;
+	}
+	CFDictionaryRef info = NULL;
+	st = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info);
 	if (st != errSecSuccess || info == NULL) {
 		CFRelease(code);
 		return -1;

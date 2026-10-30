@@ -74,9 +74,15 @@ func collectorCommand(ctx context.Context, name string) *exec.Cmd {
 }
 
 // noCDHash records a signature inspection that found no code directory hash.
-// An entry whose CDHash is "" holds no signature facts: it came from the
-// codesign text, or predates hashes.
+// It cannot match a valid kernel hash. Persisted hashes need their own
+// provenance marker, since older writers paired hashes with codesign text.
 const noCDHash = "none"
+
+// signatureSourceV1 is emitted only by the signature inspector, never the
+// text inspector. It distinguishes entries from the older text-plus-hash
+// writer in both snapshots and journals; this is cache provenance, not a MAC
+// against someone who can rewrite the user's whole state file.
+const signatureSourceV1 = "security-framework-v1"
 
 // codeFacts is what one inspection reports about a file.
 type codeFacts struct {
@@ -108,7 +114,9 @@ func inspectSigner(ctx context.Context, path string) (codeFacts, error) {
 }
 
 // inspectImage reads a file's signer and code directory hash from its
-// signature (staticCodeFacts), not from text.
+// signature (staticCodeFacts), not from text. These synchronous framework
+// calls cannot be interrupted by ctx; ClassifierTimeout bounds subprocess
+// inspection, but is not a hard deadline for this native call.
 func inspectImage(_ context.Context, path string) (codeFacts, error) {
 	return staticCodeFacts(path)
 }
@@ -160,7 +168,7 @@ func (s *Store) inspectCode(ctx context.Context, path string, fromSignature bool
 	now := s.now()
 	// A bundle directory identity cannot attest its inner code. Re-inspect successes;
 	// failed inspections still use the bounded failure TTL.
-	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) && (!fromSignature || v.Failed || v.CDHash != "") {
+	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) && (!fromSignature || (v.SignatureSource == signatureSourceV1 && v.CDHash != "")) {
 		v.LastSeen = now
 		s.State.Signers[cacheKey] = v
 		s.signerChanged(cacheKey)
@@ -190,10 +198,13 @@ func (s *Store) inspectCode(ctx context.Context, path string, fromSignature bool
 	}
 	f.Signer = Sanitize(f.Signer)
 	entry := SignerEntry{Value: f.Signer, CDHash: f.CDHash, LastSeen: now, Identity: identity, Failed: err != nil, Inspected: now}
+	if fromSignature {
+		entry.SignatureSource = signatureSourceV1
+	}
 	// A new or changed result is journaled at once; re-inspections with the
 	// same result (bundle directories, failure retries) only refresh times,
 	// which follow with the next append.
-	if prev, ok := s.State.Signers[cacheKey]; !ok || prev.Value != entry.Value || prev.CDHash != entry.CDHash || prev.Identity != entry.Identity || prev.Failed != entry.Failed {
+	if prev, ok := s.State.Signers[cacheKey]; !ok || prev.Value != entry.Value || prev.CDHash != entry.CDHash || prev.SignatureSource != entry.SignatureSource || prev.Identity != entry.Identity || prev.Failed != entry.Failed {
 		s.delta.urgent = true
 	}
 	s.State.Signers[cacheKey] = entry

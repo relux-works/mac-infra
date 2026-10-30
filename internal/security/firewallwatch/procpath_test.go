@@ -253,17 +253,158 @@ func TestRunningSignerIgnoresTextEntries(t *testing.T) {
 	}
 }
 
-// Replacing a text entry with the signature's facts journals at once even
-// when only the hash changes (PR81 review r2's surviving mutant).
+// Persisted text entries, including r2's populated hash and failed entries,
+// cannot attest nettop after either snapshot loading or journal replay. One
+// fresh signature inspection repairs the entry; repeated lookups reuse it.
+// Actual predecessor-writer evidence is run separately against the same reader.
+func TestRunningSignerReinspectsLegacyPersistence(t *testing.T) {
+	for _, mode := range []string{"snapshot", "journal"} {
+		for _, old := range []struct {
+			name, hash string
+			failed     bool
+		}{
+			{"r2-hash", hashA, false},
+			{"r2-failed", hashA, true},
+			{"empty-hash", "", false},
+			{"absent-hash", noCDHash, false},
+		} {
+			t.Run(mode+"/"+old.name, func(t *testing.T) {
+				s, path, _ := signerFixture(t, "unused", hashA)
+				now := s.now()
+				if mode == "journal" {
+					if err := s.Save(now); err != nil {
+						t.Fatal(err)
+					}
+				}
+				s.inspectSigner = signerOnly(func(context.Context, string) (string, error) { return "Developer ID: PRIVATE_PATH_MARKER", nil })
+				s.signer(context.Background(), path)
+				for k, v := range s.State.Signers {
+					v.CDHash, v.Failed = old.hash, old.failed
+					s.State.Signers[k] = v
+					s.signerChanged(k)
+				}
+				var err error
+				if mode == "snapshot" {
+					err = s.Save(now)
+				} else {
+					err = s.appendJournal(now, false)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				r, err := OpenStore(s.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				runs := 0
+				r.inspectImage = func(context.Context, string) (codeFacts, error) {
+					runs++
+					return codeFacts{Signer: "ad-hoc", CDHash: hashA}, nil
+				}
+				for i := 0; i < 2; i++ {
+					if got := r.runningSigner(context.Background(), path, hashA); got != "ad-hoc" || runs != 1 {
+						t.Fatalf("legacy text cache attested: got=%q inspections=%d", got, runs)
+					}
+				}
+			})
+		}
+	}
+}
+
+// Both formats preserve admitted signature provenance and reuse those facts.
+// Losing only the marker requires a fresh inspection and an urgent journal
+// update even when the signer, hash and file identity are unchanged.
+func TestSignatureProvenancePersistence(t *testing.T) {
+	for _, mode := range []string{"snapshot", "journal"} {
+		t.Run(mode, func(t *testing.T) {
+			s, path, _ := signerFixture(t, "Apple", hashA)
+			now := s.now()
+			if mode == "journal" {
+				if err := s.Save(now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.runningSigner(context.Background(), path, hashA)
+			var err error
+			if mode == "snapshot" {
+				err = s.Save(now)
+			} else {
+				err = s.appendJournal(now, false)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := OpenStore(s.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runs := 0
+			r.inspectImage = func(context.Context, string) (codeFacts, error) {
+				runs++
+				return codeFacts{Signer: "Apple", CDHash: hashA}, nil
+			}
+			if got := r.runningSigner(context.Background(), path, hashA); got != "Apple" || runs != 0 {
+				t.Fatalf("current provenance not reused: %q after %d inspections", got, runs)
+			}
+			for k, v := range r.State.Signers {
+				if v.SignatureSource != signatureSourceV1 {
+					t.Fatalf("lost provenance: %+v", v)
+				}
+				v.SignatureSource = ""
+				r.State.Signers[k] = v
+			}
+			r.delta = journalDelta{}
+			if got := r.runningSigner(context.Background(), path, hashA); got != "Apple" || runs != 1 || !r.delta.urgent {
+				t.Fatalf("marker-only repair: got=%q inspections=%d urgent=%t", got, runs, r.delta.urgent)
+			}
+		})
+	}
+}
+
+// Admission preserves legacy empty provenance and current signature facts,
+// while unknown versions or a current marker without hash facts are invalid.
+func TestSignatureProvenanceAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		source, hash string
+		valid        bool
+	}{
+		{"", "", true}, {"", hashA, true}, {"", noCDHash, true},
+		{signatureSourceV1, hashA, true}, {signatureSourceV1, noCDHash, true},
+		{signatureSourceV1, "", false}, {"unknown", hashA, false},
+		{strings.ToUpper(signatureSourceV1), hashA, false},
+	} {
+		t.Run(tc.source+"/"+tc.hash, func(t *testing.T) {
+			s, path, _ := signerFixture(t, "ad-hoc", hashA)
+			s.runningSigner(context.Background(), path, hashA)
+			for k, v := range s.State.Signers {
+				v.SignatureSource, v.CDHash = tc.source, tc.hash
+				s.State.Signers[k] = v
+			}
+			if err := s.validateState(); (err == nil) != tc.valid {
+				t.Fatalf("source=%q hash=%q admitted=%t: %v", tc.source, tc.hash, tc.valid, err)
+			}
+		})
+	}
+}
+
+// Bundle signatures are re-inspected with an unchanged directory identity.
+// A hash-only change is urgent; another identical inspection is not. Provenance
+// is already current in both cases, so it cannot mask a missing hash comparison.
 func TestSignatureHashChangeIsUrgent(t *testing.T) {
-	s, path, _ := signerFixture(t, "Apple", hashA)
-	s.inspectSigner = signerOnly(func(context.Context, string) (string, error) { return "Apple", nil })
+	s, _, _ := signerFixture(t, "Apple", hashA)
+	path := t.TempDir()
 	ctx := context.Background()
-	s.signer(ctx, path)
-	s.delta = journalDelta{}
 	s.runningSigner(ctx, path, hashA)
-	if !s.delta.urgent {
+	s.inspectImage = func(context.Context, string) (codeFacts, error) {
+		return codeFacts{Signer: "Apple", CDHash: hashB}, nil
+	}
+	s.delta = journalDelta{}
+	if got := s.runningSigner(ctx, path, hashB); got != "Apple" || !s.delta.urgent {
 		t.Fatal("a hash-only change was not due at once")
+	}
+	s.delta = journalDelta{}
+	if got := s.runningSigner(ctx, path, hashB); got != "Apple" || s.delta.urgent {
+		t.Fatal("an unchanged signature became urgent")
 	}
 }
 

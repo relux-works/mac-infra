@@ -252,9 +252,9 @@ func unsignedCopy(t *testing.T) []byte {
 
 // A file whose name carries codesign text (PR81 review r2) does not borrow
 // that text as its signer: a running copy named with Apple authority lines, or
-// with a newline-injected Developer ID line, is attested as what its signature
-// says, "no designated requirement", the same as the same bytes under an
-// ordinary name (control). Its event is not Apple noise, and the injected
+// with a newline-injected Developer ID line, is refused as invalid/unsigned
+// after offline validation, just like the same bytes under an ordinary name
+// (control). Its event is not Apple noise, and the injected
 // name reaches neither the signer nor the classifier's rendering.
 func TestForgedNameNotAttested(t *testing.T) {
 	data := unsignedCopy(t)
@@ -277,7 +277,7 @@ func TestForgedNameNotAttested(t *testing.T) {
 		}
 		s, _ := journalStore(t)
 		got := s.runningSigner(ctx, img.Path, img.CDHash)
-		if got != "no designated requirement" {
+		if got != "unknown" {
 			t.Fatalf("%q attested as %q", name, got)
 		}
 		port := 443
@@ -297,7 +297,8 @@ func TestForgedNameNotAttested(t *testing.T) {
 // carry no text: Apple binaries, this ad-hoc test binary, an unsigned file and
 // the applications installed here (Developer ID and App Store when present),
 // and it reports a missing file as an error. Limit: the applications vary by
-// host.
+// host. Broken/untrusted optional applications must return unknown without
+// hash facts; they do not count as a signer-category control.
 func TestStaticCodeFactsMatchText(t *testing.T) {
 	exe, _ := os.Executable()
 	want := map[string]string{"/bin/ls": "Apple", "/sbin/launchd": "Apple", exe: "ad-hoc", "/etc/hosts": "unsigned"}
@@ -309,7 +310,11 @@ func TestStaticCodeFactsMatchText(t *testing.T) {
 		}
 		f, err := staticCodeFacts(p)
 		if err != nil {
-			t.Fatalf("%s: %v", p, err)
+			if want[p] != "" || f.Signer != "unknown" || f.CDHash != noCDHash {
+				t.Fatalf("%s: %+v %v", p, f, err)
+			}
+			t.Logf("optional application %s refused: %v", p, err)
+			continue
 		}
 		text, err := inspectSigner(context.Background(), p)
 		if err != nil {

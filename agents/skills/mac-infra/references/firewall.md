@@ -617,14 +617,21 @@ A resolved path:
   - `Developer ID: <name>` satisfies the Developer ID requirement, with the name
     from the validated leaf certificate;
   - otherwise `ad-hoc`, `no designated requirement` or `unsigned`.
-  The requirement checks verify the signature over the code directory and its
+  Offline validation is applied before reading signing metadata, which can
+  itself evaluate certificates. Invalid signatures yield `unknown`. The
+  requirement checks verify the signature over the code directory and its
   certificate chain, without network access and without hashing the executable
   again (the kernel holds the running image to that code directory). A file
   replaced after the process started, an image the kernel holds no hash for, a
   file without one, or another slice than the running one (a Rosetta process)
-  gives the signer `unknown`. A cached signer result without signature facts is
-  inspected again for such rows. Other sources still read the signer from
-  `codesign` text.
+  gives the signer `unknown`. Signature-derived cache entries carry explicit
+  provenance. Older entries, including the older writer's text-plus-hash
+  entries, are re-inspected after either snapshot loading or journal replay.
+  Older readers ignore the new provenance field; an older writer that rewrites
+  an entry drops it, so upgrading again re-inspects it. Other sources still
+  read the signer from `codesign` text. Native Security calls are synchronous:
+  the classifier timeout cannot interrupt them, and local filesystem/trust
+  service delays remain possible despite the offline policy.
 - joins the row's dedup identity, so two binaries behind one process name are
   two items;
 - is stored on the event as `path`: absolute, nettop events only. It is private
