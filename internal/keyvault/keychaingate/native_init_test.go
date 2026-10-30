@@ -75,12 +75,11 @@ func nativeInputs(root string) ([]string, error) {
 			return err
 		}
 		if entry.IsDir() {
-			// Go builds no package in a directory whose name begins with a
-			// dot (module import paths cannot name one), so native files
-			// there are never compiled: .git, .temp and a checkout's local
-			// tool state. A reviewed input could still read a header from
-			// one; dotDirReference refuses that.
-			if path != root && strings.HasPrefix(entry.Name(), ".") {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			if inCheckoutState(rel) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -101,8 +100,12 @@ func nativeInputs(root string) ([]string, error) {
 			if err != nil {
 				return err
 			}
-			if ref, err := dotDirReference(path); err != nil || ref != "" {
-				return errors.Join(err, fmt.Errorf("native input %s names a dot-directory: %q", rel, ref))
+			ref, err := checkoutStateReference(path)
+			if err != nil {
+				return fmt.Errorf("native input %s: %w", rel, err)
+			}
+			if ref != "" {
+				return fmt.Errorf("native input %s names checkout state: %q", rel, ref)
 			}
 			inputs = append(inputs, filepath.ToSlash(rel))
 		}
@@ -112,33 +115,51 @@ func nativeInputs(root string) ([]string, error) {
 	return inputs, err
 }
 
-var (
-	includeLine = regexp.MustCompile(`(?m)^\s*#\s*(?:include|include_next|import)\s*[<"]([^>"]+)[>"]`)
-	cgoLine     = regexp.MustCompile(`(?m)^\s*#cgo\b[^:\n]*:(.*)$`)
-)
+// checkoutState lists the root-level directories that hold a checkout's own
+// state rather than source: version control, scratch and local tool state.
+// The repository's .gitignore ignores each of them (TestCheckoutStateIsIgnored).
+// Go can still build a package inside one when an import or an explicit
+// argument names it, so the walk skips them only together with two checks: no
+// package the build graph selects lies inside one (checkDependencyInputs), and
+// no native input names one (checkoutStateReference). .git and .temp are
+// skipped at any depth, as before.
+var checkoutState = []string{".agents", ".claude", ".codex", ".git", ".local", ".planning", ".task-board", ".temp"}
 
-// dotDirReference returns the first include path or #cgo flag in a native
-// input that names a dot-directory, which the walk does not inspect.
-func dotDirReference(path string) (string, error) {
+// inCheckoutState reports whether a module-relative path lies in checkout
+// state.
+func inCheckoutState(rel string) bool {
+	elements := strings.Split(filepath.ToSlash(rel), "/")
+	if slices.Contains(checkoutState, elements[0]) {
+		return true
+	}
+	return slices.Contains(elements, ".git") || slices.Contains(elements, ".temp")
+}
+
+// stateName matches a checkout-state directory name used as a whole name, so
+// ".github" does not match ".git".
+var stateName = func() *regexp.Regexp {
+	names := make([]string, len(checkoutState))
+	for i, name := range checkoutState {
+		names[i] = regexp.QuoteMeta(name)
+	}
+	return regexp.MustCompile(`(?:` + strings.Join(names, "|") + `)(?:[^A-Za-z0-9_-]|$)`)
+}()
+
+// checkoutStateReference returns the first mention of a checkout-state
+// directory in a native input, after joining backslash-continued lines. It
+// matches text rather than parsing includes and flags, so a comment, a
+// quoted or attached flag operand and a line-comment cgo preamble all count.
+// It cannot see a name assembled by macro token pasting, nor include paths
+// from CGO_CFLAGS or pkg-config; the confinement wrapper, not this review
+// tripwire, bounds native startup.
+func checkoutStateReference(path string) (string, error) {
 	source, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	var refs []string
-	for _, m := range includeLine.FindAllSubmatch(source, -1) {
-		refs = append(refs, string(m[1]))
-	}
-	for _, m := range cgoLine.FindAllSubmatch(source, -1) {
-		refs = append(refs, strings.Fields(string(m[1]))...)
-	}
-	for _, ref := range refs {
-		for _, element := range strings.Split(ref, "/") {
-			if strings.HasPrefix(element, ".") && element != "." && element != ".." {
-				return ref, nil
-			}
-		}
-	}
-	return "", nil
+	source = bytes.ReplaceAll(source, []byte("\\\r\n"), nil)
+	source = bytes.ReplaceAll(source, []byte("\\\n"), nil)
+	return string(stateName.Find(source)), nil
 }
 
 func checkNativeInputs(root string, allowlist []string) error {
@@ -200,10 +221,9 @@ func dependencyNativeInputs(p listedPackage) []string {
 	return inputs
 }
 
-// The entire module tree outside dot-directories, including tag-excluded files
-// and subdirectory headers, must match the reviewed native inventory, and no
-// native input may reach into a dot-directory. This does not enforce
-// confinement.
+// The module tree outside checkout state, including tag-excluded files and
+// subdirectory headers, must match the reviewed native inventory, and no native
+// input may name checkout state. This does not enforce confinement.
 func TestNativeInputTripwire(t *testing.T) {
 	if err := checkNativeInputs(moduleRoot(t), reviewedNativeInputs); err != nil {
 		t.Fatal(err)
@@ -211,9 +231,16 @@ func TestNativeInputTripwire(t *testing.T) {
 }
 
 // Default-build non-standard dependencies outside the module must not add native
-// inputs. Other build graphs need their own review; the wrapper enforces startup.
+// inputs, and no package of the module's build graph may lie in checkout state,
+// which the inventory walk skips. Other build graphs need their own review; the
+// wrapper enforces startup.
 func TestDependencyNativeInputTripwire(t *testing.T) {
-	root := moduleRoot(t)
+	if err := checkDependencyInputs(moduleRoot(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkDependencyInputs(root string) error {
 	cmd := exec.Command("go", "list", "-deps", "-test", "-json", "./...")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=")
@@ -221,8 +248,9 @@ func TestDependencyNativeInputTripwire(t *testing.T) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("go list: %v\n%s", err, stderr.Bytes())
+		return fmt.Errorf("go list: %v\n%s", err, stderr.Bytes())
 	}
+	var errs []error
 	moduleSeen := false
 	dec := json.NewDecoder(bytes.NewReader(out))
 	for {
@@ -230,30 +258,33 @@ func TestDependencyNativeInputTripwire(t *testing.T) {
 		if err := dec.Decode(&p); errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
-			t.Fatal(err)
+			return err
 		}
 		if p.Standard {
 			continue
 		}
 		if p.Dir == "" {
-			t.Fatalf("go list returned no directory for %q", p.ImportPath)
+			return fmt.Errorf("go list returned no directory for %q", p.ImportPath)
 		}
 		rel, err := filepath.Rel(root, p.Dir)
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
 		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			moduleSeen = true
+			if inCheckoutState(rel) {
+				errs = append(errs, fmt.Errorf("build graph selects %s from checkout state %s", p.ImportPath, filepath.ToSlash(rel)))
+			}
 			continue
 		}
-		inputs := dependencyNativeInputs(p)
-		if len(inputs) != 0 {
-			t.Errorf("unreviewed external native dependency %s: %v", p.ImportPath, inputs)
+		if inputs := dependencyNativeInputs(p); len(inputs) != 0 {
+			errs = append(errs, fmt.Errorf("unreviewed external native dependency %s: %v", p.ImportPath, inputs))
 		}
 	}
 	if !moduleSeen {
-		t.Fatal("go list returned no module packages; dependency inventory is incomplete")
+		errs = append(errs, errors.New("go list returned no module packages; dependency inventory is incomplete"))
 	}
+	return errors.Join(errs...)
 }
 
 // Scan-only controls plant native inputs without compiling or executing them.
@@ -299,13 +330,13 @@ func TestNativeInputTripwireControls(t *testing.T) {
 	}
 }
 
-// A checkout's local tool state in dot-directories (a board's C probe, a
-// legacy install's symlinks) does not trip the scan, which is what a main
-// checkout holds. Everything else still does: a symlink or an unlisted native
-// file outside them, and a dot-named file, which is not a directory. A native
-// input that includes a header from a dot-directory, or points a #cgo flag at
-// one, is refused even when reviewed; ordinary includes pass.
-func TestNativeInputTripwireDotDirectories(t *testing.T) {
+// A checkout's local tool state in the named checkout-state directories (a
+// board's C probe, a legacy install's symlinks) does not trip the scan, which
+// is what a main checkout holds. Everything else still does: a symlink or an
+// unlisted native file elsewhere, a dot-named file, and native files in any
+// other dot-directory, nested or at the root, including testdata. A dot-named
+// module root is scanned. An unreadable input reports its read error only.
+func TestNativeInputTripwireCheckoutState(t *testing.T) {
 	root := t.TempDir()
 	write := func(name, source string) {
 		t.Helper()
@@ -326,13 +357,16 @@ func TestNativeInputTripwireDotDirectories(t *testing.T) {
 	write("ordinary.go", "package ordinary\n")
 	write(".task-board/.resources/T/probe.c", "int probe;")
 	write(".agents/.skills/pdf/SKILL.md", "skill")
-	if err := os.MkdirAll(filepath.Join(root, ".agents/skills"), 0o700); err != nil {
-		t.Fatal(err)
+	write(".agents/.configs/settings.json", "{}")
+	for _, l := range [][2]string{{".agents/.skills/pdf", ".agents/skills/pdf"}, {".agents/.configs/settings.json", ".claude/settings.json"}} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, l[1])), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(root, l[0]), filepath.Join(root, l[1])); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.Symlink(filepath.Join(root, ".agents/.skills/pdf"), filepath.Join(root, ".agents/skills/pdf")); err != nil {
-		t.Fatal(err)
-	}
-	write("pkg/ok.c", "#include \"ok.h\"\n#include <Security/Security.h>\n#include \"../include/shared.h\"\n")
+	write("pkg/ok.c", "// see .github/workflows\n#include \"ok.h\"\n#include <Security/Security.h>\n#include \"../include/shared.h\"\n")
 	if err := checkNativeInputs(root, []string{"pkg/ok.c"}); err != nil {
 		t.Fatalf("local tool state control: %v", err)
 	}
@@ -345,7 +379,7 @@ func TestNativeInputTripwireDotDirectories(t *testing.T) {
 	}
 	remove("pkg/linked.go")
 
-	for _, name := range []string{"pkg/unlisted.h", "pkg/.hidden.c"} {
+	for _, name := range []string{"pkg/unlisted.h", "pkg/.hidden.c", ".native/native.c", "pkg/.agents/nested.c", "testdata/.fixtures/native.c"} {
 		write(name, "int x;")
 		if err := checkNativeInputs(root, []string{"pkg/ok.c"}); err == nil || !strings.Contains(err.Error(), name) {
 			t.Fatalf("%s: %v", name, err)
@@ -353,21 +387,18 @@ func TestNativeInputTripwireDotDirectories(t *testing.T) {
 		remove(name)
 	}
 
-	for _, c := range []struct{ name, source, ref string }{
-		{"pkg/inc.c", "#include \"../.agents/evil.h\"\n", "../.agents/evil.h"},
-		{"pkg/next.h", "#  include_next <.inc/evil.h>\n", ".inc/evil.h"},
-		{"pkg/cgo.go", "package pkg\n\n/*\n#cgo CFLAGS: -Wno-deprecated-declarations -I${SRCDIR}/.inc\n*/\nimport \"C\"\n", "-I${SRCDIR}/.inc"},
-	} {
-		write(c.name, c.source)
-		err := checkNativeInputs(root, []string{"pkg/ok.c", c.name})
-		if err == nil || !strings.Contains(err.Error(), "dot-directory") || !strings.Contains(err.Error(), c.ref) {
-			t.Fatalf("%s: %v", c.name, err)
-		}
-		remove(c.name)
+	write("pkg/unreadable.c", "int x;")
+	if err := os.Chmod(filepath.Join(root, "pkg/unreadable.c"), 0); err != nil {
+		t.Fatal(err)
 	}
-	if err := checkNativeInputs(root, []string{"pkg/ok.c"}); err != nil {
-		t.Fatalf("control after removals: %v", err)
+	err := checkNativeInputs(root, []string{"pkg/ok.c", "pkg/unreadable.c"})
+	if !errors.Is(err, os.ErrPermission) || strings.Contains(err.Error(), "checkout state") {
+		t.Fatalf("unreadable input: %v", err)
 	}
+	if err := os.Chmod(filepath.Join(root, "pkg/unreadable.c"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remove("pkg/unreadable.c")
 
 	dotRoot := filepath.Join(t.TempDir(), ".checkout")
 	if err := os.MkdirAll(dotRoot, 0o700); err != nil {
@@ -378,6 +409,103 @@ func TestNativeInputTripwireDotDirectories(t *testing.T) {
 	}
 	if err := checkNativeInputs(dotRoot, nil); err == nil || !strings.Contains(err.Error(), "unlisted.c") {
 		t.Fatalf("a dot-named module root was skipped: %v", err)
+	}
+}
+
+// A native input that names checkout state is refused even when reviewed, in
+// the forms PR82 review r1 found missed: line-comment cgo preambles, a
+// backslash-continued include, attached and quoted flag operands, and
+// ${SRCDIR} paths. A name used as a longer word (.github, .templates) and
+// ordinary includes pass (controls). Limit: names assembled by macro token
+// pasting, CGO_CFLAGS and pkg-config are not visible to a text scan.
+func TestNativeInputTripwireStateReferences(t *testing.T) {
+	refused := []struct{ name, source, ref string }{
+		{"pkg/inc.c", "#include \"../.agents/evil.h\"\n", ".agents/"},
+		{"pkg/next.h", "#  include_next <.task-board/evil.h>\n", ".task-board/"},
+		{"pkg/line.go", "package pkg\n\n// #include \".claude/x.h\"\nimport \"C\"\n", ".claude/"},
+		{"pkg/cont.c", "#include \".co\\\ndex/x.h\"\n", ".codex/"},
+		{"pkg/joined.go", "package pkg\n\n// #cgo CFLAGS: -I.temp\nimport \"C\"\n", ".temp\n"},
+		{"pkg/quoted.go", "package pkg\n\n/*\n#cgo CFLAGS: -I \".local\"\n*/\nimport \"C\"\n", ".local\""},
+		{"pkg/srcdir.go", "package pkg\n\n/*\n#cgo CFLAGS: -iquote${SRCDIR}/.planning\n*/\nimport \"C\"\n", ".planning\n"},
+		{"pkg/git.S", "#include \"../../.git/x.h\"\n", ".git/"},
+	}
+	for _, c := range refused {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, c.name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(c.source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := checkNativeInputs(root, []string{c.name})
+			if err == nil || !strings.Contains(err.Error(), "names checkout state") || !strings.Contains(err.Error(), strconv.Quote(c.ref)) {
+				t.Fatalf("not refused: %v", err)
+			}
+		})
+	}
+	root := t.TempDir()
+	ok := "// see .github and .templates/x\n#include \"ok.h\"\n#include <Security/Security.h>\n#include \"../include/shared.h\"\n"
+	if err := os.WriteFile(filepath.Join(root, "ok.c"), []byte(ok), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNativeInputs(root, []string{"ok.c"}); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+}
+
+// A package of the module's build graph inside checkout state is refused, as
+// PR82 review r1 showed Go builds an imported one; without that import the
+// same module passes (control). Limit: a package built only by an explicit
+// command-line argument is outside the build graph this checks.
+func TestDependencyGraphCheckoutState(t *testing.T) {
+	module := func(t *testing.T, main string) string {
+		t.Helper()
+		root := t.TempDir()
+		files := map[string]string{
+			"go.mod":         "module example.com/fixture\n\ngo 1.25\n",
+			"main.go":        main,
+			".agents/x/x.go": "package x\n\nconst X = 1\n",
+			"lib/lib.go":     "package lib\n\nconst Y = 2\n",
+		}
+		for name, source := range files {
+			path := filepath.Join(root, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return root
+	}
+	hidden := module(t, "package main\n\nimport (\n\t_ \"example.com/fixture/.agents/x\"\n\t_ \"example.com/fixture/lib\"\n)\n\nfunc main() {}\n")
+	if err := checkDependencyInputs(hidden); err == nil || !strings.Contains(err.Error(), "from checkout state .agents/x") {
+		t.Fatalf("hidden package not refused: %v", err)
+	}
+	plain := module(t, "package main\n\nimport _ \"example.com/fixture/lib\"\n\nfunc main() {}\n")
+	if err := checkDependencyInputs(plain); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+}
+
+// Every checkout-state directory except .git is ignored by the repository's
+// .gitignore, so the list names only local state, never source; removing an
+// ignore rule fails here until the list follows.
+func TestCheckoutStateIsIgnored(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(moduleRoot(t), ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := strings.Split(string(raw), "\n")
+	for _, name := range checkoutState {
+		if name == ".git" {
+			continue
+		}
+		if !slices.Contains(rules, "/"+name+"/") && !slices.Contains(rules, name+"/") {
+			t.Errorf("%s is not an ignored directory in .gitignore", name)
+		}
 	}
 }
 
