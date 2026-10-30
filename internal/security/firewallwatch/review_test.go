@@ -398,7 +398,7 @@ func TestReviewChildCommands(t *testing.T) {
 		cmd  *exec.Cmd
 		argv []string
 	}{
-		{codesignCommand(ctx, path), []string{"/usr/bin/codesign", "-dv", "--verbose=3", path}},
+		{codesignCommand(ctx, path), []string{"/usr/bin/codesign", "-dv", "--verbose=2", path}},
 		{collectorCommand(ctx, "log"), []string{"/usr/bin/log", "stream", "--style", "ndjson", "--info", "--predicate", `subsystem == "com.apple.ALF.ApplicationFirewall"`}},
 		{collectorCommand(ctx, "nettop"), []string{"/usr/bin/nettop", "-L", "1", "-n", "-x", "-J", "bytes_out"}},
 	} {

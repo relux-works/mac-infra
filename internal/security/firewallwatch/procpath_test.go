@@ -176,8 +176,8 @@ func TestSampleNettopAttributesImages(t *testing.T) {
 	}
 }
 
-// signerFixture is a store whose inspector reports signer and hash for any
-// path, counting its runs, and a real file for the cache's identity.
+// signerFixture is a store whose signature inspector reports signer and hash
+// for any path, counting its runs, and a real file for the cache's identity.
 func signerFixture(t *testing.T, signer, hash string) (*Store, string, *int) {
 	t.Helper()
 	s, _ := journalStore(t)
@@ -186,17 +186,17 @@ func signerFixture(t *testing.T, signer, hash string) (*Store, string, *int) {
 		t.Fatal(e)
 	}
 	runs := 0
-	s.inspectSigner = func(context.Context, string) (codeFacts, error) {
+	s.inspectImage = func(context.Context, string) (codeFacts, error) {
 		runs++
 		return codeFacts{Signer: signer, CDHash: hash}, nil
 	}
 	return s, path, &runs
 }
 
-// A running process gets its file's signer only when the file's hash is the
-// image hash the kernel reported; another hash, no reported hash, or a file
-// with no hash gives "unknown". The plain lookup (other sources) is
-// unchanged (control).
+// A running process gets its file's signer only when the file's signature
+// hash is the image hash the kernel reported; another hash, no reported hash,
+// or a file with no hash gives "unknown". A plain lookup of the same file
+// reuses the signature's facts (control).
 func TestRunningSignerRequiresImageHash(t *testing.T) {
 	s, path, _ := signerFixture(t, "Apple", hashA)
 	ctx := context.Background()
@@ -222,25 +222,48 @@ func TestRunningSignerRequiresImageHash(t *testing.T) {
 	}
 }
 
-// A cached entry recorded before hashes were kept is inspected again for a
-// running process, once; a plain lookup still uses it as before (control).
-func TestRunningSignerReinspectsEntryWithoutHash(t *testing.T) {
-	s, path, runs := signerFixture(t, "Apple", hashA)
+// An entry from codesign's text, whose signer the file's owner can forge
+// through the path, never attests a running process: the signature is
+// inspected once and its signer wins, and later lookups of either kind reuse
+// it (PR81 review r2). The text entry is still used for a plain lookup
+// (control).
+func TestRunningSignerIgnoresTextEntries(t *testing.T) {
+	s, path, runs := signerFixture(t, "no designated requirement", hashA)
+	texts := 0
+	s.inspectSigner = func(context.Context, string) (codeFacts, error) {
+		texts++
+		return codeFacts{Signer: "Apple", CDHash: hashA}, nil
+	}
+	ctx := context.Background()
+	if got := s.signer(ctx, path); got != "Apple" || texts != 1 {
+		t.Fatalf("plain lookup: %q after %d text runs", got, texts)
+	}
+	for _, v := range s.State.Signers {
+		if v.CDHash != "" {
+			t.Fatalf("a text entry recorded hash %q", v.CDHash)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if got := s.runningSigner(ctx, path, hashA); got != "no designated requirement" || *runs != 1 {
+			t.Fatalf("running lookup %d: %q after %d signature runs", i, got, *runs)
+		}
+	}
+	if got := s.signer(ctx, path); got != "no designated requirement" || texts != 1 {
+		t.Fatalf("plain lookup after the signature: %q after %d text runs", got, texts)
+	}
+}
+
+// Replacing a text entry with the signature's facts journals at once even
+// when only the hash changes (PR81 review r2's surviving mutant).
+func TestSignatureHashChangeIsUrgent(t *testing.T) {
+	s, path, _ := signerFixture(t, "Apple", hashA)
+	s.inspectSigner = signerOnly(func(context.Context, string) (string, error) { return "Apple", nil })
 	ctx := context.Background()
 	s.signer(ctx, path)
-	for k, v := range s.State.Signers {
-		v.CDHash = ""
-		s.State.Signers[k] = v
-	}
-	s.signer(ctx, path)
-	if *runs != 1 {
-		t.Fatalf("plain lookup re-inspected: %d runs", *runs)
-	}
-	if got := s.runningSigner(ctx, path, hashA); got != "Apple" || *runs != 2 {
-		t.Fatalf("running lookup: %q after %d runs", got, *runs)
-	}
-	if got := s.runningSigner(ctx, path, hashA); got != "Apple" || *runs != 2 {
-		t.Fatalf("hash not cached: %q after %d runs", got, *runs)
+	s.delta = journalDelta{}
+	s.runningSigner(ctx, path, hashA)
+	if !s.delta.urgent {
+		t.Fatal("a hash-only change was not due at once")
 	}
 }
 
@@ -258,19 +281,6 @@ func TestCollectAttestsNettopSigner(t *testing.T) {
 		e := s.State.Events[len(s.State.Events)-1]
 		if e.Signer != c.want || e.Path != path {
 			t.Fatalf("image %s: signer %q path %q", c.running, e.Signer, e.Path)
-		}
-	}
-}
-
-// codesign's CDHash line is taken only as 40 lowercase hex digits; anything
-// else, or no line, is noCDHash.
-func TestParseCDHash(t *testing.T) {
-	if got := ParseCDHash("Executable=/bin/ls\nCandidateCDHash sha256=" + hashA + "\nCDHash=" + hashA + "\n"); got != hashA {
-		t.Fatalf("valid: %q", got)
-	}
-	for _, out := range []string{"", "CDHash=" + strings.ToUpper(hashA), "CDHash=" + hashA[:39], "CDHash=" + hashA + "00", " CDHash=" + hashA, "code object is not signed at all"} {
-		if got := ParseCDHash(out); got != noCDHash {
-			t.Fatalf("%q: %q", out, got)
 		}
 	}
 }

@@ -73,35 +73,27 @@ func collectorCommand(ctx context.Context, name string) *exec.Cmd {
 	return cmd
 }
 
-// ParseCDHash returns the code directory hash codesign printed (its CDHash=
-// line at --verbose=3), or noCDHash when it printed none or an unexpected one.
-func ParseCDHash(output string) string {
-	for _, line := range strings.Split(output, "\n") {
-		if v, ok := strings.CutPrefix(line, "CDHash="); ok && validCDHash(v) {
-			return v
-		}
-	}
-	return noCDHash
-}
-
-// noCDHash records an inspection that found no code directory hash. An entry
-// whose CDHash is "" was recorded before hashes were kept.
+// noCDHash records a signature inspection that found no code directory hash.
+// An entry whose CDHash is "" holds no signature facts: it came from the
+// codesign text, or predates hashes.
 const noCDHash = "none"
 
-// codeFacts is what one codesign run reports about a file.
+// codeFacts is what one inspection reports about a file.
 type codeFacts struct {
 	Signer string
 	CDHash string
 }
 
 func codesignCommand(ctx context.Context, path string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "-dv", "--verbose=3", path)
+	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "-dv", "--verbose=2", path)
 	cmd.Env = append([]string{}, childEnv...)
 	return cmd
 }
 
-// inspectSigner reads the signer and the code directory hash from a single
-// codesign run, so both describe the same file.
+// inspectSigner reads a signer from codesign's text output. That text
+// carries the path and the signing identifier, which the file's owner
+// chooses, so it never yields a code directory hash and never attests a
+// running process (PR81 review r2).
 func inspectSigner(ctx context.Context, path string) (codeFacts, error) {
 	cmd := codesignCommand(ctx, path)
 	output := &cappedBuffer{limit: 64 * 1024}
@@ -112,16 +104,24 @@ func inspectSigner(ctx context.Context, path string) (codeFacts, error) {
 	if v != "unknown" {
 		err = nil
 	}
-	return codeFacts{Signer: v, CDHash: ParseCDHash(output.String())}, err
+	return codeFacts{Signer: v}, err
 }
+
+// inspectImage reads a file's signer and code directory hash from its
+// signature (staticCodeFacts), not from text.
+func inspectImage(_ context.Context, path string) (codeFacts, error) {
+	return staticCodeFacts(path)
+}
+
 func (s *Store) signer(ctx context.Context, path string) string {
 	return s.inspectCode(ctx, path, false).Signer
 }
 
 // runningSigner is the signer of a running process whose image hash the
-// kernel reported: the file at path lends its signer only when its own code
-// directory hash is that one, so a file replaced after the process started
-// does not attest the process (PR81 review r1).
+// kernel reported. The file at path lends its signature's signer only when
+// that signature's code directory hash is the running one, so a file
+// replaced after the process started does not attest it (PR81 review r1),
+// and no text the file's owner chooses enters the decision (review r2).
 func (s *Store) runningSigner(ctx context.Context, path, running string) string {
 	f := s.inspectCode(ctx, path, true)
 	if !validCDHash(running) || f.CDHash != running {
@@ -130,10 +130,15 @@ func (s *Store) runningSigner(ctx context.Context, path, running string) string 
 	return f.Signer
 }
 
-// inspectCode returns the cached or freshly inspected facts for path. When
-// needHash, an entry recorded before hashes were kept is inspected again.
-func (s *Store) inspectCode(ctx context.Context, path string, needHash bool) codeFacts {
-	unknown := codeFacts{Signer: "unknown", CDHash: noCDHash}
+// inspectCode returns the cached or freshly inspected facts for path. With
+// fromSignature, the facts come from the file's signature and an entry
+// without signature facts is inspected again; otherwise from codesign's text,
+// or from a cached entry of either kind.
+func (s *Store) inspectCode(ctx context.Context, path string, fromSignature bool) codeFacts {
+	unknown := codeFacts{Signer: "unknown"}
+	if fromSignature {
+		unknown.CDHash = noCDHash
+	}
 	if !filepath.IsAbs(path) || len(path) > LineLimit {
 		return unknown
 	}
@@ -155,7 +160,7 @@ func (s *Store) inspectCode(ctx context.Context, path string, needHash bool) cod
 	now := s.now()
 	// A bundle directory identity cannot attest its inner code. Re-inspect successes;
 	// failed inspections still use the bounded failure TTL.
-	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) && (!needHash || v.Failed || v.CDHash != "") {
+	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) && (!fromSignature || v.Failed || v.CDHash != "") {
 		v.LastSeen = now
 		s.State.Signers[cacheKey] = v
 		s.signerChanged(cacheKey)
@@ -167,11 +172,20 @@ func (s *Store) inspectCode(ctx context.Context, path string, needHash bool) cod
 	if inspect == nil {
 		inspect = inspectSigner
 	}
+	if fromSignature {
+		inspect = s.inspectImage
+		if inspect == nil {
+			inspect = inspectImage
+		}
+	}
 	f, err := inspect(childCtx, path)
 	if err != nil {
 		f = unknown
 	}
-	if !validCDHash(f.CDHash) {
+	switch {
+	case !fromSignature:
+		f.CDHash = ""
+	case !validCDHash(f.CDHash):
 		f.CDHash = noCDHash
 	}
 	f.Signer = Sanitize(f.Signer)

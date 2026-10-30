@@ -33,10 +33,11 @@ var lookupProcessImage = resolveProcessImage
 
 // confirmImage returns pid's image when the process is the one nettop printed:
 // its kernel name matches, and its name and start time are the same before
-// and after the image lookup, so a pid reused or re-executed under another
-// name in between is not attributed. A process that exec'd an image under the
-// same name before the first read cannot be told apart. The zero value means
-// not confirmed.
+// and after the image lookup, so a pid reused, or re-executed under another
+// name, in between is not attributed. An exec under the same name keeps the
+// pid, the name and the start time, so one at any time between nettop's
+// sample and the second read cannot be told apart; the path and hash reads
+// are not one snapshot either. The zero value means not confirmed.
 func confirmImage(pid int, name string, info func(int) (procInfo, bool), image func(int) (processImage, bool)) processImage {
 	before, ok := info(pid)
 	if !ok || before.PID != pid || !nameMatches(before.Comm, name) {

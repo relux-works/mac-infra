@@ -29,9 +29,9 @@ type Entry struct {
 }
 type SignerEntry struct {
 	Value string `json:"value"`
-	// CDHash is the file's code directory hash from the same inspection,
-	// noCDHash when codesign printed none, "" when recorded before hashes
-	// were kept.
+	// CDHash is the code directory hash read from the file's signature,
+	// noCDHash when the signature has none, "" when the entry holds no
+	// signature facts (codesign text, or recorded before hashes were kept).
 	CDHash    string    `json:"cdhash,omitempty"`
 	Identity  string    `json:"identity"`
 	Failed    bool      `json:"failed"`
@@ -141,6 +141,7 @@ type Store struct {
 	dayHashes     map[string][32]byte
 	atomicWrite   func(string, []byte) error
 	inspectSigner func(context.Context, string) (codeFacts, error)
+	inspectImage  func(context.Context, string) (codeFacts, error)
 	clock         func() time.Time
 	// refs are the retention references of the observations since the last
 	// backward wall step. The expiry they decided is applied lazily: by the

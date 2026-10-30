@@ -601,15 +601,30 @@ still be the one nettop printed:
   name is exactly 15 bytes long;
 - its name and start time are the same before and after the lookup.
 
-Otherwise the row has no path. These checks cannot tell apart a process that
-exec'd another image under the same name before the lookup.
+Otherwise the row has no path. The checks cannot tell apart a process that
+exec'd another image under the same name, at any time between nettop's sample
+and the end of the lookup: an exec keeps the pid, the name and the start time.
+The path and the image hash are also separate reads, not one snapshot.
 
 A resolved path:
-- lends its file's signer to the row only when the file's code directory hash,
-  read by the same `codesign` run, equals the running image's hash. A file
-  replaced after the process started, an image the kernel holds no hash for, or
-  a file without one gives the signer `unknown`. Cached signer results recorded
-  before hashes were kept are inspected once more for such rows.
+- lends its file's signer to the row only when the file's signature carries the
+  running image's code directory hash. Both the signer and the hash are read
+  from the signature through the Security framework, never from `codesign`
+  text, which carries the path and other names the file's owner chooses:
+  - `Apple` is code that satisfies the requirement `anchor apple`;
+  - `App Store: <team>` satisfies the Mac App Store leaf requirement, with the
+    team from the signature;
+  - `Developer ID: <name>` satisfies the Developer ID requirement, with the name
+    from the validated leaf certificate;
+  - otherwise `ad-hoc`, `no designated requirement` or `unsigned`.
+  The requirement checks verify the signature over the code directory and its
+  certificate chain, without network access and without hashing the executable
+  again (the kernel holds the running image to that code directory). A file
+  replaced after the process started, an image the kernel holds no hash for, a
+  file without one, or another slice than the running one (a Rosetta process)
+  gives the signer `unknown`. A cached signer result without signature facts is
+  inspected again for such rows. Other sources still read the signer from
+  `codesign` text.
 - joins the row's dedup identity, so two binaries behind one process name are
   two items;
 - is stored on the event as `path`: absolute, nettop events only. It is private
