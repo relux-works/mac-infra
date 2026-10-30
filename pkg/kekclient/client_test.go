@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -26,6 +27,7 @@ const (
 	fakeAnswerEnv = "KEKCLIENT_FAKE_ANSWER"
 	fakeReadyEnv  = "KEKCLIENT_FAKE_READY"
 	fakeLingerEnv = "KEKCLIENT_FAKE_LINGER"
+	fakeChildEnv  = "KEKCLIENT_FAKE_CHILD"
 )
 
 func TestMain(m *testing.M) {
@@ -48,11 +50,17 @@ func fakeBroker(args []string) int {
 	}
 	defer l.Close()
 	if linger := os.Getenv(fakeLingerEnv); linger != "" {
-		// A descendant that inherits stdout and stderr and outlives us
-		// unless its process group is killed.
+		// A descendant that stays in our process group and outlives us
+		// unless the group is killed; it inherits stdout and stderr except
+		// in success-closed. Its pid goes to fakeChildEnv for the test.
 		child := exec.Command("/bin/sleep", "30")
-		child.Stdout, child.Stderr = os.Stdout, os.Stderr
-		child.Start()
+		if linger != "success-closed" {
+			child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		}
+		if child.Start() != nil {
+			return 1
+		}
+		os.WriteFile(os.Getenv(fakeChildEnv), []byte(fmt.Sprint(child.Process.Pid)), 0o600)
 		if linger == "silent" {
 			time.Sleep(30 * time.Second)
 			return 0
@@ -224,25 +232,57 @@ func TestUnwrapTrustsTheEnvelopeItIsGiven(t *testing.T) {
 	}
 }
 
-// A broker whose descendant keeps stdout and stderr open does not hold
-// Unwrap past its bound, after a protocol error or at the deadline: the
-// broker's process group is killed and the pipes are given up after
-// waitDelay. The first case is the reviewer's witness (7.3 s against a 5 s
-// timeout before the fix).
-func TestUnwrapIsBoundedWhenADescendantHoldsThePipes(t *testing.T) {
+// A broker that leaves a descendant in its process group does not keep it
+// alive past Unwrap, however the exchange ends: after a correct answer
+// (the KEK is returned, the descendant's pipes closed or inherited), after
+// a protocol error, and at the deadline. Unwrap also returns within its
+// bound. The descendant is a recorded /bin/sleep; each case checks that
+// exactly that pid is gone afterwards, not only the elapsed time. The
+// bad-ready case is review r1's timeout witness; the success cases are
+// review r2's.
+func TestUnwrapLeavesNoDescendantBehind(t *testing.T) {
 	sealed, _ := testEnvelope(t)
-	for _, mode := range []string{"bad-ready", "silent"} {
-		t.Run(mode, func(t *testing.T) {
-			opts := fakeOptions(t, "echo-kek", "not a ready line")
+	cases := []struct {
+		mode, ready string
+		wantKEK     bool
+	}{
+		{"success-closed", "", true},
+		{"success-inherit", "", true},
+		{"bad-ready", "not a ready line", false},
+		{"silent", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			opts := fakeOptions(t, "echo-kek", tc.ready)
 			opts.Timeout = 2 * time.Second
-			t.Setenv(fakeLingerEnv, mode)
+			pidFile := filepath.Join(t.TempDir(), "child")
+			t.Setenv(fakeLingerEnv, tc.mode)
+			t.Setenv(fakeChildEnv, pidFile)
 			start := time.Now()
 			kek, err := Unwrap(context.Background(), opts, sealed)
-			if kek != nil || err == nil {
+			elapsed := time.Since(start)
+			if tc.wantKEK != (err == nil && bytes.Equal(kek, testKEK())) {
 				t.Fatalf("kek=%x err=%v", kek, err)
 			}
-			if elapsed := time.Since(start); elapsed > opts.Timeout+waitDelay+time.Second {
-				t.Fatalf("returned after %v (timeout %v, wait delay %v)", elapsed, opts.Timeout, waitDelay)
+			if elapsed > opts.Timeout+waitDelay+exitGrace {
+				t.Fatalf("returned after %v", elapsed)
+			}
+			data, err := os.ReadFile(pidFile)
+			if err != nil {
+				t.Fatalf("the fake broker recorded no descendant: %v", err)
+			}
+			var pid int
+			fmt.Sscan(string(data), &pid)
+			if pid <= 1 {
+				t.Fatalf("bad descendant pid %q", data)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for syscall.Kill(pid, 0) == nil {
+				if time.Now().After(deadline) {
+					syscall.Kill(pid, syscall.SIGKILL)
+					t.Fatalf("descendant %d outlived Unwrap (%v)", pid, elapsed)
+				}
+				time.Sleep(20 * time.Millisecond)
 			}
 		})
 	}

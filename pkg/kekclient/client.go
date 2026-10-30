@@ -22,6 +22,9 @@ import (
 // after it was stopped or exited.
 const waitDelay = 2 * time.Second
 
+// exitGrace is how long a broker that answered gets to exit by itself.
+const exitGrace = time.Second
+
 // ErrProtocol reports a broker answer outside the contract. The answer is
 // not used.
 var ErrProtocol = errors.New("mac-keyvault-kek answered outside contract kek-1")
@@ -110,9 +113,11 @@ func exchange(ctx context.Context, opts Options, op string, env Envelope, envelo
 
 	cmd := exec.CommandContext(ctx, opts.Broker, op, "--address", env.Address, "--socket", sock)
 	cmd.Stdin = nil
-	// The broker runs in its own process group, and cancellation kills the
-	// group, so a descendant cannot outlive the exchange; WaitDelay bounds
-	// the wait for pipes a descendant might still hold.
+	// The broker runs in its own process group. Cancellation kills the
+	// group, and after every exchange the group is killed before the
+	// broker is reaped, so a descendant that stays in the group does not
+	// outlive the exchange; WaitDelay bounds the wait for pipes. A process
+	// that leaves the group on purpose is not contained.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = waitDelay
@@ -130,7 +135,16 @@ func exchange(ctx context.Context, opts Options, op string, env Envelope, envelo
 		// A broker that broke the contract or has not answered is stopped,
 		// not waited for.
 		cancel()
+	} else {
+		// A broker that answered exits by itself; give it exitGrace to do
+		// so, so its own exit status is kept.
+		awaitExit(cmd.Process.Pid, exitGrace)
 	}
+	// Until Wait reaps the broker its pid, which is also its process
+	// group's id, cannot be reused, so killing the group here reaches only
+	// the broker's own descendants, whichever way the exchange ended. A
+	// broker that has exited is a zombie and keeps its exit status.
+	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	waitErr := cmd.Wait()
 	if err != nil {
 		if stderr.Len() > 0 {

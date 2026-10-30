@@ -549,6 +549,25 @@ func TestUnwrapAnswersNothingWhenTheAuditSyncFails(t *testing.T) {
 	}
 }
 
+// The default sync hook really syncs the file it is given: it succeeds on
+// an open file and reports the error of a closed one (os.ErrClosed), which a
+// hook that skipped the sync would not. With the injected-failure test above
+// this covers both the default durability call and its refusal path.
+func TestDefaultSyncFileSyncs(t *testing.T) {
+	f, err := os.CreateTemp(privateTemp(t), "sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("entry\n")
+	if err := syncFile(f); err != nil {
+		t.Fatalf("sync of an open file: %v", err)
+	}
+	f.Close()
+	if err := syncFile(f); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("sync of a closed file: %v", err)
+	}
+}
+
 // Verify applies Append's framing: a log whose last entry lacks its newline,
 // or ends in a truncated entry, does not verify, although its JSON may be
 // complete; a log that is not a private regular file does not verify either.
