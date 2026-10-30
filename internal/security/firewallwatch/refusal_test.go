@@ -14,7 +14,7 @@ func fixedClock(t time.Time) func() time.Time { return func() time.Time { return
 
 // refuseAndEnd makes the run's next heartbeat refused, as a stall whose times
 // run backward by wall time would be, and ends the run the way Run does
-// (finishRun: the final save, the marker, the flag writer's drain). It
+// (finishRun: the final save, the flag writer's drain, the marker). It
 // returns the run's error.
 func refuseAndEnd(t *testing.T, s *Store, at time.Time) error {
 	t.Helper()

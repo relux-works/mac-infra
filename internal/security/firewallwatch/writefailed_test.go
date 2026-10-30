@@ -138,12 +138,14 @@ func TestOnlyRefusedOrFailedStateWritesLeaveAMarker(t *testing.T) {
 // valid date; anything else is recorded as unknown, as a malformed marker is.
 // Refusal kinds keep their rule (a short check name).
 func TestWriteFailedMarkerAdmitsOnlyStateFileNames(t *testing.T) {
-	valid := []string{"state.json", journalFile, "new-events.flag", "events-2026-10-30.jsonl"}
+	valid := []string{"state.json", journalFile, "new-events.flag", "events-2026-10-30.jsonl", "events-2024-02-29.jsonl"}
 	invalid := []string{"", "../state.json", "/tmp/state.json", "watch.lock", refusalMarker, "events-2026-10-30.jsonl.bak", "events-../../x.jsonl", "events-" + strings.Repeat("9", 40) + ".jsonl", "/Applications/Secret.app",
 		// Short names the day-file pattern would match but saveProjections
 		// never creates: no date, free text, dots, an impossible date, a
 		// one-digit month, a control character.
-		"events-.jsonl", "events-secret.jsonl", "events-..jsonl", "events-2026-99-99.jsonl", "events-2026-1-30.jsonl", "events-2026-10-30\n.jsonl"}
+		"events-.jsonl", "events-secret.jsonl", "events-..jsonl", "events-2026-99-99.jsonl", "events-2026-1-30.jsonl", "events-2026-10-30\n.jsonl",
+		// A valid date without the prefix, and a day that does not exist.
+		"2026-10-30.jsonl", "2024-02-29.jsonl", "events-2026-02-29.jsonl"}
 	c := testConfig(t)
 	s, e := OpenStore(c)
 	if e != nil {
@@ -208,11 +210,13 @@ func TestFailedWritesNameTheirFile(t *testing.T) {
 	}
 }
 
-// A flag write that fails only during the shutdown drain is named too: the
-// marker comes after the drain. The writer's write is held until after
-// finishRun has saved and posted, so its failure surfaces only at the stop.
-// Positive control: the same shutdown with a write that succeeds leaves no
-// marker.
+// A flag write that fails while finishRun shuts down is named too: the
+// marker comes after the drain. The writer's write is held and released 50 ms
+// later, so the failure surfaces during finishRun (usually at the drain; if
+// earlier, through the save's post); either way the run's error and the
+// marker name it. Positive control: the same shutdown with a write that
+// succeeds leaves no marker. Limit: the timing is not forced; the order
+// itself is pinned by control w4 (marker before drain), which fails here.
 func TestDrainFailureLeavesTheMarker(t *testing.T) {
 	for _, fail := range []bool{true, false} {
 		c := testConfig(t)

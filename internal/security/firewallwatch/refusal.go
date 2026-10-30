@@ -67,6 +67,9 @@ func stateFileName(name string) bool {
 		return true
 	}
 	day, ok := strings.CutPrefix(name, "events-")
+	if !ok {
+		return false
+	}
 	if day, ok = strings.CutSuffix(day, ".jsonl"); !ok {
 		return false
 	}
