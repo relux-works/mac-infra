@@ -436,8 +436,17 @@ the per-flow log of the netfilter content-filter system extension
 
 `max_entries` independently caps dedup entries, signature cache entries, and
 retained events in total across all daily files. Dedup/events also expire by
-`retention_days`. Oldest last_seen dedup entries are evicted first. Evicted
-items can become new again; evicted executable cache entries can be inspected
+`retention_days`. Dedup and signature cache entries over the cap are evicted
+in a fixed order: earliest wall-clock `last_seen` first, equal times by key,
+so the same state always loses the same entry. It differs from the earlier
+comparison, which compared two in-run readings by the monotonic clock, only
+for two in-run readings whose monotonic and wall-clock order differ: after the
+wall clock was set back during a run, or when one clock stood still while the
+other moved. Mixed with times loaded from `state.json` such pairs could make
+the earlier order cyclic, with a victim that depended on map iteration. A
+refresh never moves an entry's `last_seen` back in wall time (see Clock
+steps), so it cannot change the eviction order a crash would lose. Events are
+evicted as before, oldest timestamp first. Evicted items can become new again; evicted executable cache entries can be inspected
 again. Signature inspection uses `/usr/bin/codesign -dv --verbose=2` on the
 original bounded path held only in memory. Display/persistence uses its sanitized
 form. At each lookup, lstat of the resolved real path supplies dev, inode, size,

@@ -571,7 +571,8 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 	// update): state.json and the journal hold wall times only, and an earlier
 	// last_seen than first_seen or window_start would make them unreadable.
 	// The entry's expiry then counts from the recorded time, at most the step
-	// size later than the refresh.
+	// size later than the refresh. Nor can such a refresh change which entry
+	// the cap evicts next (evictFirst orders by last_seen's wall time).
 	if exists && now.Round(0).Before(entry.LastSeen.Round(0)) {
 		s.State.Health.ClockHeldRefreshes++
 	} else {
@@ -714,19 +715,8 @@ func (s *Store) pruneItems(refs expiryRefs) {
 			s.entryRemoved(k)
 		}
 	}
-	if len(s.State.Entries) > s.Config.MaxEntries {
-		keys := make([]string, 0, len(s.State.Entries))
-		for k := range s.State.Entries {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool {
-			a, b := s.State.Entries[keys[i]], s.State.Entries[keys[j]]
-			if a.LastSeen.Equal(b.LastSeen) {
-				return keys[i] < keys[j]
-			}
-			return a.LastSeen.Before(b.LastSeen)
-		})
-		for _, k := range keys[:len(keys)-s.Config.MaxEntries] {
+	if over := len(s.State.Entries) - s.Config.MaxEntries; over > 0 {
+		for _, k := range oldestKeys(s.State.Entries, func(e *Entry) time.Time { return e.LastSeen }, over) {
 			delete(s.State.Entries, k)
 			s.entryRemoved(k)
 		}
@@ -754,23 +744,60 @@ func (s *Store) pruneItems(refs expiryRefs) {
 	}
 	s.State.Events = append([]Event(nil), events...)
 	// Keep executable signature cache bounded as well; evicted paths may be inspected again.
-	if len(s.State.Signers) > s.Config.MaxEntries {
-		keys := make([]string, 0, len(s.State.Signers))
-		for k := range s.State.Signers {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool {
-			a, b := s.State.Signers[keys[i]], s.State.Signers[keys[j]]
-			if a.LastSeen.Equal(b.LastSeen) {
-				return keys[i] < keys[j]
-			}
-			return a.LastSeen.Before(b.LastSeen)
-		})
-		for _, k := range keys[:len(keys)-s.Config.MaxEntries] {
+	if over := len(s.State.Signers) - s.Config.MaxEntries; over > 0 {
+		for _, k := range oldestKeys(s.State.Signers, func(e SignerEntry) time.Time { return e.LastSeen }, over) {
 			delete(s.State.Signers, k)
 			s.signerRemoved(k)
 		}
 	}
+}
+
+// evictFirst is the bound prune's eviction order: the earlier wall-clock
+// last-seen time first, and for equal wall times the smaller key (string
+// bytes). Comparing wall times only makes it a strict total order. The
+// previous comparison, time.Before and time.Equal, compares two in-run
+// readings by their monotonic clock and any other pair by wall time, so the
+// two orders differ exactly for two in-run readings whose monotonic order
+// differs from their wall order: after the wall clock was set back during a
+// run, or when one of the two clocks stood still while the other moved. Mixed
+// with times loaded from state.json such pairs could make the previous order
+// cyclic, and the victim then depended on map iteration order.
+func evictFirst(a string, at time.Time, b string, bt time.Time) bool {
+	aw, bw := at.Round(0), bt.Round(0)
+	if aw.Equal(bw) {
+		return a < b
+	}
+	return aw.Before(bw)
+}
+
+// oldestKeys returns the n keys of m that come first in evictFirst order. An
+// observation over the cap usually exceeds it by one, so n == 1 takes one
+// linear pass for the minimum instead of sorting every key; larger n sorts.
+// The order is total, so both paths choose the same keys whatever the map's
+// iteration order.
+func oldestKeys[T any](m map[string]T, seen func(T) time.Time, n int) []string {
+	if n == 1 {
+		var oldest string
+		var oldestAt time.Time
+		found := false
+		for k, v := range m {
+			if at := seen(v); !found || evictFirst(k, at, oldest, oldestAt) {
+				oldest, oldestAt, found = k, at, true
+			}
+		}
+		if !found {
+			return nil
+		}
+		return []string{oldest}
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return evictFirst(keys[i], seen(m[keys[i]]), keys[j], seen(m[keys[j]]))
+	})
+	return keys[:min(n, len(keys))]
 }
 func (s *Store) write(path string, data []byte) error {
 	if s.atomicWrite != nil {
