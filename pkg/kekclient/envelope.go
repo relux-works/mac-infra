@@ -74,6 +74,17 @@ type Payload struct {
 	KEK         []byte `json:"kek"`
 }
 
+// payloadHeader is Payload without its KEK, which MarshalWithSecret adds.
+type payloadHeader struct {
+	Version     int    `json:"v"`
+	Address     string `json:"address"`
+	Generation  int    `json:"generation"`
+	Fingerprint string `json:"fingerprint"`
+	Requirement string `json:"requirement"`
+	InstallPath string `json:"install_path"`
+	KCV         []byte `json:"kcv"`
+}
+
 // kcvLabel separates the check value from any other use of the KEK.
 const kcvLabel = "mac-keyvault-kek kcv 1"
 
@@ -161,7 +172,7 @@ func Wrap(spec WrapSpec, kek []byte) ([]byte, error) {
 		return nil, err
 	}
 	kcv := KeyCheckValue(kek)
-	plain, err := json.Marshal(Payload{Version: 1, Address: spec.Address, Generation: spec.Generation, Fingerprint: spec.Fingerprint, Requirement: spec.Requirement, InstallPath: spec.InstallPath, KCV: kcv, KEK: kek})
+	plain, err := MarshalWithSecret(payloadHeader{Version: 1, Address: spec.Address, Generation: spec.Generation, Fingerprint: spec.Fingerprint, Requirement: spec.Requirement, InstallPath: spec.InstallPath, KCV: kcv}, "kek", kek)
 	if err != nil {
 		return nil, err
 	}

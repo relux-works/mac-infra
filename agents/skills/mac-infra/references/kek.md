@@ -49,6 +49,8 @@ Both sides parse every contract object strictly, including nested `result`, `err
 
 Any difference between the clear and the sealed header is refused. A KEK that does not match its `kcv` is refused as well.
 
+Every shape, nested ones included, is checked before anything is decoded, so a refused answer never has a KEK decoded. Checking copies nothing: member values are views into the received bytes, which are cleared after use. A KEK is written only with `MarshalWithSecret`, straight into a buffer that is cleared after use, never through `json.Marshal`'s pooled encoder. This covers the buffers the client and broker own; copies inside the Go runtime, the crypto code or the kernel are outside its reach.
+
 The binding is inside the ciphertext, so a same-user process cannot change it without breaking GCM. It also cannot make an envelope holding the service's KEK without knowing that KEK.
 
 **Admitted requirement form:** only `cdhash H"<40 lowercase hex>"`. The certificate-pinned form joins the allowlist when the dedicated signing identity exists.

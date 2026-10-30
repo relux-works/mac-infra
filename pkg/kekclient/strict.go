@@ -2,10 +2,10 @@ package kekclient
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 )
 
 // jsonKind is the JSON type a contract member must have.
@@ -53,42 +53,113 @@ var (
 // objectMembers reads data as exactly one JSON object and nothing after it,
 // and returns its members by their exact (unescaped) names. A repeated name
 // is refused before any typed decode can let a later value win.
+//
+// The values are views into data, never copies: data can hold a KEK (an
+// answer, a decrypted payload), and the caller clears data, which clears
+// every member with it. data is first checked by json.Valid, which neither
+// copies nor keeps it; the scan below then only has to find value
+// boundaries in valid JSON.
 func objectMembers(data []byte) (map[string]json.RawMessage, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	tok, err := dec.Token()
-	if err != nil {
-		return nil, err
+	if !json.Valid(data) {
+		return nil, errors.New("not valid JSON")
 	}
-	if tok != json.Delim('{') {
+	i := skipSpace(data, 0)
+	if i >= len(data) || data[i] != '{' {
 		return nil, errors.New("not a JSON object")
 	}
 	members := map[string]json.RawMessage{}
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return nil, err
+	i = skipSpace(data, i+1)
+	if i < len(data) && data[i] == '}' {
+		i++
+	} else {
+		for {
+			if i >= len(data) || data[i] != '"' {
+				return nil, errors.New("member name is not a string")
+			}
+			end := stringEnd(data, i)
+			var name string
+			if err := json.Unmarshal(data[i:end], &name); err != nil {
+				return nil, err
+			}
+			if _, seen := members[name]; seen {
+				return nil, fmt.Errorf("member %q repeated", name)
+			}
+			i = skipSpace(data, end)
+			if i >= len(data) || data[i] != ':' {
+				return nil, errors.New("no colon after a member name")
+			}
+			start := skipSpace(data, i+1)
+			stop := valueEnd(data, start)
+			members[name] = json.RawMessage(data[start:stop:stop])
+			i = skipSpace(data, stop)
+			if i < len(data) && data[i] == ',' {
+				i = skipSpace(data, i+1)
+				continue
+			}
+			if i < len(data) && data[i] == '}' {
+				i++
+				break
+			}
+			return nil, errors.New("malformed object")
 		}
-		name, ok := tok.(string)
-		if !ok {
-			return nil, errors.New("member name is not a string")
-		}
-		if _, seen := members[name]; seen {
-			return nil, fmt.Errorf("member %q repeated", name)
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return nil, err
-		}
-		members[name] = value
 	}
-	if _, err := dec.Token(); err != nil {
-		return nil, err
-	}
-	if _, err := dec.Token(); err != io.EOF {
+	if skipSpace(data, i) != len(data) {
 		return nil, errors.New("data after the object")
 	}
 	return members, nil
+}
+
+func skipSpace(data []byte, i int) int {
+	for i < len(data) && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// stringEnd returns the index just past the string that starts at data[i].
+func stringEnd(data []byte, i int) int {
+	for j := i + 1; j < len(data); j++ {
+		switch data[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1
+		}
+	}
+	return len(data)
+}
+
+// valueEnd returns the index just past the value that starts at data[i] in
+// valid JSON.
+func valueEnd(data []byte, i int) int {
+	if i >= len(data) {
+		return i
+	}
+	switch data[i] {
+	case '"':
+		return stringEnd(data, i)
+	case '{', '[':
+		depth := 0
+		for j := i; j < len(data); j++ {
+			switch data[j] {
+			case '"':
+				j = stringEnd(data, j) - 1
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return j + 1
+				}
+			}
+		}
+		return len(data)
+	}
+	j := i
+	for j < len(data) && !bytes.ContainsRune([]byte(" \t\n\r,}]"), rune(data[j])) {
+		j++
+	}
+	return j
 }
 
 // checkShape reads data as one object with exactly the members of s: exact
@@ -198,4 +269,36 @@ func parseResponse(data []byte) (Response, error) {
 		}
 	}
 	return resp, json.Unmarshal(data, &resp)
+}
+
+// MarshalWithSecret encodes v, which must hold no secret, and appends the
+// member name with the base64 of secret as its value, straight into the
+// returned buffer. json.Marshal would leave a copy of any secret it encodes
+// in its pooled encoder buffer; the secret here only ever lands in the
+// returned slice, which the caller clears after use. v must encode as a
+// JSON object.
+func MarshalWithSecret(v any, name string, secret []byte) ([]byte, error) {
+	obj, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	if len(obj) < 2 || obj[0] != '{' || obj[len(obj)-1] != '}' {
+		return nil, errors.New("MarshalWithSecret needs a JSON object")
+	}
+	key, err := json.Marshal(name)
+	if err != nil {
+		return nil, err
+	}
+	n := base64.StdEncoding.EncodedLen(len(secret))
+	out := make([]byte, 0, len(obj)+len(key)+n+4)
+	out = append(out, obj[:len(obj)-1]...)
+	if len(obj) > 2 {
+		out = append(out, ',')
+	}
+	out = append(out, key...)
+	out = append(out, ':', '"')
+	start := len(out)
+	out = out[:start+n]
+	base64.StdEncoding.Encode(out[start:], secret)
+	return append(out, '"', '}'), nil
 }

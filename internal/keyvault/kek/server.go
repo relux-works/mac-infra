@@ -99,19 +99,49 @@ func (s *Server) Serve(l *net.UnixListener) error {
 		conn.SetDeadline(time.Now().Add(s.Timeout))
 	}
 	resp, outcome := s.handle(conn)
-	line, err := json.Marshal(resp)
-	if err != nil {
-		return err
-	}
+	line, err := encodeResponse(resp)
 	if resp.Result != nil {
 		clear(resp.Result.KEK)
 	}
-	_, werr := conn.Write(append(line, '\n'))
+	if err != nil {
+		return err
+	}
+	_, werr := conn.Write(line)
 	clear(line)
 	if outcome != nil {
 		return outcome
 	}
 	return werr
+}
+
+// encodeResponse renders the answer line, newline included. An answer that
+// carries a KEK is assembled with kekclient.MarshalWithSecret, so the KEK
+// never passes through json.Marshal's pooled buffer; every buffer that held
+// it is cleared here or by the caller.
+func encodeResponse(resp kekclient.Response) ([]byte, error) {
+	if resp.Result == nil || resp.Result.KEK == nil {
+		line, err := json.Marshal(resp)
+		return append(line, '\n'), err
+	}
+	head := *resp.Result
+	head.KEK = nil
+	result, err := kekclient.MarshalWithSecret(head, "kek", resp.Result.KEK)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(result)
+	prefix, err := json.Marshal(struct {
+		Contract string `json:"contract"`
+		OK       bool   `json:"ok"`
+	}{resp.Contract, true})
+	if err != nil {
+		return nil, err
+	}
+	line := make([]byte, 0, len(prefix)+len(`,"result":`)+len(result)+2)
+	line = append(line, prefix[:len(prefix)-1]...)
+	line = append(line, `,"result":`...)
+	line = append(line, result...)
+	return append(line, '}', '\n'), nil
 }
 
 // refusal is an answered error with the operator-side reason.

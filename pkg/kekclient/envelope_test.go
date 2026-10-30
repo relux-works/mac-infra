@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -336,5 +337,66 @@ func TestRefusedNestedAnswerDecodesNoKEK(t *testing.T) {
 		if err == nil || resp.Result != nil {
 			t.Fatalf("%s: err=%v, a result was decoded: %+v", name, err, resp.Result)
 		}
+	}
+}
+
+// The strict parser keeps no copy of what it reads: every member value, a
+// nested object's members included, is a view into the caller's buffer, so
+// clearing that buffer (the answer, the decrypted payload) clears every
+// value with it. Review r7's witness: copied raw values outlived the clear.
+// The control reads the values before the clear and finds the KEK.
+func TestParsedValuesAreViewsIntoTheInput(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString(testKEK())
+	data := []byte(`{"contract":"kek-1","ok":true,"result":{"address":"a/b","generation":1,"fingerprint":"f","kek":"` + b64 + `"}}`)
+	outer, err := checkShape(data, responseShape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, err := checkShape(outer["result"], resultShape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(outer["result"], []byte(b64)) || string(inner["kek"]) != `"`+b64+`"` {
+		t.Fatalf("control: values do not hold the KEK before the clear")
+	}
+	clear(data)
+	for name, v := range outer {
+		if bytes.ContainsFunc(v, func(r rune) bool { return r != 0 }) {
+			t.Fatalf("outer member %q survived the clear: %q", name, v)
+		}
+	}
+	for name, v := range inner {
+		if bytes.ContainsFunc(v, func(r rune) bool { return r != 0 }) {
+			t.Fatalf("nested member %q survived the clear: %q", name, v)
+		}
+	}
+}
+
+// MarshalWithSecret produces the same JSON object as json.Marshal of the
+// full value would, for the payload and for a KEK-bearing answer, and for
+// an object with no other members; it refuses a value that is not an
+// object.
+func TestMarshalWithSecretMatchesJSON(t *testing.T) {
+	kcv := KeyCheckValue(testKEK())
+	same := func(a, b []byte) bool {
+		var x, y any
+		return json.Unmarshal(a, &x) == nil && json.Unmarshal(b, &y) == nil && fmt.Sprint(x) == fmt.Sprint(y)
+	}
+	got, err := MarshalWithSecret(payloadHeader{Version: 1, Address: "a/b", Generation: 2, Fingerprint: "f", Requirement: "r", InstallPath: "/p", KCV: kcv}, "kek", testKEK())
+	want, _ := json.Marshal(Payload{Version: 1, Address: "a/b", Generation: 2, Fingerprint: "f", Requirement: "r", InstallPath: "/p", KCV: kcv, KEK: testKEK()})
+	if err != nil || !same(got, want) {
+		t.Fatalf("payload:\n%s\n%s (%v)", got, want, err)
+	}
+	got, err = MarshalWithSecret(Result{Address: "a/b", Generation: 1, Fingerprint: "f"}, "kek", testKEK())
+	want, _ = json.Marshal(Result{Address: "a/b", Generation: 1, Fingerprint: "f", KEK: testKEK()})
+	if err != nil || !same(got, want) {
+		t.Fatalf("result:\n%s\n%s (%v)", got, want, err)
+	}
+	got, err = MarshalWithSecret(struct{}{}, "kek", testKEK())
+	if err != nil || string(got) != `{"kek":"`+base64.StdEncoding.EncodeToString(testKEK())+`"}` {
+		t.Fatalf("empty object: %s %v", got, err)
+	}
+	if _, err := MarshalWithSecret([]int{1}, "kek", testKEK()); err == nil {
+		t.Fatal("a non-object was accepted")
 	}
 }
