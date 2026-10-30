@@ -225,3 +225,35 @@ func TestWatchHealthOutput(t *testing.T) {
 		}
 	}
 }
+
+// watch repair is wired: without --out it is a usage error (2); against a
+// readable state directory it writes the repair beside it, reports JSON with
+// no changes and an opening copy, and exits 0; a second run into the same
+// output refuses with 1. It never starts a backend or collector.
+func TestWatchRepairCLI(t *testing.T) {
+	config, c := watchConfig(t, 0)
+	s, e := firewallwatch.OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Save(time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"watch", "repair", "--config", config}, &out, &errOut); code != 2 {
+		t.Fatalf("missing --out: exit %d", code)
+	}
+	dir := filepath.Join(t.TempDir(), "repair")
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"watch", "repair", "--config", config, "--out", dir}, &out, &errOut); code != 0 {
+		t.Fatalf("repair: exit %d, %s", code, errOut.String())
+	}
+	var report firewallwatch.RepairReport
+	if e := json.Unmarshal(out.Bytes(), &report); e != nil || !report.Opens || len(report.Changes) != 0 {
+		t.Fatalf("report %s (%v)", out.String(), e)
+	}
+	if code := run([]string{"watch", "repair", "--config", config, "--out", dir}, &out, &errOut); code != 1 {
+		t.Fatalf("existing output: exit %d", code)
+	}
+}

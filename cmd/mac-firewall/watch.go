@@ -19,6 +19,7 @@ const watchUsage = `mac-firewall watch run --config PATH
 mac-firewall watch digest --config PATH --since DURATION [--json [--split]]
 mac-firewall watch status --config PATH [--json]
 mac-firewall watch classify --config PATH --fixtures FILE [--json]
+mac-firewall watch repair --config PATH --out DIR   (watcher stopped; reads the state directory, writes DIR only)
 Shadow mode only. No blocking or firewall changes. Exit 0 success, 1 failure, 2 usage.`
 
 var startWatchBackend = firewallwatch.StartBackend
@@ -33,7 +34,7 @@ func runWatch(args []string, out, errOut io.Writer) int {
 		return 0
 	}
 	command := args[0]
-	if command != "run" && command != "digest" && command != "status" && command != "classify" {
+	if command != "run" && command != "digest" && command != "status" && command != "classify" && command != "repair" {
 		fmt.Fprintln(errOut, watchUsage)
 		return 2
 	}
@@ -42,8 +43,12 @@ func runWatch(args []string, out, errOut io.Writer) int {
 	config := f.String("config", "", "required private watch config")
 	var asJSON, split bool
 	var since, fixtures string
-	if command != "run" {
+	if command != "run" && command != "repair" {
 		f.BoolVar(&asJSON, "json", false, "print JSON")
+	}
+	var repairOut string
+	if command == "repair" {
+		f.StringVar(&repairOut, "out", "", "required new directory outside the state directory")
 	}
 	if command == "digest" {
 		f.StringVar(&since, "since", "", "required positive Go duration")
@@ -52,7 +57,7 @@ func runWatch(args []string, out, errOut io.Writer) int {
 	if command == "classify" {
 		f.StringVar(&fixtures, "fixtures", "", "labelled synthetic JSONL")
 	}
-	if f.Parse(args[1:]) != nil || f.NArg() != 0 || *config == "" || (command == "classify" && fixtures == "") || (split && !asJSON) {
+	if f.Parse(args[1:]) != nil || f.NArg() != 0 || *config == "" || (command == "classify" && fixtures == "") || (command == "repair" && repairOut == "") || (split && !asJSON) {
 		fmt.Fprintln(errOut, watchUsage)
 		return 2
 	}
@@ -72,6 +77,17 @@ func runWatch(args []string, out, errOut io.Writer) int {
 	}
 	printJSON := func(v any) int {
 		if e := json.NewEncoder(out).Encode(v); e != nil {
+			return 1
+		}
+		return 0
+	}
+	if command == "repair" {
+		report, e := firewallwatch.Repair(c, repairOut)
+		if e != nil {
+			fmt.Fprintln(errOut, e)
+			return 1
+		}
+		if printJSON(report) != 0 || !report.Opens {
 			return 1
 		}
 		return 0

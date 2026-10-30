@@ -590,6 +590,31 @@ check and the kind; the next start records it in `write_refusals` (the last
 `write_refused`. If the marker cannot be written the run still ends, and
 stderr carries the refusal alone.
 
+Recovery of state that a backward clock step already made unreadable (a
+watcher or `status` failing with `corrupt state` or `corrupt state journal`
+on a build before this fix): an explicit operator action, never automatic.
+
+```
+mac-firewall watch repair --config PATH --out DIR
+```
+
+It refuses while a watcher holds the state directory's lock, when `DIR`
+exists, or when `DIR` is inside the state directory. It only reads the state
+directory: it copies `state.json` and `state-journal.jsonl` byte for byte to
+`DIR/original` with `SHA256SUMS`, and writes to `DIR/repaired` the same files
+with each reversed time moved forward to the time it must not precede
+(`last_seen` to `first_seen` or `window_start`; a span's end to its start; a
+stall that starts before the span's end shortens the covered span, one that
+starts after it extends back to the span's end, so the repair errs toward
+unavailable coverage; a stall's end to its start). Records and lines it does
+not change keep their bytes. A journal line in the middle that is not a record
+is refused as before, and nothing repaired is written. It prints a JSON report
+of every change (an entry by a hash of its key, never the key) and whether
+`DIR/repaired` opens with the normal reader, and exits 0 only if it does.
+Installing the repaired files is a separate step in a window: stop the
+watcher, copy `DIR/repaired/*` into the state directory (keeping `DIR/original`),
+start the watcher, and check `watch status`.
+
 A per-directory advisory lock is acquired before loading state and refuses
 concurrent collectors. Directory ancestors and same-user concurrent replacement
 are not a security boundary. The files do not form a multi-file transaction,
