@@ -50,6 +50,9 @@ type State struct {
 	// Coverage records when a watcher was running: a span opens at run start
 	// and its end advances on every save, so a stop or crash leaves a gap.
 	Coverage []CoverageSpan `json:"coverage"`
+	// WriteRefusals are writes the shape check refused, recorded at the
+	// next start (refusal.go); the digest labels their gaps.
+	WriteRefusals []WriteRefusal `json:"write_refusals,omitempty"`
 	// CoverageVersion distinguishes migrated history from spans whose gaps
 	// record stall causes. Zero is the pre-marker format.
 	CoverageVersion int `json:"coverage_version"`
@@ -331,6 +334,21 @@ func (s *Store) validateState() error { return s.validateShape(true, 0) }
 // errInvalidState is the shape check's refusal; the writer and the reader share it.
 var errInvalidState = errors.New("invalid structure, count or field")
 
+// shapeError is a shape-check refusal naming the check that failed; it is
+// errInvalidState. The wall-time order checks have their own names, so a
+// refused write can be told apart from other corruption.
+type shapeError struct{ check string }
+
+func (e shapeError) Error() string        { return errInvalidState.Error() + " (" + e.check + ")" }
+func (e shapeError) Is(target error) bool { return target == errInvalidState }
+
+const (
+	checkShape      = "shape"
+	checkEntryOrder = "entry.time_order"
+	checkSpanOrder  = "coverage.span_order"
+	checkStallOrder = "coverage.stall_order"
+)
+
 // wallBefore reports whether a is before b by wall-clock time alone.
 // state.json and the journal hold wall times only, so the writer checks the
 // order the reader will check: two in-run readings ordered by the monotonic
@@ -339,19 +357,32 @@ func wallBefore(a, b time.Time) bool { return a.Round(0).Before(b.Round(0)) }
 
 func (s *Store) validateShape(bounded bool, coverageSlack int) error {
 	st := s.State
-	bad := func() error { return errInvalidState }
+	bad := func(check ...string) error {
+		if len(check) == 0 {
+			return shapeError{checkShape}
+		}
+		return shapeError{check[0]}
+	}
 	if st.CoverageVersion < 0 || st.CoverageVersion > coverageVersion {
 		return bad()
 	}
-	if st.Entries == nil || st.Signers == nil || len(st.Parser.Samples) > SampleLimit {
+	if st.Entries == nil || st.Signers == nil || len(st.Parser.Samples) > SampleLimit || len(st.WriteRefusals) > refusalLimit {
 		return bad()
+	}
+	for _, r := range st.WriteRefusals {
+		if r.At.IsZero() || len(r.Check) == 0 || len(r.Check) > 64 || len(r.Kind) > 16 || r.Repeats < 0 || r.Repeats > refusalLoopRestarts {
+			return bad()
+		}
 	}
 	if bounded && (len(st.Entries) > s.Config.MaxEntries || len(st.Events) > s.Config.MaxEntries || len(st.Signers) > s.Config.MaxEntries || len(st.Coverage) > s.Config.MaxEntries+coverageSlack) {
 		return bad()
 	}
 	for k, v := range st.Entries {
-		if len(k) == 0 || len(k) > 8192 || v == nil || v.Count == 0 || v.Count > math.MaxInt64 || v.Denies < 0 || uint64(v.Denies) > v.Count || v.FirstSeen.IsZero() || wallBefore(v.LastSeen, v.FirstSeen) || v.WindowStart.IsZero() || wallBefore(v.LastSeen, v.WindowStart) || len(v.Escalated) > 32 {
+		if len(k) == 0 || len(k) > 8192 || v == nil || v.Count == 0 || v.Count > math.MaxInt64 || v.Denies < 0 || uint64(v.Denies) > v.Count || v.FirstSeen.IsZero() || v.WindowStart.IsZero() || len(v.Escalated) > 32 {
 			return bad()
+		}
+		if wallBefore(v.LastSeen, v.FirstSeen) || wallBefore(v.LastSeen, v.WindowStart) {
+			return bad(checkEntryOrder)
 		}
 		seen := map[string]bool{}
 		for _, r := range v.Escalated {
@@ -383,10 +414,13 @@ func (s *Store) validateShape(bounded bool, coverageSlack int) error {
 			return bad()
 		}
 		if stall := v.StallAfter; stall != nil && (!stall.From.Round(0).Equal(v.End.Round(0)) || wallBefore(stall.To, stall.From)) {
+			return bad(checkStallOrder)
+		}
+		if v.Start.IsZero() || (v.Source != "" && v.Source != SourceNetfilter) {
 			return bad()
 		}
-		if v.Start.IsZero() || wallBefore(v.End, v.Start) || (v.Source != "" && v.Source != SourceNetfilter) {
-			return bad()
+		if wallBefore(v.End, v.Start) {
+			return bad(checkSpanOrder)
 		}
 	}
 	for _, v := range st.Events {
@@ -937,7 +971,7 @@ func (s *Store) Save(now time.Time) (err error) {
 	s.State.Updated = now
 	s.State.JournalSeq = s.seq
 	if e := s.validateState(); e != nil {
-		return fmt.Errorf("refusing invalid state save: %w", e)
+		return fmt.Errorf("%w: %w", errRefusedSnapshot, e)
 	}
 	data, e := json.Marshal(s.State)
 	if e != nil {

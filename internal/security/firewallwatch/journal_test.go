@@ -549,6 +549,10 @@ func TestHeartbeatCoversState(t *testing.T) {
 		switch tag {
 		case "entries", "events", "signers", "last_event", "evicted_through", "journal_seq", "coverage":
 			continue
+		case "write_refusals":
+			// Set only by openRun, right before the startup snapshot, and
+			// never changed while the run lasts.
+			continue
 		}
 		if !beat[tag] {
 			t.Errorf("State field %q is in no heartbeat", tag)

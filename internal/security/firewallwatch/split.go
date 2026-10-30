@@ -2,6 +2,7 @@ package firewallwatch
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -40,6 +41,9 @@ const (
 	GapStall           = "stall"
 	GapCoverageEvicted = "coverage_evicted"
 	GapLegacyUnknown   = "legacy_unknown"
+	// GapWriteRefused is a not_running gap during which a run ended because
+	// the shape check refused a write (refusal.go).
+	GapWriteRefused = "write_refused"
 )
 
 // SplitGap is a part of the window with unavailable or unknown coverage.
@@ -47,6 +51,9 @@ type SplitGap struct {
 	Kind string    `json:"kind"`
 	From time.Time `json:"from"`
 	To   time.Time `json:"to"`
+	// Detail names the refused check of a write_refused gap and whether the
+	// same check was refused before within the last restarts.
+	Detail string `json:"detail,omitempty"`
 }
 
 // CoalescedShortStalls sums whole intersecting ALF spans; exact stall positions
@@ -317,6 +324,27 @@ func (s *Store) coverageGaps(since, asOf time.Time) []SplitGap {
 			gaps[len(gaps)-1].To = to
 		} else {
 			gaps = append(gaps, SplitGap{From: from, To: to, Kind: kind})
+		}
+	}
+	return s.labelRefusals(gaps)
+}
+
+// labelRefusals marks each not_running gap that contains a recorded write
+// refusal as write_refused, naming the check and any repeat.
+func (s *Store) labelRefusals(gaps []SplitGap) []SplitGap {
+	for i := range gaps {
+		if gaps[i].Kind != GapNotRunning {
+			continue
+		}
+		for _, r := range s.State.WriteRefusals {
+			if r.At.Before(gaps[i].From) || r.At.After(gaps[i].To) {
+				continue
+			}
+			gaps[i].Kind = GapWriteRefused
+			gaps[i].Detail = r.Kind + " " + r.Check
+			if r.Repeats > 0 {
+				gaps[i].Detail += fmt.Sprintf(", repeated: %d earlier refusal(s) of this check in the last %d", r.Repeats, refusalLoopRestarts)
+			}
 		}
 	}
 	return gaps

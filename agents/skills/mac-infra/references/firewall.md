@@ -284,9 +284,16 @@ first. `coverage_gaps` lists disjoint intervals in [since, as_of], each with
 - `legacy_unknown`: both bounding ALF spans contain pre-marker history whose
   stall causes were not reliably recorded. Consumers must treat this as
   unknown history; it is not evidence of a watcher stop or restart.
+- `write_refused`: a `not_running` gap during which a run ended because the
+  writer refused a record or snapshot the reader would reject (see Clock
+  steps). Its `detail` names the kind (`journal` or `snapshot`) and the refused
+  check (`entry.time_order`, `coverage.span_order`, `coverage.stall_order` or
+  `shape`), and says "repeated" when the same check was refused within the
+  three refusals recorded before it, so a restart loop does not pass silently.
 
 Precedence is `coverage_evicted` > `stall` > covered > `legacy_unknown` >
-`not_running`.
+`not_running`; a `not_running` gap containing a recorded refusal is reported
+as `write_refused`.
 
 Exact stalls are persisted as the preceding coverage span's optional
 `stall_after: {from, to}`, including open stalls up to the save or collector
@@ -566,8 +573,13 @@ the recorded time, later than the refresh by at most the step; after a large
 manual step back (hours), by that much. `first_seen` and `window_start` are
 never moved. Before writing, the watcher checks a record or snapshot as the
 reader will load it, by wall time only; one the reader would reject is refused
-before anything is written (the run ends with an error that names the check),
-never written and never dropped silently.
+before anything is written, never written and never dropped silently. The run
+then ends with an error that names the check (stderr) and leaves
+`last-write-refusal.json` in the state directory, holding only the time, the
+check and the kind; the next start records it in `write_refusals` (the last
+32), removes the marker, and the digest labels that restart's gap
+`write_refused`. If the marker cannot be written the run still ends, and
+stderr carries the refusal alone.
 
 A per-directory advisory lock is acquired before loading state and refuses
 concurrent collectors. Directory ancestors and same-user concurrent replacement

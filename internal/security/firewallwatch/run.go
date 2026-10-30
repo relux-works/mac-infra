@@ -423,17 +423,11 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		return e
 	}
 	defer unlock()
-	s, e := OpenStore(c)
-	if e != nil {
-		return e
-	}
 	// Every timestamp this run stores comes from one clock that never runs
 	// backward (clock.go).
 	clock := &wallClock{}
-	s.clock = clock.now
-	// The startup snapshot folds a replayed journal, a torn tail included,
-	// into state.json and starts a fresh journal.
-	if e = s.Save(s.now()); e != nil {
+	s, e := openRun(c, clock.now)
+	if e != nil {
 		return e
 	}
 	childCtx, cancel := context.WithCancel(ctx)
@@ -452,6 +446,11 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		s.State.BackendHealthy = cl.Healthy()
 		s.State.Health.ClockHeldReadings = clock.heldCount()
 		err = errors.Join(err, s.Save(s.now()))
+		// A refused write ends the run; the marker lets the next start label
+		// the restart (refusal.go).
+		if errors.Is(err, errInvalidState) {
+			err = errors.Join(err, s.markWriteRefusal(err))
+		}
 	}()
 	// A bounded queue provides backpressure while classification is slow.
 	lines := make(chan []byte, 64)

@@ -284,7 +284,7 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 		r.Heartbeat = h
 	}
 	if e := s.validateRecord(r); e != nil {
-		return fmt.Errorf("refusing invalid journal record: %w", e)
+		return fmt.Errorf("%w: %w", errRefusedRecord, e)
 	}
 	line, e := json.Marshal(r)
 	if e != nil {
