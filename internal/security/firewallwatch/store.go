@@ -1135,7 +1135,8 @@ func (s *Store) applyCollectors(now time.Time) {
 }
 
 // saveProjections finishes a snapshot after state.json is written: the day
-// files and the flag, then the journal rotation.
+// files, then the journal rotation, and only after its durability barrier the
+// flag stamp.
 func (s *Store) saveProjections(now, start time.Time) (e error) {
 	// Daily files are atomic projections of authoritative state: crash/retry cannot
 	// append duplicates. Retention also caps the total event count across days.
