@@ -117,9 +117,9 @@ func nativeInputs(root string) ([]string, error) {
 
 // checkoutState lists the root-level directories that hold a checkout's own
 // state rather than source: version control, scratch and local tool state. In
-// a git work tree, git tracks nothing under any of them and ignores each one
-// by its effective rules (checkStateUntracked). Go can still build a package
-// inside one when an import or an explicit argument names it, so the walk skips
+// a git work tree, every file under them is ignored and none is tracked
+// (checkStateUntracked). Go can still build a package inside one when an
+// import or an explicit argument names it, so the walk skips
 // them only together with two checks: no package the default build graph
 // selects lies inside one (checkDependencyInputs), and no native input names
 // one (checkoutStateReference). .git and .temp are skipped at any depth, as
@@ -147,15 +147,21 @@ var stateName = func() *regexp.Regexp {
 	return regexp.MustCompile(`(?i)(?:` + strings.Join(names, "|") + `)(?:[^A-Za-z0-9_-]|$)`)
 }()
 
+// continuation joins a backslash, optional horizontal space and a line end,
+// as the C preprocessor does (a space before the line end draws a warning, not
+// an error).
+var continuation = regexp.MustCompile(`\\[ \t\f\v]*\r?\n`)
+
 // checkoutStateReference returns the first mention of a checkout-state
-// directory in a native input. It matches text rather than parsing includes
-// and flags, so a comment, a quoted or attached flag operand and a
-// line-comment cgo preamble all count. Before matching, the trigraph ??/
-// becomes a backslash and backslash-continued lines are joined, as the C
-// preprocessor does; the text is also matched with every backslash removed,
-// as cgo does to flag arguments. Limits: a name assembled by macro token
-// pasting, and include paths from CGO_CFLAGS or pkg-config, are not visible
-// to a text scan; the confinement wrapper, not this review tripwire, bounds
+// directory in a native input. It is a conservative review admission check, not
+// a model of the preprocessor or of cgo: it matches text, so a comment, a
+// quoted or attached flag operand and a line-comment cgo preamble all count.
+// Before matching, the trigraph ??/ becomes a backslash and continued lines are
+// joined; the text is matched as is and with backslashes and quotes removed
+// together (cgo escapes and quoting can join fragments).
+// Known limits: names assembled by macro token pasting or other
+// preprocessing, and include paths from CGO_CFLAGS or pkg-config, are not
+// visible to a text scan; the confinement wrapper, not this tripwire, bounds
 // native startup.
 func checkoutStateReference(path string) (string, error) {
 	source, err := os.ReadFile(path)
@@ -163,37 +169,38 @@ func checkoutStateReference(path string) (string, error) {
 		return "", err
 	}
 	source = bytes.ReplaceAll(source, []byte("??/"), []byte(`\`))
-	source = bytes.ReplaceAll(source, []byte("\\\r\n"), nil)
-	source = bytes.ReplaceAll(source, []byte("\\\n"), nil)
-	if m := stateName.Find(source); m != nil {
-		return string(m), nil
+	source = continuation.ReplaceAll(source, nil)
+	joined := strings.NewReplacer(`\`, "", `"`, "", "'", "").Replace(string(source))
+	for _, view := range [][]byte{source, []byte(joined)} {
+		if m := stateName.Find(view); m != nil {
+			return string(m), nil
+		}
 	}
-	return string(stateName.Find(bytes.ReplaceAll(source, []byte(`\`), nil))), nil
+	return "", nil
 }
 
 // checkStateUntracked keeps the skipped directories to local state: in a git
-// work tree, git tracks no file under a checkout-state name and ignores each
-// name by its effective rules, negations included. A tree without a .git entry
-// tracks nothing; with one, a failing git command is an error.
+// work tree, git tracks no file under a checkout-state name and reports none
+// there as untracked and unignored, by its effective rules (nested .gitignore
+// files, info/exclude and core.excludesFile included). The work tree may
+// enclose the module root. Only a root without a .git entry in itself or any
+// parent, such as a source archive, is not checked; with one, a failing git
+// command is an error.
 func checkStateUntracked(root string) error {
-	if _, err := os.Lstat(filepath.Join(root, ".git")); errors.Is(err, fs.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
+	inTree := false
+	for dir := root; ; dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			inTree = true
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
 	}
-	git := func(args ...string) (string, int, error) {
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
-			return string(out), exit.ExitCode(), nil
-		}
-		if err != nil {
-			return "", 0, fmt.Errorf("git %v: %w", args, err)
-		}
-		return string(out), 0, nil
+	if !inTree {
+		return nil
 	}
 	var names []string
 	for _, name := range checkoutState {
@@ -201,21 +208,32 @@ func checkStateUntracked(root string) error {
 			names = append(names, name)
 		}
 	}
-	tracked, code, err := git(append([]string{"ls-files", "-z", "--"}, names...)...)
-	if err != nil || code != 0 {
-		return errors.Join(err, fmt.Errorf("git ls-files exited %d", code))
-	}
-	if tracked != "" {
-		return fmt.Errorf("checkout state holds tracked files: %q", strings.Split(strings.TrimSuffix(tracked, "\x00"), "\x00"))
-	}
-	for _, name := range names {
-		_, code, err := git("check-ignore", "-q", name+"/")
+	git := func(args ...string) ([]string, error) {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("git %v: %w: %s", args, err, bytes.TrimSpace(stderr.Bytes()))
 		}
-		if code != 0 {
-			return fmt.Errorf("checkout state %s is not ignored (git check-ignore exited %d)", name, code)
+		if len(out) == 0 {
+			return nil, nil
 		}
+		return strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00"), nil
+	}
+	tracked, err := git(append([]string{"ls-files", "-z", "--"}, names...)...)
+	if err != nil {
+		return err
+	}
+	if len(tracked) != 0 {
+		return fmt.Errorf("checkout state holds tracked files: %q", tracked)
+	}
+	unignored, err := git(append([]string{"ls-files", "-z", "--others", "--exclude-standard", "--"}, names...)...)
+	if err != nil {
+		return err
+	}
+	if len(unignored) != 0 {
+		return fmt.Errorf("checkout state holds files that are not ignored: %q", unignored)
 	}
 	return nil
 }
@@ -475,12 +493,13 @@ func TestNativeInputTripwireCheckoutState(t *testing.T) {
 }
 
 // A native input that names checkout state is refused even when reviewed, in
-// the forms PR82 reviews r1 and r2 found missed: line-comment cgo preambles,
-// LF and CRLF backslash continuations, attached and quoted flag operands,
-// ${SRCDIR} paths, another letter case, a cgo backslash escape and a ??/
-// trigraph. A name used as a longer word (.github, .templates) and ordinary
-// includes pass (controls). Limit: names assembled by macro token pasting,
-// CGO_CFLAGS and pkg-config are not visible to a text scan.
+// the forms PR82 reviews r1 to r3 found missed: line-comment cgo preambles,
+// LF, CRLF and space-padded backslash continuations, attached and quoted flag
+// operands, ${SRCDIR} paths, another letter case, a cgo backslash escape, a ??/
+// trigraph and cgo quote concatenation. A name used as a longer word
+// (.github, .templates) and ordinary includes pass (controls). Limit: names
+// assembled by macro token pasting or other preprocessing, CGO_CFLAGS and
+// pkg-config are not visible to a text scan.
 func TestNativeInputTripwireStateReferences(t *testing.T) {
 	refused := []struct{ name, source, ref string }{
 		{"pkg/inc.c", "#include \"../.agents/evil.h\"\n", ".agents/"},
@@ -495,6 +514,10 @@ func TestNativeInputTripwireStateReferences(t *testing.T) {
 		{"pkg/crlf.c", "#include \".ag\\\r\nents/x.h\"\r\n", ".agents/"},
 		{"pkg/escaped.go", "package pkg\n\n// #cgo CFLAGS: -I.age\\nts\n// #include <x.h>\nimport \"C\"\n", ".agents\n"},
 		{"pkg/trigraph.go", "package pkg\n\n/*\n#cgo CFLAGS: -std=c11\n#include \".age??/\nnts/x.h\"\n*/\nimport \"C\"\n", ".agents/"},
+		{"pkg/dquote.go", "package pkg\n\n// #cgo CFLAGS: -I.ag\"en\"ts\nimport \"C\"\n", ".agents\n"},
+		{"pkg/squote.go", "package pkg\n\n// #cgo CFLAGS: -I.ag'en'ts\nimport \"C\"\n", ".agents\n"},
+		{"pkg/empty.go", "package pkg\n\n// #cgo CFLAGS: -I.ag\"\"ents\nimport \"C\"\n", ".agents\n"},
+		{"pkg/spaced.c", "#include \".age\\ \t\nnts/x.h\"\n", ".agents/"},
 	}
 	for _, c := range refused {
 		t.Run(c.name, func(t *testing.T) {
@@ -557,52 +580,87 @@ func TestDependencyGraphCheckoutState(t *testing.T) {
 	}
 }
 
-// In a git work tree, a file tracked under checkout state is refused, even
-// when force-added under an ignore rule (PR82 review r2), as is a state name
-// that a later negation un-ignores; with every name ignored and nothing
-// tracked the check passes, and a tree without .git passes (controls). Limit:
-// needs git on PATH inside a work tree.
+// In a git work tree, checkout state must hold only ignored, untracked files.
+// Refused: a file force-added under an ignore rule (PR82 review r2), a root
+// negation, a nested .gitignore that ignores everything but one file while the
+// root rule is missing (review r3), and a tracked file in a module that is a
+// subdirectory of the work tree (review r3). Passing controls: every name
+// ignored and nothing tracked, a nested negation under an ignored directory
+// (git cannot re-include it), and a tree with no .git in itself or a parent.
+// A work tree where git cannot run is an error, not a pass.
+// The fixtures run git with no global or system configuration and no
+// templates. Limit: needs git on PATH inside a work tree.
 func TestCheckoutStateUntracked(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	var ignore strings.Builder
 	for _, name := range checkoutState {
 		if name != ".git" {
 			ignore.WriteString("/" + name + "/\n")
 		}
 	}
+	write := func(t *testing.T, path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRun := func(t *testing.T, root string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
 	repo := func(t *testing.T, gitignore string) string {
 		t.Helper()
 		root := t.TempDir()
-		if out, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
-			t.Fatalf("git init: %v %s", err, out)
-		}
-		if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(gitignore), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(filepath.Join(root, ".agents"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, ".agents/payload.h"), []byte("int x;"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		gitRun(t, root, "init", "-q", "--template=")
+		write(t, filepath.Join(root, ".gitignore"), gitignore)
+		write(t, filepath.Join(root, ".agents/payload.h"), "int x;")
 		return root
 	}
-	clean := repo(t, ignore.String())
-	if err := checkStateUntracked(clean); err != nil {
+	if err := checkStateUntracked(repo(t, ignore.String())); err != nil {
 		t.Fatalf("control: %v", err)
 	}
-	if err := checkStateUntracked(t.TempDir()); err != nil {
+	nested := repo(t, ignore.String())
+	write(t, filepath.Join(nested, ".agents/.gitignore"), "!payload.h\n")
+	if err := checkStateUntracked(nested); err != nil {
+		t.Fatalf("nested negation under an ignored directory: %v", err)
+	}
+	archive := t.TempDir()
+	write(t, filepath.Join(archive, ".agents/payload.h"), "int x;")
+	if err := checkStateUntracked(archive); err != nil {
 		t.Fatalf("tree without .git: %v", err)
 	}
+
 	forced := repo(t, ignore.String())
-	if out, err := exec.Command("git", "-C", forced, "add", "-f", ".agents/payload.h").CombinedOutput(); err != nil {
-		t.Fatalf("git add: %v %s", err, out)
-	}
-	if err := checkStateUntracked(forced); err == nil || !strings.Contains(err.Error(), ".agents/payload.h") {
+	gitRun(t, forced, "add", "-f", ".agents/payload.h")
+	if err := checkStateUntracked(forced); err == nil || !strings.Contains(err.Error(), "tracked files") || !strings.Contains(err.Error(), ".agents/payload.h") {
 		t.Fatalf("tracked file admitted: %v", err)
 	}
 	negated := repo(t, ignore.String()+"!/.agents/\n")
-	if err := checkStateUntracked(negated); err == nil || !strings.Contains(err.Error(), ".agents is not ignored") {
-		t.Fatalf("un-ignored state admitted: %v", err)
+	if err := checkStateUntracked(negated); err == nil || !strings.Contains(err.Error(), "not ignored") {
+		t.Fatalf("root negation admitted: %v", err)
+	}
+	nestedOnly := repo(t, strings.Replace(ignore.String(), "/.agents/\n", "", 1))
+	write(t, filepath.Join(nestedOnly, ".agents/.gitignore"), "*\n!payload.h\n")
+	if err := checkStateUntracked(nestedOnly); err == nil || !strings.Contains(err.Error(), ".agents/payload.h") {
+		t.Fatalf("a nested rule standing in for the directory rule was admitted: %v", err)
+	}
+	parent := repo(t, ignore.String())
+	module := filepath.Join(parent, "submodule")
+	write(t, filepath.Join(module, ".agents/payload.h"), "int x;")
+	gitRun(t, parent, "add", "-f", "submodule/.agents/payload.h")
+	if err := checkStateUntracked(module); err == nil || !strings.Contains(err.Error(), "tracked files") {
+		t.Fatalf("a module inside a work tree skipped git: %v", err)
+	}
+	clean := repo(t, ignore.String())
+	t.Setenv("PATH", t.TempDir())
+	if err := checkStateUntracked(clean); err == nil || !strings.Contains(err.Error(), "git") {
+		t.Fatalf("a work tree without a usable git passed: %v", err)
 	}
 }
 
