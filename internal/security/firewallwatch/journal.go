@@ -409,7 +409,10 @@ func (s *Store) replayJournal(f io.Reader) (torn bool, err error) {
 	for i, line := range lines {
 		var r journalRecord
 		if e := json.Unmarshal(line, &r); e != nil {
-			if i == len(lines)-1 && !torn {
+			// Only a final line that is not valid JSON is a torn write. Valid
+			// JSON that does not decode (a wrong type, a bad timestamp) is
+			// corruption, refused like any other (PR69 review r8).
+			if i == len(lines)-1 && !torn && !json.Valid(line) {
 				return true, nil
 			}
 			return torn, fmt.Errorf("journal record %d: %w", i+1, e)
