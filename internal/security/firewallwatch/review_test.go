@@ -280,7 +280,7 @@ func TestReviewSignerIdentityAndTTL(t *testing.T) {
 			now := time.Now()
 			s.clock = func() time.Time { return now }
 			calls := 0
-			s.inspectSigner = func(_ context.Context, got string) (string, error) {
+			s.inspectSigner = signerOnly(func(_ context.Context, got string) (string, error) {
 				calls++
 				if got != path {
 					t.Fatal(got)
@@ -292,7 +292,7 @@ func TestReviewSignerIdentityAndTTL(t *testing.T) {
 					return "Developer ID: trusted", nil
 				}
 				return "ad-hoc", nil
-			}
+			})
 			first := s.signer(context.Background(), path)
 			if kind == "failure" {
 				if first != "unknown" {
@@ -347,13 +347,13 @@ func TestReviewInspectionPathPrivacy(t *testing.T) {
 			}
 			calls := 0
 			currentSigner := "ad-hoc"
-			s.inspectSigner = func(_ context.Context, got string) (string, error) {
+			s.inspectSigner = signerOnly(func(_ context.Context, got string) (string, error) {
 				calls++
 				if got != path {
 					t.Fatalf("codesign received %q want %q", got, path)
 				}
 				return currentSigner, nil
-			}
+			})
 			it.Signer = s.signer(context.Background(), it.InspectionPath)
 			events := s.Observe(*it, time.Now(), ruleClassify)
 			if calls != 1 || len(events) != 1 {
@@ -398,7 +398,7 @@ func TestReviewChildCommands(t *testing.T) {
 		cmd  *exec.Cmd
 		argv []string
 	}{
-		{codesignCommand(ctx, path), []string{"/usr/bin/codesign", "-dv", "--verbose=2", path}},
+		{codesignCommand(ctx, path), []string{"/usr/bin/codesign", "-dv", "--verbose=3", path}},
 		{collectorCommand(ctx, "log"), []string{"/usr/bin/log", "stream", "--style", "ndjson", "--info", "--predicate", `subsystem == "com.apple.ALF.ApplicationFirewall"`}},
 		{collectorCommand(ctx, "nettop"), []string{"/usr/bin/nettop", "-L", "1", "-n", "-x", "-J", "bytes_out"}},
 	} {

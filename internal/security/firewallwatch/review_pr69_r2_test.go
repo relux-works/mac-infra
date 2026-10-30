@@ -233,7 +233,7 @@ func TestR2SilentSampleSigner(t *testing.T) {
 	}
 	it := items[0]
 	result := "Developer ID: old"
-	s.inspectSigner = func(context.Context, string) (string, error) { return result, nil }
+	s.inspectSigner = signerOnly(func(context.Context, string) (string, error) { return result, nil })
 	s.signer(context.Background(), path)
 	observeFlush(t, s, it, now)
 	if e := s.Save(now); e != nil {

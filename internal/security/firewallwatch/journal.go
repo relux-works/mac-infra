@@ -54,11 +54,16 @@ type journalRecord struct {
 	// adds, then removes. Retention compares monotonic and wall readings
 	// (PR66), so the dropped events are not always the oldest by wall time
 	// (PR69 review r2).
-	Events         []Event    `json:"events,omitempty"`
-	RemovedEvents  []string   `json:"removed_events,omitempty"`
-	LastEvent      time.Time  `json:"last_event"`
-	EvictedThrough time.Time  `json:"evicted_through"`
-	Heartbeat      *heartbeat `json:"heartbeat,omitempty"`
+	Events        []Event  `json:"events,omitempty"`
+	RemovedEvents []string `json:"removed_events,omitempty"`
+	// RemovedEventPaths holds the path of each removed event, by position in
+	// RemovedEvents, and is present only when some removed event had one.
+	// eventID leaves the path out: a reader that predates paths drops them
+	// and still matches every removal by identity (PR81 review r1).
+	RemovedEventPaths []string   `json:"removed_event_paths,omitempty"`
+	LastEvent         time.Time  `json:"last_event"`
+	EvictedThrough    time.Time  `json:"evicted_through"`
+	Heartbeat         *heartbeat `json:"heartbeat,omitempty"`
 }
 
 // heartbeat is the silent state: every State field that no delta field, the
@@ -106,6 +111,7 @@ type journalDelta struct {
 	signers, removedSigners map[string]bool
 	events                  []Event
 	removedEvents           []string
+	removedEventPaths       []string
 	urgent                  bool
 }
 
@@ -126,19 +132,20 @@ func eventID(e Event) string {
 	if e.Port != nil {
 		port = *e.Port
 	}
-	parts := []any{e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.App, e.Signer, e.Verdict, port, e.RemoteClass, e.Bucket, e.Kind, e.Host, e.Counts, e.Label, kind, e.Mode}
-	// A nettop event's path is part of its identity; an event without one
-	// keeps the identity it always had, so stored removals still match.
-	if e.Path != "" {
-		parts = append(parts, e.Path)
-	}
-	raw, _ := json.Marshal(parts)
+	// The path is not part of the identity: a reader that predates paths
+	// drops them and must compute the same identity. Removals carry the path
+	// beside it (RemovedEventPaths, removalKey).
+	raw, _ := json.Marshal([]any{e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.App, e.Signer, e.Verdict, port, e.RemoteClass, e.Bucket, e.Kind, e.Host, e.Counts, e.Label, kind, e.Mode})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:12])
 }
 
+// removalKey is what replay matches a removal by: the identity and the path.
+func removalKey(id, path string) string { return id + "\x00" + path }
+
 func (s *Store) eventRemoved(e Event) {
 	s.delta.removedEvents = append(s.delta.removedEvents, eventID(e))
+	s.delta.removedEventPaths = append(s.delta.removedEventPaths, e.Path)
 }
 
 func mark(set *map[string]bool, k string) {
@@ -262,6 +269,12 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 	}()
 	st := &s.State
 	r := journalRecord{Seq: s.seq + 1, Type: recordDelta, Events: s.delta.events, RemovedEvents: s.delta.removedEvents, LastEvent: st.LastEvent, EvictedThrough: st.EvictedThrough}
+	for _, p := range s.delta.removedEventPaths {
+		if p != "" {
+			r.RemovedEventPaths = s.delta.removedEventPaths
+			break
+		}
+	}
 	for k := range s.delta.entries {
 		if r.Entries == nil {
 			r.Entries = map[string]*Entry{}
@@ -459,8 +472,8 @@ func (s *Store) dropEvents() {
 	kept := s.State.Events[:0]
 	for _, e := range s.State.Events {
 		s.replayIDs++
-		if id := eventID(e); s.replayDrop[id] > 0 {
-			s.replayDrop[id]--
+		if k := removalKey(eventID(e), e.Path); s.replayDrop[k] > 0 {
+			s.replayDrop[k]--
 			continue
 		}
 		kept = append(kept, e)
@@ -494,11 +507,21 @@ func (s *Store) applyRecord(r journalRecord) error {
 	// with the same identity are interchangeable, so the order in which the
 	// records removed them does not matter, and each event's identity is
 	// computed once per replay instead of once per record (PR69 review r3).
-	for _, id := range r.RemovedEvents {
+	if r.RemovedEventPaths != nil && len(r.RemovedEventPaths) != len(r.RemovedEvents) {
+		return fmt.Errorf("%d removed event paths for %d removed events", len(r.RemovedEventPaths), len(r.RemovedEvents))
+	}
+	for i, id := range r.RemovedEvents {
+		path := ""
+		if r.RemovedEventPaths != nil {
+			path = r.RemovedEventPaths[i]
+		}
+		if !validEventPath(Event{Source: "nettop", Path: path}) {
+			return fmt.Errorf("removed event %d: invalid path", i)
+		}
 		if s.replayDrop == nil {
 			s.replayDrop = map[string]int{}
 		}
-		s.replayDrop[id]++
+		s.replayDrop[removalKey(id, path)]++
 	}
 	st.LastEvent, st.EvictedThrough = r.LastEvent, r.EvictedThrough
 	if h := r.Heartbeat; h != nil {

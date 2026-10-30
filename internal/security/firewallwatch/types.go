@@ -27,12 +27,14 @@ type Item struct {
 	Host  string `json:"host,omitempty"`
 	Spike bool   `json:"-"`
 	// PID and ProcName are what nettop printed for the row's process (the
-	// name raw, as nettop truncates it); Path is that process's executable,
-	// resolved at sample time, or "" when it could not be confirmed. None of
-	// them enters the classifier's rendering.
-	PID      int    `json:"-"`
-	ProcName string `json:"-"`
-	Path     string `json:"-"`
+	// name raw, as nettop truncates it); Path is the path that process was
+	// started from, resolved at sample time, or "" when it could not be
+	// confirmed; ImageCDHash is the kernel's code directory hash of the image
+	// it runs (processImage). None of them enters the classifier's rendering.
+	PID         int    `json:"-"`
+	ProcName    string `json:"-"`
+	Path        string `json:"-"`
+	ImageCDHash string `json:"-"`
 }
 
 type Neighbour struct {

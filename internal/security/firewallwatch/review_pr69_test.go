@@ -285,7 +285,7 @@ func TestReviewSignerRestartNoBurst(t *testing.T) {
 	}
 	inspections := 0
 	inspect := func(context.Context, string) (string, error) { inspections++; return "Developer ID: Fixture", nil }
-	s.inspectSigner = inspect
+	s.inspectSigner = signerOnly(inspect)
 	for _, path := range paths {
 		s.signer(context.Background(), path)
 	}
@@ -296,7 +296,7 @@ func TestReviewSignerRestartNoBurst(t *testing.T) {
 		t.Fatal(e)
 	}
 	got := reopen(t, c)
-	got.inspectSigner = inspect
+	got.inspectSigner = signerOnly(inspect)
 	inspections = 0
 	for _, path := range paths {
 		got.signer(context.Background(), path)

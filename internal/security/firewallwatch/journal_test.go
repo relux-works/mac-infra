@@ -568,7 +568,7 @@ func TestJournalSigner(t *testing.T) {
 	s, c := journalStore(t)
 	bundle := t.TempDir()
 	result := "Developer ID: X"
-	s.inspectSigner = func(context.Context, string) (string, error) { return result, nil }
+	s.inspectSigner = signerOnly(func(context.Context, string) (string, error) { return result, nil })
 	s.signer(context.Background(), bundle)
 	if !s.delta.urgent || len(s.delta.signers) != 1 {
 		t.Fatal("new signer result not due at once")
@@ -740,7 +740,7 @@ func TestJournalReplayEqualsRuntime(t *testing.T) {
 	c.MaxEntries = 4
 	c.SaveInterval = "1ms"
 	s := reopen(t, c)
-	s.inspectSigner = func(context.Context, string) (string, error) { return "Developer ID: X", nil }
+	s.inspectSigner = signerOnly(func(context.Context, string) (string, error) { return "Developer ID: X", nil })
 	base := time.Now().Add(-time.Hour).Round(0)
 	canon := func(st State) string {
 		events := slices.Clone(st.Events)

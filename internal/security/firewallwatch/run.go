@@ -72,12 +72,37 @@ func collectorCommand(ctx context.Context, name string) *exec.Cmd {
 	cmd.Env = append([]string{}, childEnv...)
 	return cmd
 }
+
+// ParseCDHash returns the code directory hash codesign printed (its CDHash=
+// line at --verbose=3), or noCDHash when it printed none or an unexpected one.
+func ParseCDHash(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if v, ok := strings.CutPrefix(line, "CDHash="); ok && validCDHash(v) {
+			return v
+		}
+	}
+	return noCDHash
+}
+
+// noCDHash records an inspection that found no code directory hash. An entry
+// whose CDHash is "" was recorded before hashes were kept.
+const noCDHash = "none"
+
+// codeFacts is what one codesign run reports about a file.
+type codeFacts struct {
+	Signer string
+	CDHash string
+}
+
 func codesignCommand(ctx context.Context, path string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "-dv", "--verbose=2", path)
+	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "-dv", "--verbose=3", path)
 	cmd.Env = append([]string{}, childEnv...)
 	return cmd
 }
-func inspectSigner(ctx context.Context, path string) (string, error) {
+
+// inspectSigner reads the signer and the code directory hash from a single
+// codesign run, so both describe the same file.
+func inspectSigner(ctx context.Context, path string) (codeFacts, error) {
 	cmd := codesignCommand(ctx, path)
 	output := &cappedBuffer{limit: 64 * 1024}
 	cmd.Stdout = output
@@ -87,23 +112,42 @@ func inspectSigner(ctx context.Context, path string) (string, error) {
 	if v != "unknown" {
 		err = nil
 	}
-	return v, err
+	return codeFacts{Signer: v, CDHash: ParseCDHash(output.String())}, err
 }
 func (s *Store) signer(ctx context.Context, path string) string {
-	if !filepath.IsAbs(path) || len(path) > LineLimit {
+	return s.inspectCode(ctx, path, false).Signer
+}
+
+// runningSigner is the signer of a running process whose image hash the
+// kernel reported: the file at path lends its signer only when its own code
+// directory hash is that one, so a file replaced after the process started
+// does not attest the process (PR81 review r1).
+func (s *Store) runningSigner(ctx context.Context, path, running string) string {
+	f := s.inspectCode(ctx, path, true)
+	if !validCDHash(running) || f.CDHash != running {
 		return "unknown"
+	}
+	return f.Signer
+}
+
+// inspectCode returns the cached or freshly inspected facts for path. When
+// needHash, an entry recorded before hashes were kept is inspected again.
+func (s *Store) inspectCode(ctx context.Context, path string, needHash bool) codeFacts {
+	unknown := codeFacts{Signer: "unknown", CDHash: noCDHash}
+	if !filepath.IsAbs(path) || len(path) > LineLimit {
+		return unknown
 	}
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "unknown"
+		return unknown
 	}
 	info, err := os.Lstat(real)
 	if err != nil || (!info.Mode().IsRegular() && !info.IsDir()) {
-		return "unknown"
+		return unknown
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return "unknown"
+		return unknown
 	}
 	identity := fmt.Sprintf("%d:%d:%d:%d:%d", st.Dev, st.Ino, st.Size, st.Mtimespec.Nano(), st.Ctimespec.Nano())
 	// Hash the operational path for persistence: even cache keys must not retain IP literals.
@@ -111,11 +155,11 @@ func (s *Store) signer(ctx context.Context, path string) string {
 	now := s.now()
 	// A bundle directory identity cannot attest its inner code. Re-inspect successes;
 	// failed inspections still use the bounded failure TTL.
-	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) {
+	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) && (!needHash || v.Failed || v.CDHash != "") {
 		v.LastSeen = now
 		s.State.Signers[cacheKey] = v
 		s.signerChanged(cacheKey)
-		return v.Value
+		return codeFacts{Signer: v.Value, CDHash: v.CDHash}
 	}
 	childCtx, cancel := context.WithTimeout(ctx, duration(s.Config.ClassifierTimeout))
 	defer cancel()
@@ -123,21 +167,25 @@ func (s *Store) signer(ctx context.Context, path string) string {
 	if inspect == nil {
 		inspect = inspectSigner
 	}
-	v, err := inspect(childCtx, path)
+	f, err := inspect(childCtx, path)
 	if err != nil {
-		v = "unknown"
+		f = unknown
 	}
-	entry := SignerEntry{Value: Sanitize(v), LastSeen: now, Identity: identity, Failed: err != nil, Inspected: now}
+	if !validCDHash(f.CDHash) {
+		f.CDHash = noCDHash
+	}
+	f.Signer = Sanitize(f.Signer)
+	entry := SignerEntry{Value: f.Signer, CDHash: f.CDHash, LastSeen: now, Identity: identity, Failed: err != nil, Inspected: now}
 	// A new or changed result is journaled at once; re-inspections with the
 	// same result (bundle directories, failure retries) only refresh times,
 	// which follow with the next append.
-	if prev, ok := s.State.Signers[cacheKey]; !ok || prev.Value != entry.Value || prev.Identity != entry.Identity || prev.Failed != entry.Failed {
+	if prev, ok := s.State.Signers[cacheKey]; !ok || prev.Value != entry.Value || prev.CDHash != entry.CDHash || prev.Identity != entry.Identity || prev.Failed != entry.Failed {
 		s.delta.urgent = true
 	}
 	s.State.Signers[cacheKey] = entry
 	s.signerChanged(cacheKey)
 	s.dirty = true
-	return Sanitize(v)
+	return f
 }
 
 // scanLines bounds line storage even when the source emits an unterminated
@@ -238,8 +286,14 @@ func (s *Store) collect(ctx context.Context, cl *Classifier, it Item) bool {
 		path = it.App
 	}
 	// Netfilter items carry the extension's verified signing facts. Shutdown
-	// rows need no signer inspection: Classify records backend_shutdown.
-	if it.Source != SourceNetfilter && !cl.shuttingDown(ctx) {
+	// rows need no signer inspection: Classify records backend_shutdown. A
+	// nettop row with a resolved path is a running process: its file's signer
+	// counts only for the image the kernel runs.
+	switch {
+	case it.Source == SourceNetfilter || cl.shuttingDown(ctx):
+	case it.Source == "nettop" && it.Path != "":
+		it.Signer = s.runningSigner(ctx, it.Path, it.ImageCDHash)
+	default:
 		it.Signer = s.signer(ctx, path)
 	}
 	return len(s.observe(it, s.now(), func(it Item) Decision {
@@ -393,7 +447,7 @@ func (s *Store) sampleNettop(run nettopRun, start time.Time, collect func(Item) 
 	items, unknown := ParseNettop(run.output.String())
 	s.State.NettopUnrecognized += unknown
 	rows = len(items)
-	attributePaths(items, lookupProcessPath)
+	attributePaths(items, lookupProcessImage)
 	return collectSample(items, collect, flush, drain)
 }
 

@@ -28,7 +28,11 @@ type Entry struct {
 	Escalated    []string  `json:"escalated,omitempty"`
 }
 type SignerEntry struct {
-	Value     string    `json:"value"`
+	Value string `json:"value"`
+	// CDHash is the file's code directory hash from the same inspection,
+	// noCDHash when codesign printed none, "" when recorded before hashes
+	// were kept.
+	CDHash    string    `json:"cdhash,omitempty"`
 	Identity  string    `json:"identity"`
 	Failed    bool      `json:"failed"`
 	Inspected time.Time `json:"inspected"`
@@ -136,7 +140,7 @@ type Store struct {
 	lastSave      time.Time
 	dayHashes     map[string][32]byte
 	atomicWrite   func(string, []byte) error
-	inspectSigner func(context.Context, string) (string, error)
+	inspectSigner func(context.Context, string) (codeFacts, error)
 	clock         func() time.Time
 	// refs are the retention references of the observations since the last
 	// backward wall step. The expiry they decided is applied lazily: by the
@@ -431,7 +435,7 @@ func (s *Store) validateShape(bounded bool, coverageSlack int) error {
 		}
 	}
 	for k, v := range st.Signers {
-		if len(k) == 0 || len(k) > 1024 || len(v.Value) > 1024 || len(v.Identity) > 1024 || v.LastSeen.IsZero() {
+		if len(k) == 0 || len(k) > 1024 || len(v.Value) > 1024 || len(v.Identity) > 1024 || v.LastSeen.IsZero() || (v.CDHash != "" && v.CDHash != noCDHash && !validCDHash(v.CDHash)) {
 			return bad()
 		}
 	}

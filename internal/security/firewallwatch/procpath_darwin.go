@@ -4,36 +4,51 @@ package firewallwatch
 
 /*
 #include <libproc.h>
+#include <stddef.h>
+#include <sys/types.h>
+
+// csops is the kernel's code signing query; CS_OPS_CDHASH (5) copies the
+// running image's code directory hash.
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 */
 import "C"
 
 import (
+	"encoding/hex"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-// resolveProcessPath returns the executable of pid when the process is still
-// the one nettop printed: its kernel name matches, and its start time is the
-// same before and after the path lookup, so a pid reused in between is not
-// attributed. It reads only the path, never the arguments. "" means not
-// confirmed.
-func resolveProcessPath(pid int, name string) string {
-	before, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if err != nil || before.Proc.P_pid != int32(pid) || !nameMatches(comm(before), name) {
-		return ""
+const csOpsCDHash = 5
+
+// resolveProcessImage reads pid's path and running image hash when the
+// process is still the one nettop printed. It reads only the path and the
+// hash, never the arguments.
+func resolveProcessImage(pid int, name string) processImage {
+	return confirmImage(pid, name, kernelProcInfo, kernelImage)
+}
+
+func kernelProcInfo(pid int) (procInfo, bool) {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return procInfo{}, false
 	}
+	return procInfo{PID: int(kp.Proc.P_pid), Comm: comm(kp), Start: kp.Proc.P_starttime.Nano()}, true
+}
+
+func kernelImage(pid int) (processImage, bool) {
 	var buf [C.PROC_PIDPATHINFO_MAXSIZE]C.char
 	n := C.proc_pidpath(C.int(pid), unsafe.Pointer(&buf[0]), C.uint32_t(len(buf)))
 	if n <= 0 {
-		return ""
+		return processImage{}, false
 	}
-	path := C.GoStringN(&buf[0], n)
-	after, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if err != nil || after.Proc.P_pid != int32(pid) || after.Proc.P_starttime != before.Proc.P_starttime {
-		return ""
+	img := processImage{Path: C.GoStringN(&buf[0], n)}
+	var cd [20]byte
+	if C.csops(C.pid_t(pid), csOpsCDHash, unsafe.Pointer(&cd[0]), C.size_t(len(cd))) == 0 {
+		img.CDHash = hex.EncodeToString(cd[:])
 	}
-	return path
+	return img, true
 }
 
 func comm(kp *unix.KinfoProc) string {

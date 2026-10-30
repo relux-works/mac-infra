@@ -3,6 +3,7 @@
 package firewallwatch
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,22 +40,22 @@ func realPath(t *testing.T, p string) string {
 }
 
 // The real resolver confirms this process by its printed name and returns
-// its executable; a name that is not its own, or a pid that has exited,
-// gives "" (not confirmed).
-func TestResolveProcessPathOwnAndExited(t *testing.T) {
+// its executable and a running image hash; a name that is not its own, or a
+// pid that has exited, gives the zero value (not confirmed).
+func TestResolveProcessImageOwnAndExited(t *testing.T) {
 	exe, _ := os.Executable()
-	got := resolveProcessPath(os.Getpid(), printedName(t, os.Getpid()))
-	if got == "" || realPath(t, got) != realPath(t, exe) {
+	got := resolveProcessImage(os.Getpid(), printedName(t, os.Getpid()))
+	if got.Path == "" || realPath(t, got.Path) != realPath(t, exe) || !validCDHash(got.CDHash) {
 		t.Fatalf("own process: %q, want %q", got, exe)
 	}
-	if p := resolveProcessPath(os.Getpid(), "notmyname"); p != "" {
+	if p := resolveProcessImage(os.Getpid(), "notmyname"); p != (processImage{}) {
 		t.Fatalf("a wrong name was confirmed: %q", p)
 	}
 	cmd := exec.Command("/usr/bin/true")
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
-	if p := resolveProcessPath(cmd.Process.Pid, "true"); p != "" {
+	if p := resolveProcessImage(cmd.Process.Pid, "true"); p != (processImage{}) {
 		t.Fatalf("an exited pid was confirmed: %q", p)
 	}
 }
@@ -74,7 +75,7 @@ const procpathSleepEnv = "FIREWALLWATCH_PROCPATH_SLEEP"
 // A process whose name is longer than nettop prints is confirmed by its
 // 15-byte cut, and its executable (a renamed copy of this test binary) is
 // returned; a shorter printed name is not accepted as a prefix.
-func TestResolveProcessPathLongName(t *testing.T) {
+func TestResolveProcessImageLongName(t *testing.T) {
 	dir := t.TempDir()
 	long := filepath.Join(dir, "averyveryverylongprocessname")
 	exe, _ := os.Executable()
@@ -96,18 +97,18 @@ func TestResolveProcessPathLongName(t *testing.T) {
 	if len(printed) != nettopNameLen {
 		t.Fatalf("printed name %q is not cut", printed)
 	}
-	got := resolveProcessPath(cmd.Process.Pid, printed)
-	if got == "" || realPath(t, got) != realPath(t, long) {
+	got := resolveProcessImage(cmd.Process.Pid, printed)
+	if got.Path == "" || realPath(t, got.Path) != realPath(t, long) {
 		t.Fatalf("long name: %q, want %q", got, long)
 	}
-	if p := resolveProcessPath(cmd.Process.Pid, printed[:10]); p != "" {
+	if p := resolveProcessImage(cmd.Process.Pid, printed[:10]); p != (processImage{}) {
 		t.Fatalf("a shorter printed name was confirmed by prefix: %q", p)
 	}
 }
 
 // Another non-root user's process (a per-user service account) resolves
 // like any other; skipped when no such process runs on this host.
-func TestResolveProcessPathOtherNonRootUser(t *testing.T) {
+func TestResolveProcessImageOtherNonRootUser(t *testing.T) {
 	out, err := exec.Command("/bin/ps", "-axo", "pid=,uid=").Output()
 	if err != nil {
 		t.Fatal(err)
@@ -131,10 +132,80 @@ func TestResolveProcessPathOtherNonRootUser(t *testing.T) {
 		if len(name) > nettopNameLen {
 			name = name[:nettopNameLen]
 		}
-		if got := resolveProcessPath(pid, name); got == "" || !filepath.IsAbs(got) {
+		if got := resolveProcessImage(pid, name); got.Path == "" || !filepath.IsAbs(got.Path) {
 			t.Fatalf("uid %d pid %d (%s): %q", uid, pid, name, got)
 		}
 		return
 	}
 	t.Skip("no process of another non-root user runs here")
+}
+
+// startHelper runs a copy of this test binary at path as a sleeping helper and
+// returns its pid; the process is killed and reaped at the end of the test.
+func startHelper(t *testing.T, path string) int {
+	t.Helper()
+	exe, _ := os.Executable()
+	data, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(path, "-test.run=^TestHelperSleep$")
+	cmd.Env = append(os.Environ(), procpathSleepEnv+"=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	time.Sleep(200 * time.Millisecond)
+	return cmd.Process.Pid
+}
+
+// The kernel's image hash for a running process equals the CDHash codesign
+// prints for the file it runs, so the real resolver and the real inspector
+// agree and the file's signer is attested (control for the case below).
+func TestRunningImageHashMatchesCodesign(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "imagehelper")
+	pid := startHelper(t, path)
+	img := resolveProcessImage(pid, printedName(t, pid))
+	if img.Path == "" || !validCDHash(img.CDHash) {
+		t.Fatalf("helper not resolved: %+v", img)
+	}
+	s, _ := journalStore(t)
+	if got := s.runningSigner(context.Background(), img.Path, img.CDHash); got == "unknown" {
+		t.Fatal("the helper's own file was not attested")
+	}
+}
+
+// A file replaced after its process started does not lend its signer to the
+// process: the path still resolves, the kernel keeps the running image's
+// hash, and the Apple-signed replacement's hash differs, so the signer is
+// "unknown" (PR81 review r1 got "Apple" here).
+func TestReplacedExecutableNotAttested(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "com.apple.probe")
+	pid := startHelper(t, path)
+	before := resolveProcessImage(pid, printedName(t, pid))
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	apple, err := os.ReadFile("/bin/ls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, apple, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	after := resolveProcessImage(pid, printedName(t, pid))
+	if after.Path == "" || after.CDHash != before.CDHash {
+		t.Fatalf("resolution changed: %+v -> %+v", before, after)
+	}
+	s, _ := journalStore(t)
+	ctx := context.Background()
+	if got := s.signer(ctx, after.Path); got != "Apple" {
+		t.Fatalf("fixture: the replacement file is %q, not Apple", got)
+	}
+	if got := s.runningSigner(ctx, after.Path, after.CDHash); got != "unknown" {
+		t.Fatalf("replaced file attested the process as %q", got)
+	}
 }
