@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -74,7 +75,12 @@ func nativeInputs(root string) ([]string, error) {
 			return err
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == ".temp" {
+			// Go builds no package in a directory whose name begins with a
+			// dot (module import paths cannot name one), so native files
+			// there are never compiled: .git, .temp and a checkout's local
+			// tool state. A reviewed input could still read a header from
+			// one; dotDirReference refuses that.
+			if path != root && strings.HasPrefix(entry.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -95,12 +101,44 @@ func nativeInputs(root string) ([]string, error) {
 			if err != nil {
 				return err
 			}
+			if ref, err := dotDirReference(path); err != nil || ref != "" {
+				return errors.Join(err, fmt.Errorf("native input %s names a dot-directory: %q", rel, ref))
+			}
 			inputs = append(inputs, filepath.ToSlash(rel))
 		}
 		return nil
 	})
 	slices.Sort(inputs)
 	return inputs, err
+}
+
+var (
+	includeLine = regexp.MustCompile(`(?m)^\s*#\s*(?:include|include_next|import)\s*[<"]([^>"]+)[>"]`)
+	cgoLine     = regexp.MustCompile(`(?m)^\s*#cgo\b[^:\n]*:(.*)$`)
+)
+
+// dotDirReference returns the first include path or #cgo flag in a native
+// input that names a dot-directory, which the walk does not inspect.
+func dotDirReference(path string) (string, error) {
+	source, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var refs []string
+	for _, m := range includeLine.FindAllSubmatch(source, -1) {
+		refs = append(refs, string(m[1]))
+	}
+	for _, m := range cgoLine.FindAllSubmatch(source, -1) {
+		refs = append(refs, strings.Fields(string(m[1]))...)
+	}
+	for _, ref := range refs {
+		for _, element := range strings.Split(ref, "/") {
+			if strings.HasPrefix(element, ".") && element != "." && element != ".." {
+				return ref, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 func checkNativeInputs(root string, allowlist []string) error {
@@ -162,8 +200,10 @@ func dependencyNativeInputs(p listedPackage) []string {
 	return inputs
 }
 
-// The entire module tree, including tag-excluded files and subdirectory headers,
-// must match the reviewed native inventory. This does not enforce confinement.
+// The entire module tree outside dot-directories, including tag-excluded files
+// and subdirectory headers, must match the reviewed native inventory, and no
+// native input may reach into a dot-directory. This does not enforce
+// confinement.
 func TestNativeInputTripwire(t *testing.T) {
 	if err := checkNativeInputs(moduleRoot(t), reviewedNativeInputs); err != nil {
 		t.Fatal(err)
@@ -256,6 +296,88 @@ func TestNativeInputTripwireControls(t *testing.T) {
 	}
 	if err := checkNativeInputs(root, []string{"missing.c"}); err == nil {
 		t.Fatal("stale allowlist was accepted")
+	}
+}
+
+// A checkout's local tool state in dot-directories (a board's C probe, a
+// legacy install's symlinks) does not trip the scan, which is what a main
+// checkout holds. Everything else still does: a symlink or an unlisted native
+// file outside them, and a dot-named file, which is not a directory. A native
+// input that includes a header from a dot-directory, or points a #cgo flag at
+// one, is refused even when reviewed; ordinary includes pass.
+func TestNativeInputTripwireDotDirectories(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, source string) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remove := func(name string) {
+		t.Helper()
+		if err := os.Remove(filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("ordinary.go", "package ordinary\n")
+	write(".task-board/.resources/T/probe.c", "int probe;")
+	write(".agents/.skills/pdf/SKILL.md", "skill")
+	if err := os.MkdirAll(filepath.Join(root, ".agents/skills"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, ".agents/.skills/pdf"), filepath.Join(root, ".agents/skills/pdf")); err != nil {
+		t.Fatal(err)
+	}
+	write("pkg/ok.c", "#include \"ok.h\"\n#include <Security/Security.h>\n#include \"../include/shared.h\"\n")
+	if err := checkNativeInputs(root, []string{"pkg/ok.c"}); err != nil {
+		t.Fatalf("local tool state control: %v", err)
+	}
+
+	if err := os.Symlink(filepath.Join(root, "ordinary.go"), filepath.Join(root, "pkg/linked.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNativeInputs(root, []string{"pkg/ok.c"}); err == nil || !strings.Contains(err.Error(), "uninspected input") {
+		t.Fatalf("symlink in a package directory: %v", err)
+	}
+	remove("pkg/linked.go")
+
+	for _, name := range []string{"pkg/unlisted.h", "pkg/.hidden.c"} {
+		write(name, "int x;")
+		if err := checkNativeInputs(root, []string{"pkg/ok.c"}); err == nil || !strings.Contains(err.Error(), name) {
+			t.Fatalf("%s: %v", name, err)
+		}
+		remove(name)
+	}
+
+	for _, c := range []struct{ name, source, ref string }{
+		{"pkg/inc.c", "#include \"../.agents/evil.h\"\n", "../.agents/evil.h"},
+		{"pkg/next.h", "#  include_next <.inc/evil.h>\n", ".inc/evil.h"},
+		{"pkg/cgo.go", "package pkg\n\n/*\n#cgo CFLAGS: -Wno-deprecated-declarations -I${SRCDIR}/.inc\n*/\nimport \"C\"\n", "-I${SRCDIR}/.inc"},
+	} {
+		write(c.name, c.source)
+		err := checkNativeInputs(root, []string{"pkg/ok.c", c.name})
+		if err == nil || !strings.Contains(err.Error(), "dot-directory") || !strings.Contains(err.Error(), c.ref) {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		remove(c.name)
+	}
+	if err := checkNativeInputs(root, []string{"pkg/ok.c"}); err != nil {
+		t.Fatalf("control after removals: %v", err)
+	}
+
+	dotRoot := filepath.Join(t.TempDir(), ".checkout")
+	if err := os.MkdirAll(dotRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dotRoot, "unlisted.c"), []byte("int x;"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNativeInputs(dotRoot, nil); err == nil || !strings.Contains(err.Error(), "unlisted.c") {
+		t.Fatalf("a dot-named module root was skipped: %v", err)
 	}
 }
 
