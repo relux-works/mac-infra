@@ -22,7 +22,7 @@ The keys are ordinary keyvault records: kind `key`, address `SERVICE/PURPOSE`, u
 | `mac-keyvault-kek unwrap --address S/P --socket PATH` | Serves one request on a new socket, then exits. A service runs it through `kekclient.Unwrap`, never by hand. |
 | `mac-keyvault-kek rebind --address S/P --socket PATH` | Serves one rebind request (below), then exits. |
 | `mac-keyvault-kek audit-verify` | Checks the audit log's chain under the same framing `unwrap` requires (one complete line per entry, ending in a newline, a private regular file), and prints the entry count and the chain head. |
-| `pkg/kekclient` | Go client: `Wrap` (pure Go, public key only), `Unwrap`, `Rebind`, `ParseEnvelope`, the requirement allowlist, the error codes. |
+| `pkg/kekclient` | Go client: `Wrap` (pure Go, public key only), `Preflight` (metadata-only option validation), `Unwrap`, `Rebind`, `ParseEnvelope`, the requirement allowlist, the error codes. |
 
 Every command disables Keychain UI first. A call that would need a dialog fails instead.
 
@@ -77,8 +77,12 @@ that mode. A certificate binding is an explicit provisioning choice.
 
 ## Unwrap
 
+Call `kekclient.Preflight(Options{Broker, SocketDir})` before changing provisioning state. It validates the same options as an exchange without drawing a nonce or creating a file, socket or process. `SocketDir` must already be a clean absolute path to a real directory owned by the current user, with no group or other permissions; a selected-directory symlink is refused. An existing private service data directory is supported. The generated `kek-<16 hex digits>.sock` pathname must fit the macOS broker's 103-byte limit, measured in UTF-8 bytes. An ordinary parent directory can therefore be at most 77 bytes; 72-byte and 77-byte parents produce 98-byte and 103-byte socket paths, while 78-byte and 81-byte parents are refused. No directory is created, relocated or repaired.
+
+A budget refusal satisfies `errors.Is(err, kekclient.ErrSocketPathTooLong)` and its message contains no private path. Other option errors may contain paths: a service should map them to controlled failure classes rather than print raw errors or broker stderr. Preflight is a metadata observation, not a filesystem lock or proof of caller admission. The exchange repeats the same validation before preparing its nonce, cleanup or broker child; the broker retains its independent checks.
+
 `kekclient.Unwrap(ctx, Options{Broker, SocketDir}, envelope)` takes these steps:
-1. It checks that `SocketDir` is a private directory of the user.
+1. It runs the shared `Preflight` before preparing or starting the broker.
 2. It starts the broker with a fresh socket path and waits for `listening PATH`.
 3. It connects, sends one request line and reads one answer line.
 4. It accepts the answer only if all of these hold:
