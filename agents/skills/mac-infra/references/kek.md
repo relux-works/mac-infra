@@ -78,7 +78,11 @@ The broker runs these gates, in order:
 
 Pipes and inherited descriptors are not a transport: a same-user parent can keep a copy of a pipe across exec.
 
-`Unwrap` runs the broker in its own process group. On a protocol error or at the deadline it kills the group, and it waits at most two seconds more for pipes a descendant might hold.
+`Unwrap` runs the broker in its own process group and kills that group once per exchange, before it reaps the broker:
+- after a protocol error or at the deadline, at once;
+- after a correct answer, once the broker has exited by itself, or after one second. A broker that does not exit in that time is killed, and its answer is refused.
+
+The broker's pid, which is also the group id, cannot be reused before it is reaped, so the signal reaches only the broker's own group. No signal is sent from another goroutine. Pipes a descendant still holds are given up after two seconds. A process that leaves the group on purpose is not contained.
 
 ### Error codes (closed set)
 

@@ -25,6 +25,10 @@ const waitDelay = 2 * time.Second
 // exitGrace is how long a broker that answered gets to exit by itself.
 const exitGrace = time.Second
 
+// killGroup sends SIGKILL to the process group pgid; tests replace it to
+// check when it runs.
+var killGroup = func(pgid int) { syscall.Kill(-pgid, syscall.SIGKILL) }
+
 // ErrProtocol reports a broker answer outside the contract. The answer is
 // not used.
 var ErrProtocol = errors.New("mac-keyvault-kek answered outside contract kek-1")
@@ -111,15 +115,18 @@ func exchange(ctx context.Context, opts Options, op string, env Envelope, envelo
 	sock := filepath.Join(opts.SocketDir, "kek-"+hex.EncodeToString(nonce[:])+".sock")
 	defer os.Remove(sock)
 
-	cmd := exec.CommandContext(ctx, opts.Broker, op, "--address", env.Address, "--socket", sock)
+	// exec.Command, not CommandContext: a context-driven Cancel would run
+	// on its own goroutine and could signal the group after Wait reaped the
+	// broker, when its pid may already belong to someone else. The
+	// deadline is enforced in talk, and the one group signal below is sent
+	// synchronously, before Wait.
+	cmd := exec.Command(opts.Broker, op, "--address", env.Address, "--socket", sock)
 	cmd.Stdin = nil
-	// The broker runs in its own process group. Cancellation kills the
-	// group, and after every exchange the group is killed before the
-	// broker is reaped, so a descendant that stays in the group does not
-	// outlive the exchange; WaitDelay bounds the wait for pipes. A process
-	// that leaves the group on purpose is not contained.
+	// The broker runs in its own process group, which is killed after every
+	// exchange, so a descendant that stays in the group does not outlive
+	// it; WaitDelay bounds the wait for pipes. A process that leaves the
+	// group on purpose is not contained.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = waitDelay
 	var stderr bytes.Buffer
 	cmd.Stderr = &limited{w: &stderr, n: 4096}
@@ -131,20 +138,17 @@ func exchange(ctx context.Context, opts Options, op string, env Envelope, envelo
 		return nil, fmt.Errorf("start broker: %w", err)
 	}
 	res, err := talk(ctx, stdout, sock, op, env, envelope)
-	if err != nil {
-		// A broker that broke the contract or has not answered is stopped,
-		// not waited for.
-		cancel()
-	} else {
+	if err == nil {
 		// A broker that answered exits by itself; give it exitGrace to do
 		// so, so its own exit status is kept.
 		awaitExit(cmd.Process.Pid, exitGrace)
 	}
-	// Until Wait reaps the broker its pid, which is also its process
-	// group's id, cannot be reused, so killing the group here reaches only
-	// the broker's own descendants, whichever way the exchange ended. A
-	// broker that has exited is a zombie and keeps its exit status.
-	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	// The only signal to the group. Until Wait reaps the broker its pid,
+	// which is also the group's id, cannot be reused, so this reaches only
+	// the broker and its own descendants, whichever way the exchange
+	// ended. A broker that has already exited is a zombie and keeps its
+	// exit status.
+	killGroup(cmd.Process.Pid)
 	waitErr := cmd.Wait()
 	if err != nil {
 		if stderr.Len() > 0 {

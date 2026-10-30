@@ -60,7 +60,9 @@ func fakeBroker(args []string) int {
 		if child.Start() != nil {
 			return 1
 		}
-		os.WriteFile(os.Getenv(fakeChildEnv), []byte(fmt.Sprint(child.Process.Pid)), 0o600)
+		// The child's birth identity, so the test never signals a reused pid.
+		id, _ := processIdentity(child.Process.Pid)
+		os.WriteFile(os.Getenv(fakeChildEnv), []byte(id), 0o600)
 		if linger == "silent" {
 			time.Sleep(30 * time.Second)
 			return 0
@@ -116,6 +118,10 @@ func fakeOptions(t *testing.T, answer, ready string) Options {
 	t.Setenv(fakeAnswerEnv, answer)
 	t.Setenv(fakeReadyEnv, ready)
 	t.Setenv(fakeLingerEnv, "")
+	// The fake broker is this test binary. Under -race its runtime sleeps
+	// a second at exit by default, longer than exitGrace, and a correctly
+	// answering fake would be killed; a real broker is not race-built.
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	return Options{Broker: exe, SocketDir: shortDir(t), Timeout: 10 * time.Second}
 }
 
@@ -236,11 +242,14 @@ func TestUnwrapTrustsTheEnvelopeItIsGiven(t *testing.T) {
 // alive past Unwrap, however the exchange ends: after a correct answer
 // (the KEK is returned, the descendant's pipes closed or inherited), after
 // a protocol error, and at the deadline. Unwrap also returns within its
-// bound. The descendant is a recorded /bin/sleep; each case checks that
-// exactly that pid is gone afterwards, not only the elapsed time. The
-// bad-ready case is review r1's timeout witness; the success cases are
-// review r2's.
+// bound. The descendant is a /bin/sleep whose birth identity (pid, start
+// time, command) the fake broker records; the test checks that exactly
+// that process is gone, and its cleanup, registered before any assertion
+// can stop the test, signals only a process with that identity.
 func TestUnwrapLeavesNoDescendantBehind(t *testing.T) {
+	if _, ok := processIdentity(os.Getpid()); !ok {
+		t.Skip("process identity needs darwin")
+	}
 	sealed, _ := testEnvelope(t)
 	cases := []struct {
 		mode, ready string
@@ -255,36 +264,80 @@ func TestUnwrapLeavesNoDescendantBehind(t *testing.T) {
 		t.Run(tc.mode, func(t *testing.T) {
 			opts := fakeOptions(t, "echo-kek", tc.ready)
 			opts.Timeout = 2 * time.Second
-			pidFile := filepath.Join(t.TempDir(), "child")
+			idFile := filepath.Join(t.TempDir(), "child")
 			t.Setenv(fakeLingerEnv, tc.mode)
-			t.Setenv(fakeChildEnv, pidFile)
+			t.Setenv(fakeChildEnv, idFile)
 			start := time.Now()
 			kek, err := Unwrap(context.Background(), opts, sealed)
 			elapsed := time.Since(start)
+			recorded, _ := os.ReadFile(idFile)
+			var pid int
+			fmt.Sscan(string(recorded), &pid)
+			t.Cleanup(func() {
+				if id, ok := processIdentity(pid); ok && pid > 1 && id == string(recorded) {
+					syscall.Kill(pid, syscall.SIGKILL)
+				}
+			})
+			if pid <= 1 {
+				t.Fatalf("the fake broker recorded no descendant: %q", recorded)
+			}
 			if tc.wantKEK != (err == nil && bytes.Equal(kek, testKEK())) {
 				t.Fatalf("kek=%x err=%v", kek, err)
 			}
 			if elapsed > opts.Timeout+waitDelay+exitGrace {
 				t.Fatalf("returned after %v", elapsed)
 			}
-			data, err := os.ReadFile(pidFile)
-			if err != nil {
-				t.Fatalf("the fake broker recorded no descendant: %v", err)
-			}
-			var pid int
-			fmt.Sscan(string(data), &pid)
-			if pid <= 1 {
-				t.Fatalf("bad descendant pid %q", data)
-			}
 			deadline := time.Now().Add(2 * time.Second)
-			for syscall.Kill(pid, 0) == nil {
+			for {
+				id, ok := processIdentity(pid)
+				if !ok || id != string(recorded) {
+					break
+				}
 				if time.Now().After(deadline) {
-					syscall.Kill(pid, syscall.SIGKILL)
-					t.Fatalf("descendant %d outlived Unwrap (%v)", pid, elapsed)
+					t.Fatalf("descendant %s outlived Unwrap (%v)", recorded, elapsed)
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
 		})
+	}
+}
+
+// The one group signal is sent while the broker is not yet reaped, in every
+// way an exchange ends, so its pid, which is the group id, cannot have been
+// reused. The kill hook waits 100 ms first, as a late goroutine would, then
+// requires the broker still present as itself (alive or a zombie). Review
+// r3's witness: a Cancel callback run by os/exec could fire after Wait had
+// reaped the broker.
+func TestGroupSignalPrecedesReaping(t *testing.T) {
+	if _, ok := processIdentity(os.Getpid()); !ok {
+		t.Skip("process identity needs darwin")
+	}
+	sealed, _ := testEnvelope(t)
+	saved := killGroup
+	t.Cleanup(func() { killGroup = saved })
+	var calls, late int
+	killGroup = func(pgid int) {
+		calls++
+		time.Sleep(100 * time.Millisecond)
+		if _, ok := processIdentity(pgid); !ok {
+			late++
+			return
+		}
+		syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+	for _, tc := range []struct{ answer, ready, linger string }{
+		{"echo-kek", "", ""},
+		{"echo-kek", "not a ready line", ""},
+		{"echo-kek", "", "silent"},
+	} {
+		opts := fakeOptions(t, tc.answer, tc.ready)
+		opts.Timeout = time.Second
+		t.Setenv(fakeLingerEnv, tc.linger)
+		t.Setenv(fakeChildEnv, filepath.Join(t.TempDir(), "child"))
+		Unwrap(context.Background(), opts, sealed)
+	}
+	if calls != 3 || late != 0 {
+		t.Fatalf("group signals: %d, after the broker was reaped: %d", calls, late)
 	}
 }
 
