@@ -642,9 +642,12 @@ check and the kind; the next start records it in `write_refusals` (the last
 error, or the private-file check refusing an unsafe file) leaves the same
 marker, with kind `write_failed` and the file's base name in place of the
 check. That covers the flag writer's error, including one that surfaces at the
-shutdown drain, which the marker follows. The next start records it the same
+shutdown drain, which the marker follows, and a snapshot's journal rotation
+(its durability barrier names `state.json`, the journal's check, removal and
+barrier name the journal). The next start records it the same
 way, and the digest labels the gap `write_failed`. The name is read back only
-if it is one of the state files; anything else is recorded as `unknown`. An
+if it is one of the state files, a day file only as `events-YYYY-MM-DD.jsonl`
+with a valid date; anything else is recorded as `unknown`. An
 error that names no state file, such as a collector that ended, leaves no
 marker. If the marker cannot be written the run still ends, and stderr
 carries the error alone. `watch status` shows `clock_held_refreshes`,

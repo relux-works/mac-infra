@@ -346,18 +346,21 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 // snapshot with the whole journal or the new snapshot (skipping records up to
 // its journal_seq), never a lost record.
 func (s *Store) rotateJournal() error {
+	// The first barrier makes the new state.json durable; the check, the
+	// removal and the second barrier are the journal's. A failure names the
+	// file it was for.
 	if e := syncDir(s.Config.StateDir); e != nil {
-		return e
+		return writeFailed(filepath.Join(s.Config.StateDir, "state.json"), e)
 	}
 	path := s.journalPath()
 	if e := safeExisting(path); e != nil {
-		return e
+		return writeFailed(path, e)
 	}
 	if e := os.Remove(path); e != nil && !errors.Is(e, os.ErrNotExist) {
-		return e
+		return writeFailed(path, e)
 	}
 	if e := syncDir(s.Config.StateDir); e != nil {
-		return e
+		return writeFailed(path, e)
 	}
 	s.delta = journalDelta{}
 	s.journalRecords, s.journalBytes, s.journalBroken = 0, 0, false

@@ -134,11 +134,16 @@ func TestOnlyRefusedOrFailedStateWritesLeaveAMarker(t *testing.T) {
 }
 
 // The marker is read back as data, so a write_failed record is admitted only
-// with a state file's name; anything else is recorded as unknown, as a
-// malformed marker is. Refusal kinds keep their rule (a short check name).
+// with a state file's name, a day file only as events-YYYY-MM-DD.jsonl with a
+// valid date; anything else is recorded as unknown, as a malformed marker is.
+// Refusal kinds keep their rule (a short check name).
 func TestWriteFailedMarkerAdmitsOnlyStateFileNames(t *testing.T) {
 	valid := []string{"state.json", journalFile, "new-events.flag", "events-2026-10-30.jsonl"}
-	invalid := []string{"", "../state.json", "/tmp/state.json", "watch.lock", refusalMarker, "events-2026-10-30.jsonl.bak", "events-../../x.jsonl", "events-" + strings.Repeat("9", 40) + ".jsonl", "/Applications/Secret.app"}
+	invalid := []string{"", "../state.json", "/tmp/state.json", "watch.lock", refusalMarker, "events-2026-10-30.jsonl.bak", "events-../../x.jsonl", "events-" + strings.Repeat("9", 40) + ".jsonl", "/Applications/Secret.app",
+		// Short names the day-file pattern would match but saveProjections
+		// never creates: no date, free text, dots, an impossible date, a
+		// one-digit month, a control character.
+		"events-.jsonl", "events-secret.jsonl", "events-..jsonl", "events-2026-99-99.jsonl", "events-2026-1-30.jsonl", "events-2026-10-30\n.jsonl"}
 	c := testConfig(t)
 	s, e := OpenStore(c)
 	if e != nil {
@@ -237,6 +242,38 @@ func TestDrainFailureLeavesTheMarker(t *testing.T) {
 		_, statErr := os.Stat(filepath.Join(c.StateDir, refusalMarker))
 		if fail != (err != nil) || fail != (statErr == nil) {
 			t.Fatalf("fail=%t: run error %v, marker %v", fail, err, statErr)
+		}
+	}
+}
+
+// A snapshot whose journal rotation fails (here the journal fails the
+// private-file check, mode 0644) ends the run naming the journal, and leaves
+// the write_failed marker for it. Positive control: a private journal rotates
+// and leaves no marker.
+func TestRotationFailureNamesTheJournal(t *testing.T) {
+	for _, mode := range []os.FileMode{0644, 0600} {
+		c := testConfig(t)
+		at := time.Now().Round(0)
+		s, e := openRun(c, fixedClock(at))
+		if e != nil {
+			t.Fatal(e)
+		}
+		writeMode(t, filepath.Join(c.StateDir, journalFile), "", mode)
+		err := s.finishRun(nil, at.Add(time.Second))
+		var failed *fileWriteError
+		raw, markerErr := os.ReadFile(filepath.Join(c.StateDir, refusalMarker))
+		if mode == 0600 {
+			if err != nil || !os.IsNotExist(markerErr) {
+				t.Fatalf("private journal: run %v, marker %s %v", err, raw, markerErr)
+			}
+			continue
+		}
+		if !errors.As(err, &failed) || failed.file != journalFile {
+			t.Fatalf("unsafe journal: run %v; want the journal named", err)
+		}
+		var m refusalMarkerFile
+		if markerErr != nil || json.Unmarshal(raw, &m) != nil || m.Kind != refusalKindWriteFailed || m.Field != journalFile {
+			t.Fatalf("unsafe journal: marker %s %v", raw, markerErr)
 		}
 	}
 }

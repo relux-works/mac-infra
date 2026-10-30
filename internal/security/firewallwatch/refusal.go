@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -57,14 +58,20 @@ func writeFailed(path string, err error) error {
 }
 
 // stateFileName admits the names a write_failed record may carry: the state
-// files the watcher writes, nothing else (a marker is read back as data).
+// files the watcher writes, nothing else (a marker is read back as data). A
+// day file is admitted only in the form saveProjections creates,
+// events-YYYY-MM-DD.jsonl with a valid date.
 func stateFileName(name string) bool {
 	switch name {
 	case "state.json", journalFile, "new-events.flag":
 		return true
 	}
-	day, _ := filepath.Match("events-*.jsonl", name)
-	return day && len(name) <= len("events-2006-01-02.jsonl")
+	day, ok := strings.CutPrefix(name, "events-")
+	if day, ok = strings.CutSuffix(day, ".jsonl"); !ok {
+		return false
+	}
+	t, e := time.Parse("2006-01-02", day)
+	return e == nil && t.Format("2006-01-02") == day
 }
 
 // WriteRefusal is a refused write, recorded at the next start. Repeats counts
