@@ -804,11 +804,13 @@ func oldestKeys[T any](m map[string]T, seen func(T) time.Time, n int) []string {
 	})
 	return keys[:min(n, len(keys))]
 }
+
+// write replaces a state file atomically; a failure names the file.
 func (s *Store) write(path string, data []byte) error {
 	if s.atomicWrite != nil {
-		return s.atomicWrite(path, data)
+		return writeFailed(path, s.atomicWrite(path, data))
 	}
-	return atomicWrite(path, data)
+	return writeFailed(path, atomicWrite(path, data))
 }
 
 // Flush makes urgent changes (emitted events, deny-window state, new signer
@@ -1155,7 +1157,7 @@ func (s *Store) saveProjections(now, start time.Time) (e error) {
 	for day, data := range days {
 		path := filepath.Join(s.Config.StateDir, "events-"+day+".jsonl")
 		if e = safeExisting(path); e != nil {
-			return e
+			return writeFailed(path, e)
 		}
 		h := sha256.Sum256(data)
 		previous, ok := s.dayHashes[day]
@@ -1164,12 +1166,12 @@ func (s *Store) saveProjections(now, start time.Time) (e error) {
 				b, err := io.ReadAll(io.LimitReader(f, s.Config.MaxStateBytes+1))
 				f.Close()
 				if err != nil {
-					return err
+					return writeFailed(path, err)
 				}
 				previous = sha256.Sum256(b)
 				ok = true
 			} else if !errors.Is(err, os.ErrNotExist) {
-				return err
+				return writeFailed(path, err)
 			}
 		}
 		if !ok || h != previous {
@@ -1188,11 +1190,11 @@ func (s *Store) saveProjections(now, start time.Time) (e error) {
 		day := strings.TrimSuffix(strings.TrimPrefix(name, "events-"), ".jsonl")
 		if _, ok := days[day]; !ok {
 			if e = safeExisting(path); e != nil {
-				return e
+				return writeFailed(path, e)
 			}
 			delete(s.dayHashes, day)
 			if e = os.Remove(path); e != nil {
-				return e
+				return writeFailed(path, e)
 			}
 		}
 	}
@@ -1322,11 +1324,11 @@ func (s *Store) writeFlag() error {
 func (s *Store) writeFlagFile(stamp []byte) error {
 	flagPath := filepath.Join(s.Config.StateDir, "new-events.flag")
 	if e := safeExisting(flagPath); e != nil {
-		return e
+		return writeFailed(flagPath, e)
 	}
 	existing, readErr := os.ReadFile(flagPath)
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return readErr
+		return writeFailed(flagPath, readErr)
 	}
 	if bytes.Equal(existing, stamp) {
 		return nil

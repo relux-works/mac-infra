@@ -293,10 +293,18 @@ first. `coverage_gaps` lists disjoint intervals in [since, as_of], each with
   was refused within the three refusals recorded before it, so a restart loop
   does not pass silently. A refusal is recorded once, also when a start fails
   or is interrupted after recording it and the marker is read again.
+- `write_failed`: a `not_running` gap during which a run ended because a
+  state file write failed: an I/O error or the private-file check, for
+  example on `new-events.flag`. Its `detail` names, for each failure in the
+  gap, `write_failed` and the file's base name (`state.json`,
+  `state-journal.jsonl`, `new-events.flag` or an `events-YYYY-MM-DD.jsonl`).
+  It says "repeated" when the same file failed within the three records
+  before it. A gap that holds both a refusal and a failure is reported as
+  `write_refused` and names both.
 
 Precedence is `coverage_evicted` > `stall` > covered > `legacy_unknown` >
 `not_running`; a `not_running` gap containing a recorded refusal is reported
-as `write_refused`.
+as `write_refused`, and one containing only failed writes as `write_failed`.
 
 Exact stalls are persisted as the preceding coverage span's optional
 `stall_after: {from, to}`, including open stalls up to the save or collector
@@ -630,8 +638,16 @@ check (stderr) and leaves
 `last-write-refusal.json` in the state directory, holding only the time, the
 check and the kind; the next start records it in `write_refusals` (the last
 32), removes the marker, and the digest labels that restart's gap
-`write_refused`. If the marker cannot be written the run still ends, and
-stderr carries the refusal alone. `watch status` shows `clock_held_refreshes`,
+`write_refused`. A run that ends because a state file write failed (an I/O
+error, or the private-file check refusing an unsafe file) leaves the same
+marker, with kind `write_failed` and the file's base name in place of the
+check. That covers the flag writer's error, including one that surfaces at the
+shutdown drain, which the marker follows. The next start records it the same
+way, and the digest labels the gap `write_failed`. The name is read back only
+if it is one of the state files; anything else is recorded as `unknown`. An
+error that names no state file, such as a collector that ended, leaves no
+marker. If the marker cannot be written the run still ends, and stderr
+carries the error alone. `watch status` shows `clock_held_refreshes`,
 `clock_held_readings` (as of the latest durable snapshot or journal heartbeat)
 and `write_refusals` (as recorded at the latest start; an empty list when none)
 in JSON, and a `clock held: … write refusals=N, latest: …` line in text. The

@@ -44,6 +44,10 @@ const (
 	// GapWriteRefused is a not_running gap during which a run ended because
 	// the shape check refused a write (refusal.go).
 	GapWriteRefused = "write_refused"
+	// GapWriteFailed is a not_running gap during which a run ended because a
+	// state file write failed (refusal.go); Detail names the file. A gap
+	// that also holds a refusal is labelled write_refused.
+	GapWriteFailed = "write_failed"
 )
 
 // SplitGap is a part of the window with unavailable or unknown coverage.
@@ -339,18 +343,29 @@ func (s *Store) labelRefusals(gaps []SplitGap) []SplitGap {
 		// Several runs can fail before any new coverage is durable, so a gap
 		// can hold several refusals: each is named, with its repeat.
 		var parts []string
+		refused := false
 		for _, r := range s.State.WriteRefusals {
 			if r.At.Before(gaps[i].From) || r.At.After(gaps[i].To) {
 				continue
 			}
 			part := r.Kind + " " + r.Check
-			if r.Repeats > 0 {
-				part += fmt.Sprintf(" (repeated: %d earlier refusal(s) of this check in the last %d)", r.Repeats, refusalLoopRestarts)
+			if r.Kind == refusalKindWriteFailed {
+				if r.Repeats > 0 {
+					part += fmt.Sprintf(" (repeated: %d earlier failure(s) of this file in the last %d)", r.Repeats, refusalLoopRestarts)
+				}
+			} else {
+				refused = true
+				if r.Repeats > 0 {
+					part += fmt.Sprintf(" (repeated: %d earlier refusal(s) of this check in the last %d)", r.Repeats, refusalLoopRestarts)
+				}
 			}
 			parts = append(parts, part)
 		}
 		if len(parts) > 0 {
-			gaps[i].Kind = GapWriteRefused
+			gaps[i].Kind = GapWriteFailed
+			if refused {
+				gaps[i].Kind = GapWriteRefused
+			}
 			gaps[i].Detail = strings.Join(parts, "; ")
 		}
 	}

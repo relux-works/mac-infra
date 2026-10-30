@@ -413,17 +413,17 @@ func sampleTick(sample func() (bool, error), save func() error, maintain func())
 	return save()
 }
 
-// finishRun is the run's last step: the final snapshot, the refusal marker
-// when a write was refused (refusal.go), then the flag writer's drain, so
-// Run returns only once the flag is current.
+// finishRun is the run's last step: the final snapshot, the flag writer's
+// drain, so Run returns only once the flag is current, then the marker when
+// a write was refused or failed (refusal.go). The marker comes after the
+// drain so a flag write that fails there is named too; with the writer
+// stopped, the marker is written directly.
 func (s *Store) finishRun(err error, now time.Time) error {
 	err = errors.Join(err, s.Save(now))
-	// A refused write ends the run; the marker lets the next start label the
-	// restart.
-	if errors.Is(err, errInvalidState) {
-		err = errors.Join(err, s.markWriteRefusal(err))
-	}
-	return errors.Join(err, s.stopFlags())
+	err = errors.Join(err, s.stopFlags())
+	// A refused or failed write ends the run; the marker lets the next start
+	// label the restart.
+	return errors.Join(err, s.markWriteRefusal(err))
 }
 
 // stopFlags writes the last flag stamp posted, stops the flag writer and

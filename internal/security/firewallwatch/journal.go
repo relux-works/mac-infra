@@ -300,13 +300,13 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 	}
 	path := s.journalPath()
 	if e := safeExisting(path); e != nil {
-		return e
+		return writeFailed(path, e)
 	}
 	_, statErr := os.Lstat(path)
 	created := errors.Is(statErr, os.ErrNotExist)
 	f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if e != nil {
-		return e
+		return writeFailed(path, e)
 	}
 	if s.journalWrite != nil {
 		e = s.journalWrite(f, line)
@@ -317,12 +317,12 @@ func (s *Store) appendJournal(now time.Time, withHeartbeat bool) (err error) {
 		e = f.Sync()
 	}
 	if e = errors.Join(e, f.Close()); e != nil {
-		return e
+		return writeFailed(path, e)
 	}
 	if created {
 		// The new journal's directory entry must survive a crash too.
 		if e = syncDir(s.Config.StateDir); e != nil {
-			return e
+			return writeFailed(path, e)
 		}
 	}
 	s.journalRecords++
