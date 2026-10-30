@@ -83,9 +83,21 @@ func (s *Store) takeWriteRefusal() (bool, error) {
 	}
 	var m refusalMarkerFile
 	if json.Unmarshal(b, &m) != nil || m.At.IsZero() || len(m.Field) == 0 || len(m.Field) > 64 || (m.Kind != refusalKindJournal && m.Kind != refusalKindSnapshot) {
-		m = refusalMarkerFile{At: s.now(), Field: "unknown", Kind: "unknown"}
+		// The file's own time, so a retried start records the same refusal.
+		at := s.now()
+		if info, e := os.Lstat(path); e == nil {
+			at = info.ModTime()
+		}
+		m = refusalMarkerFile{At: at, Field: "unknown", Kind: "unknown"}
 	}
 	r := WriteRefusal{At: m.At.Round(0), Check: m.Field, Kind: m.Kind}
+	// A start that failed after its snapshot, or was interrupted before it
+	// removed the marker, already recorded this refusal: record it once.
+	for _, done := range s.State.WriteRefusals {
+		if done.At.Equal(r.At) && done.Check == r.Check && done.Kind == r.Kind {
+			return true, nil
+		}
+	}
 	recent := s.State.WriteRefusals[max(0, len(s.State.WriteRefusals)-refusalLoopRestarts):]
 	for _, earlier := range recent {
 		if earlier.Check == r.Check {

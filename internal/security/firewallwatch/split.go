@@ -336,15 +336,22 @@ func (s *Store) labelRefusals(gaps []SplitGap) []SplitGap {
 		if gaps[i].Kind != GapNotRunning {
 			continue
 		}
+		// Several runs can fail before any new coverage is durable, so a gap
+		// can hold several refusals: each is named, with its repeat.
+		var parts []string
 		for _, r := range s.State.WriteRefusals {
 			if r.At.Before(gaps[i].From) || r.At.After(gaps[i].To) {
 				continue
 			}
-			gaps[i].Kind = GapWriteRefused
-			gaps[i].Detail = r.Kind + " " + r.Check
+			part := r.Kind + " " + r.Check
 			if r.Repeats > 0 {
-				gaps[i].Detail += fmt.Sprintf(", repeated: %d earlier refusal(s) of this check in the last %d", r.Repeats, refusalLoopRestarts)
+				part += fmt.Sprintf(" (repeated: %d earlier refusal(s) of this check in the last %d)", r.Repeats, refusalLoopRestarts)
 			}
+			parts = append(parts, part)
+		}
+		if len(parts) > 0 {
+			gaps[i].Kind = GapWriteRefused
+			gaps[i].Detail = strings.Join(parts, "; ")
 		}
 	}
 	return gaps

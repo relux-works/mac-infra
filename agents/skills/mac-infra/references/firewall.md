@@ -286,10 +286,13 @@ first. `coverage_gaps` lists disjoint intervals in [since, as_of], each with
   unknown history; it is not evidence of a watcher stop or restart.
 - `write_refused`: a `not_running` gap during which a run ended because the
   writer refused a record or snapshot the reader would reject (see Clock
-  steps). Its `detail` names the kind (`journal` or `snapshot`) and the refused
-  check (`entry.time_order`, `coverage.span_order`, `coverage.stall_order` or
-  `shape`), and says "repeated" when the same check was refused within the
-  three refusals recorded before it, so a restart loop does not pass silently.
+  steps). Its `detail` names, for each refusal in the gap (several runs can
+  fail before new coverage is durable), the kind (`journal` or `snapshot`) and
+  the refused check (`entry.time_order`, `coverage.span_order`,
+  `coverage.stall_order` or `shape`), and says "repeated" when the same check
+  was refused within the three refusals recorded before it, so a restart loop
+  does not pass silently. A refusal is recorded once, also when a start fails
+  or is interrupted after recording it and the marker is read again.
 
 Precedence is `coverage_evicted` > `stall` > covered > `legacy_unknown` >
 `not_running`; a `not_running` gap containing a recorded refusal is reported

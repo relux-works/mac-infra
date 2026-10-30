@@ -107,9 +107,11 @@ func TestWriteRefusalRepeatsAreReported(t *testing.T) {
 		t.Fatal(e)
 	}
 	s.State.WriteRefusals = []WriteRefusal{{At: at.Add(-3 * time.Minute), Check: checkStallOrder, Kind: refusalKindJournal}, {At: at.Add(-2 * time.Minute), Check: checkStallOrder, Kind: refusalKindJournal}}
+	marks := 0
 	mark := func(check string) WriteRefusal {
 		t.Helper()
-		b, _ := json.Marshal(refusalMarkerFile{At: at, Field: check, Kind: refusalKindSnapshot})
+		marks++ // each refusal its own time: the same marker is recorded once
+		b, _ := json.Marshal(refusalMarkerFile{At: at.Add(time.Duration(marks) * time.Millisecond), Field: check, Kind: refusalKindSnapshot})
 		if e := os.WriteFile(filepath.Join(c.StateDir, refusalMarker), b, 0600); e != nil {
 			t.Fatal(e)
 		}
@@ -168,5 +170,100 @@ func TestWriteRefusalMarkerFailureStillEndsTheRun(t *testing.T) {
 	err := refuseAndEnd(t, s, at)
 	if !errors.Is(err, errInvalidState) || !errors.Is(err, errRefusedRecord) {
 		t.Fatalf("run error %v; want the refusal kept", err)
+	}
+}
+
+func writeMarker(t *testing.T, c Config, raw []byte) {
+	t.Helper()
+	if e := os.WriteFile(filepath.Join(c.StateDir, refusalMarker), raw, 0600); e != nil {
+		t.Fatal(e)
+	}
+}
+
+// Review r2: recording a refusal is idempotent across failed or interrupted
+// starts. Two starts fail after their snapshot already holds the record (the
+// day projection cannot be written), the marker survives them, and the next
+// good start leaves exactly one record with no repeat. The same holds for a
+// malformed marker, recorded with its file's time. Negative control: an
+// import that appends unconditionally records three refusals, two of them
+// false repeats.
+func TestRefusalImportIsIdempotent(t *testing.T) {
+	for _, malformed := range []bool{false, true} {
+		c := testConfig(t)
+		at := time.Now().Round(0)
+		s, e := openRun(c, fixedClock(at))
+		if e != nil {
+			t.Fatal(e)
+		}
+		observeFlush(t, s, newKey(1), at)
+		if e := s.Save(at); e != nil {
+			t.Fatal(e)
+		}
+		if malformed {
+			writeMarker(t, c, []byte("broken"))
+		} else {
+			b, _ := json.Marshal(refusalMarkerFile{At: at.Add(time.Second), Field: checkEntryOrder, Kind: refusalKindJournal})
+			writeMarker(t, c, b)
+		}
+		day := filepath.Join(c.StateDir, "events-"+at.UTC().Format("2006-01-02")+".jsonl")
+		if e := os.Remove(day); e != nil {
+			t.Fatal(e)
+		}
+		if e := os.Mkdir(day, 0700); e != nil {
+			t.Fatal(e)
+		}
+		for attempt := 1; attempt <= 2; attempt++ {
+			if _, e := openRun(c, fixedClock(at.Add(time.Duration(attempt+1)*time.Second))); e == nil {
+				t.Fatal("fixture: the start must fail at the day projection")
+			}
+			if _, e := os.Stat(filepath.Join(c.StateDir, refusalMarker)); e != nil {
+				t.Fatalf("malformed=%v: the marker was lost by a failed start: %v", malformed, e)
+			}
+		}
+		if e := os.Remove(day); e != nil {
+			t.Fatal(e)
+		}
+		r, e := openRun(c, fixedClock(at.Add(4*time.Second)))
+		if e != nil {
+			t.Fatal(e)
+		}
+		if len(r.State.WriteRefusals) != 1 || r.State.WriteRefusals[0].Repeats != 0 {
+			t.Fatalf("malformed=%v: one refusal recorded as %+v", malformed, r.State.WriteRefusals)
+		}
+		if _, e := os.Stat(filepath.Join(c.StateDir, refusalMarker)); !os.IsNotExist(e) {
+			t.Fatalf("malformed=%v: marker left after the good start", malformed)
+		}
+	}
+}
+
+// Review r2: several runs can fail before any new coverage is durable, so one
+// not_running gap can hold several refusals; the label names each and keeps
+// the repeat of an earlier one when a later, first-time check follows.
+// Negative control: keeping only the last refusal's detail drops the repeat.
+func TestSeveralRefusalsInOneGap(t *testing.T) {
+	c := testConfig(t)
+	at := time.Now().Round(0)
+	s, e := openRun(c, fixedClock(at))
+	if e != nil {
+		t.Fatal(e)
+	}
+	s.BeginCoverage(at)
+	if e := s.Save(at.Add(time.Second)); e != nil {
+		t.Fatal(e)
+	}
+	for i, check := range []string{checkStallOrder, checkStallOrder, checkEntryOrder} {
+		b, _ := json.Marshal(refusalMarkerFile{At: at.Add(time.Duration(i+2) * time.Second), Field: check, Kind: refusalKindJournal})
+		writeMarker(t, c, b)
+		if s, e = openRun(c, fixedClock(at.Add(time.Duration(i+3)*time.Second))); e != nil {
+			t.Fatal(e)
+		}
+	}
+	s.BeginCoverage(at.Add(70 * time.Second))
+	if e := s.Save(at.Add(71 * time.Second)); e != nil {
+		t.Fatal(e)
+	}
+	gaps := s.Split(at, at.Add(71*time.Second)).Window.CoverageGaps
+	if len(gaps) != 1 || gaps[0].Kind != GapWriteRefused || !strings.Contains(gaps[0].Detail, "repeated") || !strings.Contains(gaps[0].Detail, checkStallOrder) || !strings.Contains(gaps[0].Detail, checkEntryOrder) {
+		t.Fatalf("gaps %+v; want one write_refused naming both checks and the repeat", gaps)
 	}
 }
