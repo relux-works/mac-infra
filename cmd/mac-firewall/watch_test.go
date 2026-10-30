@@ -257,3 +257,40 @@ func TestWatchRepairCLI(t *testing.T) {
 		t.Fatalf("existing output: exit %d", code)
 	}
 }
+
+// A defect the repair does not fix (not a clock step) still produces the
+// copies and the report, but the repaired directory does not open, the report
+// says so with the reader's error, and the command exits 1, not 0.
+func TestWatchRepairCLIUnrepairedExitsOne(t *testing.T) {
+	config, c := watchConfig(t, 0)
+	s, e := firewallwatch.OpenStore(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Save(time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	statePath := filepath.Join(c.StateDir, "state.json")
+	var st map[string]any
+	b, _ := os.ReadFile(statePath)
+	if e := json.Unmarshal(b, &st); e != nil {
+		t.Fatal(e)
+	}
+	st["coverage_version"] = 99
+	b, _ = json.Marshal(st)
+	if e := os.WriteFile(statePath, b, 0600); e != nil {
+		t.Fatal(e)
+	}
+	var out, errOut bytes.Buffer
+	dir := filepath.Join(t.TempDir(), "repair")
+	if code := run([]string{"watch", "repair", "--config", config, "--out", dir}, &out, &errOut); code != 1 {
+		t.Fatalf("unrepaired state: exit %d, %s", code, errOut.String())
+	}
+	var report firewallwatch.RepairReport
+	if e := json.Unmarshal(out.Bytes(), &report); e != nil || report.Opens || report.OpenError == "" || report.BeforeOpen == "" || len(report.Changes) != 0 {
+		t.Fatalf("report %s (%v)", out.String(), e)
+	}
+	if _, e := os.Stat(filepath.Join(dir, "repaired", "state.json")); e != nil {
+		t.Fatalf("repaired copy: %v", e)
+	}
+}
