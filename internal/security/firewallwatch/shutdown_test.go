@@ -178,7 +178,7 @@ func TestShutdownDiscardedLinesAccounted(t *testing.T) {
 		stalled := make(chan struct{})
 		done := make(chan error, 1)
 		go func() {
-			done <- feedLines(ctx, strings.NewReader(strings.Repeat("{}\n", 65)), lines, shutdownObserver{coverage, stalled})
+			done <- feedLines(ctx, strings.NewReader(strings.Repeat("{}\n", 65)), lines, shutdownObserver{coverage, stalled}, time.Now)
 		}()
 		select {
 		case <-stalled:

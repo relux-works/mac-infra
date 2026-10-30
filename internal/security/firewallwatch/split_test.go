@@ -347,7 +347,7 @@ func TestFeedLinesReportsEndBeforeConsumption(t *testing.T) {
 				}
 			}
 			ended.Store(at.UnixNano())
-		}})
+		}}, time.Now)
 	}()
 	if _, e := w.Write([]byte("{\"a\":1}\n")); e != nil {
 		t.Fatal(e)
@@ -460,7 +460,7 @@ func TestFeedLinesBackpressureGap(t *testing.T) {
 	defer r.Close()
 	lines := make(chan []byte, 64)
 	done := make(chan error, 1)
-	go func() { done <- feedLines(context.Background(), r, lines, observer) }()
+	go func() { done <- feedLines(context.Background(), r, lines, observer, time.Now) }()
 	collectorGone := make(chan error, 1)
 	go func() {
 		for i := 0; i < 100; i++ {
@@ -525,7 +525,7 @@ func TestFeedLinesBackpressureGap(t *testing.T) {
 	lr, lw := io.Pipe()
 	liveLines := make(chan []byte, 64)
 	liveDone := make(chan error, 1)
-	go func() { liveDone <- feedLines(context.Background(), lr, liveLines, live) }()
+	go func() { liveDone <- feedLines(context.Background(), lr, liveLines, live, time.Now) }()
 	for i := 0; i < 100; i++ {
 		if _, e = fmt.Fprintf(lw, "{\"n\":%d}\n", i); e != nil {
 			t.Fatal(e)

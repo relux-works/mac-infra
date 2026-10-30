@@ -108,10 +108,7 @@ func (s *Store) signer(ctx context.Context, path string) string {
 	identity := fmt.Sprintf("%d:%d:%d:%d:%d", st.Dev, st.Ino, st.Size, st.Mtimespec.Nano(), st.Ctimespec.Nano())
 	// Hash the operational path for persistence: even cache keys must not retain IP literals.
 	cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(path)))
-	now := time.Now()
-	if s.clock != nil {
-		now = s.clock()
-	}
+	now := s.now()
 	// A bundle directory identity cannot attest its inner code. Re-inspect successes;
 	// failed inspections still use the bounded failure TTL.
 	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) {
@@ -156,7 +153,7 @@ type collectionObserver interface {
 // as a stall until the line is accepted, because the feeder cannot observe the
 // collector meanwhile; the end of the stream (EOF, error or cancellation) is
 // reported before lines is closed, so the run loop's final save sees it.
-func feedLines(ctx context.Context, r io.Reader, lines chan<- []byte, observer collectionObserver) error {
+func feedLines(ctx context.Context, r io.Reader, lines chan<- []byte, observer collectionObserver, now func() time.Time) error {
 	queueDepth := func(n int) {
 		if o, ok := observer.(interface{ QueueDepth(int) }); ok {
 			o.QueueDepth(n)
@@ -171,11 +168,11 @@ func feedLines(ctx context.Context, r io.Reader, lines chan<- []byte, observer c
 		default:
 		}
 		queueDepth(cap(lines))
-		observer.StallCoverage(time.Now())
+		observer.StallCoverage(now())
 		select {
 		case lines <- copyLine:
 			queueDepth(len(lines))
-			observer.ResumeCoverage(time.Now())
+			observer.ResumeCoverage(now())
 			return nil
 		case <-ctx.Done():
 			if o, ok := observer.(interface{ DropLines(uint64) }); ok {
@@ -184,7 +181,7 @@ func feedLines(ctx context.Context, r io.Reader, lines chan<- []byte, observer c
 			return ctx.Err()
 		}
 	})
-	observer.EndCoverage(time.Now())
+	observer.EndCoverage(now())
 	close(lines)
 	return e
 }
@@ -245,7 +242,7 @@ func (s *Store) collect(ctx context.Context, cl *Classifier, it Item) bool {
 	if it.Source != SourceNetfilter && !cl.shuttingDown(ctx) {
 		it.Signer = s.signer(ctx, path)
 	}
-	return len(s.observe(it, time.Now(), func(it Item) Decision {
+	return len(s.observe(it, s.now(), func(it Item) Decision {
 		return cl.Classify(ctx, it)
 	}, func() bool { return cl.shuttingDown(ctx) })) > 0
 }
@@ -430,9 +427,13 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	if e != nil {
 		return e
 	}
+	// Every timestamp this run stores comes from one clock that never runs
+	// backward (clock.go).
+	clock := &wallClock{}
+	s.clock = clock.now
 	// The startup snapshot folds a replayed journal, a torn tail included,
 	// into state.json and starts a fresh journal.
-	if e = s.Save(time.Now()); e != nil {
+	if e = s.Save(s.now()); e != nil {
 		return e
 	}
 	childCtx, cancel := context.WithCancel(ctx)
@@ -449,14 +450,15 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	// feeders end and discarded queue lines have been counted.
 	defer func() {
 		s.State.BackendHealthy = cl.Healthy()
-		err = errors.Join(err, s.Save(time.Now()))
+		s.State.Health.ClockHeldReadings = clock.heldCount()
+		err = errors.Join(err, s.Save(s.now()))
 	}()
 	// A bounded queue provides backpressure while classification is slow.
 	lines := make(chan []byte, 64)
 	scanDone := make(chan error, 1)
-	s.BeginCoverage(time.Now())
+	s.BeginCoverage(s.now())
 	alfCoverage := s.Coverage("")
-	go func() { scanDone <- feedLines(childCtx, pipe, lines, alfCoverage) }()
+	go func() { scanDone <- feedLines(childCtx, pipe, lines, alfCoverage, s.now) }()
 	defer func() {
 		cancel()
 		pipe.Close()
@@ -483,9 +485,9 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		}
 		netLines = make(chan []byte, 64)
 		netDone := make(chan error, 1)
-		s.BeginSourceCoverage(SourceNetfilter, time.Now())
+		s.BeginSourceCoverage(SourceNetfilter, s.now())
 		netCoverage := s.Coverage(SourceNetfilter)
-		go func() { netDone <- feedLines(childCtx, netPipe, netLines, netCoverage) }()
+		go func() { netDone <- feedLines(childCtx, netPipe, netLines, netCoverage, s.now) }()
 		defer func(queue <-chan []byte) {
 			cancel()
 			netPipe.Close()
@@ -498,14 +500,15 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	collect := func(it Item) bool { return s.collect(ctx, cl, it) }
 	// Startup metadata is dirty, but only an emitted event may flush it early.
 	s.dirty = true
-	s.lastSave = time.Now()
+	s.lastSave = s.now()
 	saveTick := time.NewTicker(duration(c.SaveInterval))
 	defer saveTick.Stop()
 	// save is the tick's and the netfilter end's durable write: a heartbeat
 	// with any pending records, or a snapshot when due.
 	save := func() error {
 		s.State.BackendHealthy = cl.Healthy()
-		e := s.Checkpoint(time.Now())
+		s.State.Health.ClockHeldReadings = clock.heldCount()
+		e := s.Checkpoint(s.now())
 		if e == nil {
 			saveTick.Reset(duration(c.SaveInterval))
 		}
@@ -514,7 +517,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	flush := func(emitted bool) error {
 		previous := s.lastSave
 		s.State.BackendHealthy = cl.Healthy()
-		e := s.Flush(time.Now(), emitted, false)
+		e := s.Flush(s.now(), emitted, false)
 		if !s.lastSave.Equal(previous) {
 			saveTick.Reset(duration(c.SaveInterval))
 		}

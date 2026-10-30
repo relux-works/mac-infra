@@ -328,9 +328,18 @@ func (s *Store) validateState() error { return s.validateShape(true, 0) }
 // journal is first checked unbounded: between snapshots the watcher grows
 // coverage without pruning it, and OpenStore prunes the other items after
 // replay, then checks the bounds.
+// errInvalidState is the shape check's refusal; the writer and the reader share it.
+var errInvalidState = errors.New("invalid structure, count or field")
+
+// wallBefore reports whether a is before b by wall-clock time alone.
+// state.json and the journal hold wall times only, so the writer checks the
+// order the reader will check: two in-run readings ordered by the monotonic
+// clock can be reversed by wall time after the clock was set back.
+func wallBefore(a, b time.Time) bool { return a.Round(0).Before(b.Round(0)) }
+
 func (s *Store) validateShape(bounded bool, coverageSlack int) error {
 	st := s.State
-	bad := func() error { return errors.New("invalid structure, count or field") }
+	bad := func() error { return errInvalidState }
 	if st.CoverageVersion < 0 || st.CoverageVersion > coverageVersion {
 		return bad()
 	}
@@ -341,7 +350,7 @@ func (s *Store) validateShape(bounded bool, coverageSlack int) error {
 		return bad()
 	}
 	for k, v := range st.Entries {
-		if len(k) == 0 || len(k) > 8192 || v == nil || v.Count == 0 || v.Count > math.MaxInt64 || v.Denies < 0 || uint64(v.Denies) > v.Count || v.FirstSeen.IsZero() || v.LastSeen.Before(v.FirstSeen) || v.WindowStart.IsZero() || v.WindowStart.After(v.LastSeen) || len(v.Escalated) > 32 {
+		if len(k) == 0 || len(k) > 8192 || v == nil || v.Count == 0 || v.Count > math.MaxInt64 || v.Denies < 0 || uint64(v.Denies) > v.Count || v.FirstSeen.IsZero() || wallBefore(v.LastSeen, v.FirstSeen) || v.WindowStart.IsZero() || wallBefore(v.LastSeen, v.WindowStart) || len(v.Escalated) > 32 {
 			return bad()
 		}
 		seen := map[string]bool{}
@@ -373,10 +382,10 @@ func (s *Store) validateShape(bounded bool, coverageSlack int) error {
 		if v.ShortStalledNS < 0 || (v.ShortStalls == 0 && v.ShortStalledNS != 0) {
 			return bad()
 		}
-		if stall := v.StallAfter; stall != nil && (!stall.From.Equal(v.End) || stall.To.Before(stall.From)) {
+		if stall := v.StallAfter; stall != nil && (!stall.From.Round(0).Equal(v.End.Round(0)) || wallBefore(stall.To, stall.From)) {
 			return bad()
 		}
-		if v.Start.IsZero() || v.End.Before(v.Start) || (v.Source != "" && v.Source != SourceNetfilter) {
+		if v.Start.IsZero() || wallBefore(v.End, v.Start) || (v.Source != "" && v.Source != SourceNetfilter) {
 			return bad()
 		}
 	}
@@ -466,9 +475,15 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 	// bound is exceeded below or at the next Save. A backward wall step would
 	// lower the cutoff, so it first applies what the later readings already
 	// decided, once per step (PR66 review r1).
+	// The removals of that prune are appended at once: lost in a crash, they
+	// would bring back entries and change which key the cap evicts next.
 	if !s.refs.wallAll.IsZero() && now.Round(0).Before(s.refs.wallAll) {
+		removed := len(s.delta.removedEntries) + len(s.delta.removedEvents) + len(s.delta.removedSigners)
 		s.pruneItems(s.refs.with(now))
 		s.refs = expiryRefs{}
+		if len(s.delta.removedEntries)+len(s.delta.removedEvents)+len(s.delta.removedSigners) != removed {
+			s.delta.urgent = true
+		}
 	}
 	s.refs.add(now)
 	if entry, ok := s.State.Entries[k]; ok && s.expired(entry.LastSeen, s.refs) {
@@ -480,7 +495,17 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 		s.State.Entries[k] = entry
 	}
 	s.dirty = true
-	entry.LastSeen = now
+	// last_seen never moves back in wall time. After the wall clock was set
+	// back, a refresh keeps the recorded last_seen (count and deny state still
+	// update): state.json and the journal hold wall times only, and an earlier
+	// last_seen than first_seen or window_start would make them unreadable.
+	// The entry's expiry then counts from the recorded time, at most the step
+	// size later than the refresh.
+	if exists && now.Round(0).Before(entry.LastSeen.Round(0)) {
+		s.State.Health.ClockHeldRefreshes++
+	} else {
+		entry.LastSeen = now
+	}
 	entry.Count++
 	spike := false
 	denied := it.Verdict != "allow" && it.Verdict != "observed" && it.Verdict != "unknown"

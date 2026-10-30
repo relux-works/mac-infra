@@ -41,6 +41,13 @@ type RunHealth struct {
 	// JournalTornTail counts journals found with a torn last line at open.
 	Journal         TimingSummary `json:"journal"`
 	JournalTornTail uint64        `json:"journal_torn_tail"`
+	// ClockHeldRefreshes counts refreshes whose wall time was earlier than
+	// the entry's recorded last_seen (the wall clock was set back); last_seen
+	// was kept, so it never moves back in wall time.
+	ClockHeldRefreshes uint64 `json:"clock_held_refreshes"`
+	// ClockHeldReadings counts the run clock's readings held at its latest
+	// value because the wall clock was behind it (clock.go).
+	ClockHeldReadings uint64 `json:"clock_held_readings"`
 }
 
 // The slow-operation record keeps run-loop operations of at least two seconds,

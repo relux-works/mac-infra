@@ -121,7 +121,7 @@ func TestRunLoopHandlesLinesWhileNettopRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fed := make(chan error, 1)
-	go func() { fed <- feedLines(ctx, r, queue, stalls) }()
+	go func() { fed <- feedLines(ctx, r, queue, stalls, time.Now) }()
 	go paced(w, lines, 3*time.Millisecond)
 
 	nettop := &fakeNettop{}

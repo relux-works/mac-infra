@@ -282,7 +282,7 @@ func TestRunHealthInstrumentation(t *testing.T) {
 		lines := make(chan []byte, 64)
 		done := make(chan error, 1)
 		go func() {
-			done <- feedLines(context.Background(), bytes.NewBufferString(strings.Repeat("line\n", 70)), lines, tracker)
+			done <- feedLines(context.Background(), bytes.NewBufferString(strings.Repeat("line\n", 70)), lines, tracker, time.Now)
 		}()
 		deadline := time.Now().Add(5 * time.Second)
 		for {

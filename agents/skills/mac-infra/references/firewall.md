@@ -549,8 +549,27 @@ once; coverage is pruned and compacted only by snapshots, so between snapshots
 it can briefly exceed `max_entries`. Those later prunes apply every cutoff an earlier observation had, both
 by monotonic and by wall readings. A clock correction, or a save handed an
 earlier time, never brings back an item an earlier observation had expired.
-The first observation after a backward wall step runs one full prune. A
-per-directory advisory lock is acquired before loading state and refuses
+The first observation after a backward wall step runs one full prune, and
+its removals are appended at once.
+
+Clock steps. `state.json` and the journal hold wall-clock times only, while
+the system time daemon can set the wall clock back, by fractions of a second
+and often. Every timestamp a run stores comes from
+one run clock that never runs backward: during a backward step it holds its
+latest value until the wall clock passes it again, so stored times can be up
+to the step size late, and `health.clock_held_readings` counts the held
+readings. An entry's `last_seen` never moves back in wall time either: a
+refresh earlier than the recorded `last_seen` (an entry loaded from a run
+before the clock was set back) keeps it, while the count and deny state still
+update (`health.clock_held_refreshes`). That entry's expiry then counts from
+the recorded time, later than the refresh by at most the step; after a large
+manual step back (hours), by that much. `first_seen` and `window_start` are
+never moved. Before writing, the watcher checks a record or snapshot as the
+reader will load it, by wall time only; one the reader would reject is refused
+before anything is written (the run ends with an error that names the check),
+never written and never dropped silently.
+
+A per-directory advisory lock is acquired before loading state and refuses
 concurrent collectors. Directory ancestors and same-user concurrent replacement
 are not a security boundary. The files do not form a multi-file transaction,
 and sudden power loss durability is not guaranteed by rename alone.
