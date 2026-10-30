@@ -257,6 +257,45 @@ func TestSetupScopedInstall(t *testing.T) {
 			})
 		}
 	})
+	// Claim: an existing bin/mac-keyvault-kek is kept by a scoped run without
+	// --rebuild-kek: no go build runs, its bytes and installed link are
+	// unchanged. Its keys trust exactly that binary. A stub go answers list and
+	// test (so no real keyvault test runs here) and records any build.
+	t.Run("kek-kept", func(t *testing.T) {
+		f := newSetupFixture(t, cache)
+		buildDir := filepath.Join(f.root, "bin")
+		if err := os.Mkdir(buildDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		kek := filepath.Join(buildDir, "mac-keyvault-kek")
+		writeProvenanceFile(t, kek, "trusted broker bytes")
+		if err := os.Symlink(kek, filepath.Join(f.bin, "mac-keyvault-kek")); err != nil {
+			t.Fatal(err)
+		}
+		tools := t.TempDir()
+		goCalls := filepath.Join(tools, "go-calls")
+		fakeTool(t, tools, "go", `[ "$1" = -C ] && shift 2
+echo "$@" >> '`+goCalls+`'
+case "$1" in
+  list) echo github.com/relux-works/mac-infra/cmd/mac-keyvault-kek ;;
+  test) exit 0 ;;
+  *) exit 77 ;;
+esac`)
+		f.env = append(f.env, "PATH="+tools+":"+os.Getenv("PATH"))
+		beforeBuild, beforeLinks := setupTree(t, buildDir), setupTree(t, f.bin)
+		out, code := f.run(t, "--only", "mac-keyvault-kek", "--allow-unprovable")
+		if code != 0 || !strings.Contains(out, "Keeping the existing bin/mac-keyvault-kek") || strings.Contains(out, "Building mac-keyvault-kek") {
+			t.Fatalf("kek not kept: exit %d\n%s", code, out)
+		}
+		calls, _ := os.ReadFile(goCalls)
+		if strings.Contains(string(calls), "build") {
+			t.Fatalf("go build ran: %q", calls)
+		}
+		if !reflect.DeepEqual(beforeBuild, setupTree(t, buildDir)) || !reflect.DeepEqual(beforeLinks, setupTree(t, f.bin)) {
+			t.Fatal("the kept broker or its link changed")
+		}
+		requireProvenanceBytes(t, kek, []byte("trusted broker bytes"))
+	})
 	// Claim: failures in either the selected command or an in-module dependency abort before staging or publication.
 	t.Run("test-failure", func(t *testing.T) {
 		for _, pkg := range []string{"cmd/mac-load-profile", "internal/loadprofile"} {

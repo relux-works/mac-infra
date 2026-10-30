@@ -346,6 +346,7 @@ func TestSetupProvenanceWiring(t *testing.T) {
 		`trap 'rm -rf "$STAGE_DIR"' EXIT`,
 		`trap 'exit 129' HUP`, `trap 'exit 130' INT`, `trap 'exit 143' TERM`,
 		"if [[ \"$KEYVAULT_DECISION\" == build ]]; then\n  BUILT_BINARIES+=(\"mac-keyvault\")\nfi",
+		"if [[ \"$KEK_DECISION\" == build ]]; then\n  BUILT_BINARIES+=(\"mac-keyvault-kek\")\nfi",
 		`publish "$PROJECT_ROOT" "$STAGE_DIR" "$BUILD_DIR" --allow-unprovable "${BUILT_BINARIES[@]}"`,
 		`publish "$PROJECT_ROOT" "$STAGE_DIR" "$BUILD_DIR" "${BUILT_BINARIES[@]}"`,
 		"WARNING: --allow-unprovable: installed binaries are not provably built from a reviewed commit.",
@@ -363,8 +364,8 @@ func TestSetupProvenanceWiring(t *testing.T) {
 	}
 	list := source[listStart:publish]
 	builds := regexp.MustCompile(`go -C "\$PROJECT_ROOT" build[^\n]* -o "\$STAGE_DIR/([^"\n]+)"`).FindAllStringSubmatch(source, -1)
-	if len(builds) != 17 || strings.Count(source, `go -C "$PROJECT_ROOT" build`) != len(builds) {
-		t.Fatal("all 17 Go outputs must build into staging")
+	if len(builds) != 18 || strings.Count(source, `go -C "$PROJECT_ROOT" build`) != len(builds) {
+		t.Fatal("all 18 Go outputs must build into staging")
 	}
 	for _, build := range builds {
 		if strings.Count(list, `"`+build[1]+`"`) != 1 {

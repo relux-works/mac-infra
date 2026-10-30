@@ -1112,15 +1112,20 @@ func TestOperationsRegistry(t *testing.T) {
 		if op.Name == "export-public" && op.Via != "pub" {
 			t.Fatalf("export-public via %s", op.Via)
 		}
-		// T2 implements sign and verify; every other crypto operation of
-		// the row is still reserved so a consumer never assumes it works.
+		// mac-keyvault implements sign and verify; ECIES decryption is
+		// performed by the separate broker mac-keyvault-kek and names it;
+		// every other crypto operation of the row is still reserved so a
+		// consumer never assumes it works.
 		if op.Name == OperationSign && op.Via != "sign" {
 			t.Fatalf("sign advertised via %s", op.Via)
 		}
 		if op.Name == OperationVerify && op.Via != "verify" {
 			t.Fatalf("verify advertised via %s", op.Via)
 		}
-		if (op.Name == "ecdh-p256" || op.Name == "ecies-p256-encrypt" || op.Name == "ecies-p256-decrypt") && op.Via != ViaReserved {
+		if op.Name == OperationDecrypt && op.Via != "mac-keyvault-kek unwrap" {
+			t.Fatalf("decrypt advertised via %s", op.Via)
+		}
+		if (op.Name == "ecdh-p256" || op.Name == "ecies-p256-encrypt") && op.Via != ViaReserved {
 			t.Fatalf("%s advertised via %s before it is implemented", op.Name, op.Via)
 		}
 		if op.Name == "export-private" {
