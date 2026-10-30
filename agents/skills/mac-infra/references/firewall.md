@@ -445,8 +445,11 @@ differ; mixed with times loaded from `state.json`, those could make it
 cyclic, with a victim that depended on map iteration. Times a run stores come
 from the run clock (see Clock steps) and carry no monotonic reading, so within
 a run the two orders agree, and the change there is the one-pass prune. A
-refresh never moves an entry's `last_seen` back in wall time (see Clock
-steps), so it cannot change the eviction order a crash would lose. Events are
+refresh with a wall time earlier than the recorded `last_seen` keeps that
+time (see Clock steps), so such a backward refresh cannot change the eviction
+order a crash would lose. A forward silent refresh can: until it is appended
+(at most `save_interval`), a crash may make that key the next victim, the
+re-emit exposure described for crashes below. Events are
 evicted as before, oldest timestamp first. Evicted items can become new again; evicted executable cache entries can be inspected
 again. Signature inspection uses `/usr/bin/codesign -dv --verbose=2` on the
 original bounded path held only in memory. Display/persistence uses its sanitized
