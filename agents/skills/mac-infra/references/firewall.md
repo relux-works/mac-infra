@@ -506,8 +506,7 @@ and signers, and checks the bounds. It never prunes or compacts coverage, so a
 reader sees exactly the watcher's spans, gaps and truncated verdicts; replayed
 coverage may exceed `max_entries` by at most one heartbeat's 256-span tail. Only complete lines count: a last line without a newline, or a last
 line that is not valid JSON, is a torn tail, ignored and counted in
-`health.journal_torn_tail`. Any other malformed line, a seq gap or an unknown
-record type refuses the state as corrupt. Readers never write and never create
+`health.journal_torn_tail`. Any other malformed line, a seq gap, an unknown record type, or a record whose items fail the per-item checks (each record is checked before it is applied, so a later record cannot hide an earlier corrupt one) refuses the state as corrupt. Readers never write and never create
 a missing state directory: only the watcher's start-up snapshot removes a torn
 tail, together with the folded journal.
 

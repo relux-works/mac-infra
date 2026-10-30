@@ -424,6 +424,13 @@ func (s *Store) replayJournal(f io.Reader) (torn bool, err error) {
 		if r.Seq != s.seq+1 {
 			return torn, fmt.Errorf("journal record %d: seq %d, want %d", i+1, r.Seq, s.seq+1)
 		}
+		// Each record is checked before it is applied, so a later record
+		// cannot overwrite and hide an earlier corrupt one (PR69 review r7).
+		if r.Type == recordDelta {
+			if e := s.validateRecord(r); e != nil {
+				return torn, fmt.Errorf("journal record %d: %w", i+1, e)
+			}
+		}
 		if e := s.applyRecord(r); e != nil {
 			return torn, fmt.Errorf("journal record %d: %w", i+1, e)
 		}
