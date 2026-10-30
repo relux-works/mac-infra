@@ -462,7 +462,7 @@ func (s *Store) validateShape(bounded bool, coverageSlack int) error {
 		}
 	}
 	for _, v := range st.Events {
-		if v.TS.IsZero() || !validLabel(v.Label) || v.Mode != "shadow" || (v.Source != "alf" && v.Source != "nettop" && v.Source != SourceNetfilter) || !persistedText(v.App, 1024) || !persistedText(v.Signer, 1024) || len(v.Verdict) > 128 || len(v.RemoteClass) > 128 || len(v.Bucket) > 128 || len(v.Kind) > 16 || len(v.Host) > 253 || (v.Host != "" && !hostnamePattern.MatchString(v.Host)) || v.Counts == 0 || v.Counts > math.MaxInt64 || (v.Port != nil && (*v.Port < 1 || *v.Port > 65535)) {
+		if v.TS.IsZero() || !validLabel(v.Label) || v.Mode != "shadow" || (v.Source != "alf" && v.Source != "nettop" && v.Source != SourceNetfilter) || !persistedText(v.App, 1024) || !persistedText(v.Signer, 1024) || len(v.Verdict) > 128 || len(v.RemoteClass) > 128 || len(v.Bucket) > 128 || len(v.Kind) > 16 || len(v.Host) > 253 || (v.Host != "" && !hostnamePattern.MatchString(v.Host)) || v.Counts == 0 || v.Counts > math.MaxInt64 || (v.Port != nil && (*v.Port < 1 || *v.Port > 65535)) || !validEventPath(v) {
 			return bad()
 		}
 		b, e := json.Marshal(v.Reason)
@@ -522,6 +522,12 @@ func key(it Item) string {
 	// destination for an app is a new item (novelty), not a repeat.
 	if it.Source == SourceNetfilter {
 		parts = append(parts, it.Kind, it.Bucket)
+	}
+	// A nettop row whose executable was confirmed is identified by it too,
+	// so two binaries behind one process name are two items. A row without
+	// a confirmed path keeps the key it always had.
+	if it.Source == "nettop" && it.Path != "" {
+		parts = append(parts, it.Path)
 	}
 	raw, _ := json.Marshal(parts)
 	return string(raw)
@@ -609,7 +615,7 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 				entry.Escalated = append(entry.Escalated, d.Reason)
 			}
 		}
-		event := Event{TS: now, Source: it.Source, App: it.App, Signer: it.Signer, Verdict: it.Verdict, Port: port(it), RemoteClass: it.Remote, Bucket: it.Bucket, Host: it.Host, Counts: entry.Count, Label: d.Label, Reason: d.Reason, Mode: "shadow"}
+		event := Event{TS: now, Source: it.Source, App: it.App, Signer: it.Signer, Verdict: it.Verdict, Port: port(it), RemoteClass: it.Remote, Bucket: it.Bucket, Host: it.Host, Path: eventPath(it), Counts: entry.Count, Label: d.Label, Reason: d.Reason, Mode: "shadow"}
 		if it.Source == SourceNetfilter {
 			event.Kind = it.Kind
 		}

@@ -173,7 +173,7 @@ func ParseNettop(text string) (items []Item, unrecognized uint64) {
 	r := csv.NewReader(strings.NewReader(text))
 	r.FieldsPerRecord = -1
 	r.TrimLeadingSpace = true
-	app := ""
+	app, procName, pid := "", "", 0
 	byteColumn := -1
 	for {
 		row, e := r.Read()
@@ -202,13 +202,13 @@ func ParseNettop(text string) (items []Item, unrecognized uint64) {
 		}
 		if !strings.Contains(first, "<->") && !strings.Contains(first, "->") {
 			if i := strings.LastIndex(first, "."); i > 0 {
-				if _, e := strconv.Atoi(first[i+1:]); e == nil {
-					app = Sanitize(first[:i])
+				if n, e := strconv.Atoi(first[i+1:]); e == nil {
+					app, procName, pid = Sanitize(first[:i]), first[:i], n
 					continue
 				}
 			}
 			unrecognized++
-			app = ""
+			app, procName, pid = "", "", 0
 			continue
 		}
 		if app == "" || byteColumn < 0 || byteColumn >= len(row) {
@@ -241,7 +241,7 @@ func ParseNettop(text string) (items []Item, unrecognized uint64) {
 		if b == 0 {
 			continue
 		}
-		items = append(items, Item{Source: "nettop", Kind: "outbound", App: app, Signer: "unknown", Verdict: "observed", Remote: class, RemotePort: &n, Bucket: bucket, MBOut: float64(b) / 1e6, Count: 1})
+		items = append(items, Item{Source: "nettop", Kind: "outbound", App: app, Signer: "unknown", Verdict: "observed", Remote: class, RemotePort: &n, Bucket: bucket, MBOut: float64(b) / 1e6, Count: 1, PID: pid, ProcName: procName})
 	}
 	return
 }

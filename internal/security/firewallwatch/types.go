@@ -26,6 +26,13 @@ type Item struct {
 	// Host is the remote hostname of a netfilter flow (lowercase, no trailing dot).
 	Host  string `json:"host,omitempty"`
 	Spike bool   `json:"-"`
+	// PID and ProcName are what nettop printed for the row's process (the
+	// name raw, as nettop truncates it); Path is that process's executable,
+	// resolved at sample time, or "" when it could not be confirmed. None of
+	// them enters the classifier's rendering.
+	PID      int    `json:"-"`
+	ProcName string `json:"-"`
+	Path     string `json:"-"`
 }
 
 type Neighbour struct {
@@ -47,8 +54,11 @@ type Event struct {
 	RemoteClass string    `json:"remote_class"`
 	Bucket      string    `json:"bucket"`
 	// Kind (direction) and Host are set for netfilter events only.
-	Kind   string `json:"kind,omitempty"`
-	Host   string `json:"host,omitempty"`
+	Kind string `json:"kind,omitempty"`
+	Host string `json:"host,omitempty"`
+	// Path is the executable of a nettop event's process, when it was
+	// confirmed at sample time; absent for other sources.
+	Path   string `json:"path,omitempty"`
 	Counts uint64 `json:"counts"`
 	Label  string `json:"proposed_label"`
 	Reason any    `json:"reason"`

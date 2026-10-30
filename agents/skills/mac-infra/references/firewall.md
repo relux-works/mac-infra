@@ -592,6 +592,24 @@ rather than at once. A command that outlives its timeout (`nettop_interval`) is
 killed by its own PID only; its partial output is discarded, it records
 `nettop_error`, emits nothing and is recorded as a `nettop_sample` without
 items. On shutdown a running command is cancelled and its result discarded.
+Each nettop row names its process as nettop prints it: `name.pid`, with the
+name cut at 15 bytes. The sample resolves each pid once to its executable
+path (`proc_pidpath`; arguments are never read). The process must still be the
+one nettop printed: its kernel name matches the printed one (equal, or a prefix
+when the printed name is 15 bytes long), and its start time is the same before
+and after the lookup. Otherwise the row has no path. A confirmed path:
+- is what the signer inspection inspects, so nettop events carry a real signer
+  instead of `unknown`;
+- joins the row's dedup identity, so two binaries behind one process name are
+  two items;
+- is stored on the event as `path`: absolute, nettop events only. It is private
+  data that stays in local state, journal, day files and digest JSON; it is not
+  for posting anywhere.
+A row without a confirmed path keeps the identity it had before paths existed.
+On the first sample after an upgrade, every nettop app whose path resolves is
+therefore a new item once. An older binary reads state holding `path` and
+drops the field.
+
 Before each nettop row is classified, the sample handles the ALF and netfilter
 lines already queued, at most one queue's worth per source (each source has
 its own budget) and without waiting, so a sample of many slow classifications

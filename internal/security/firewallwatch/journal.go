@@ -126,7 +126,13 @@ func eventID(e Event) string {
 	if e.Port != nil {
 		port = *e.Port
 	}
-	raw, _ := json.Marshal([]any{e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.App, e.Signer, e.Verdict, port, e.RemoteClass, e.Bucket, e.Kind, e.Host, e.Counts, e.Label, kind, e.Mode})
+	parts := []any{e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.App, e.Signer, e.Verdict, port, e.RemoteClass, e.Bucket, e.Kind, e.Host, e.Counts, e.Label, kind, e.Mode}
+	// A nettop event's path is part of its identity; an event without one
+	// keeps the identity it always had, so stored removals still match.
+	if e.Path != "" {
+		parts = append(parts, e.Path)
+	}
+	raw, _ := json.Marshal(parts)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:12])
 }

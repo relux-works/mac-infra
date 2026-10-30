@@ -393,6 +393,7 @@ func (s *Store) sampleNettop(run nettopRun, start time.Time, collect func(Item) 
 	items, unknown := ParseNettop(run.output.String())
 	s.State.NettopUnrecognized += unknown
 	rows = len(items)
+	attributePaths(items, lookupProcessPath)
 	return collectSample(items, collect, flush, drain)
 }
 
