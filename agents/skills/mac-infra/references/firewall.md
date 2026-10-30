@@ -485,11 +485,14 @@ inspection result; `new-events.flag`, which holds the latest event RFC3339
 timestamp, is updated with each append that carries events. Other changes
 (last-seen times and counts, signer refreshes) and the silent state (parser
 and nettop counters, errors, backend health, run-loop health, coverage) follow
-in a heartbeat append once `save_interval` has passed since the last durable
-write completed, on each nettop tick and when the netfilter stream ends. The
-save timer counts elapsed time, not wall time: when it fires, pending changes
-are written even while the run clock holds during a backward wall-clock step,
-so the `save_interval` bound below holds through a step. A
+in a heartbeat append once `save_interval` has passed since the last heartbeat
+or snapshot completed (an urgent append does not restart that interval), on
+each nettop tick and when the netfilter stream ends. The save timer counts
+elapsed time, not wall time: when it fires, pending changes are written even
+while the run clock holds during a backward wall-clock step, so the
+`save_interval` bound below holds through a step. A change in backend health
+or in held clock readings is pending too, so an idle watcher still writes it
+within `save_interval`. A
 heartbeat carries, of the coverage, what changed since the last snapshot, by
 position: the current value of each source's open span there, and the spans
 appended since. Only snapshots prune or reorder coverage, so nothing else can

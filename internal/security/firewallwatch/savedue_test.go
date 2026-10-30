@@ -81,3 +81,45 @@ func TestSaveTimerWritesDueChangesWhileClockHeld(t *testing.T) {
 		}
 	}
 }
+
+// Backend health and the run clock's held readings change without any
+// observation, and Run records them with setRunHealth before the timer's
+// write. After a heartbeat left nothing pending, a backend that exits while
+// the watcher is idle, or readings held during a step, are written by the
+// next tick and a reopened store has them. Positive control: the same values
+// again leave nothing pending, and the tick writes nothing. Limit: Run's
+// closures (setRunHealth, then SaveDue) are checked by inspection.
+func TestSaveTimerWritesChangedRunHealth(t *testing.T) {
+	for _, lane := range []string{"backend exit", "held readings", "unchanged"} {
+		s, c := journalStore(t)
+		s.setRunHealth(true, 1)
+		if e := s.SaveDue(time.Now()); e != nil {
+			t.Fatal(e)
+		}
+		if s.dirty || s.delta.urgent {
+			t.Fatalf("%s: the heartbeat left changes pending", lane)
+		}
+		seq := s.seq
+		healthy, held := true, uint64(1)
+		switch lane {
+		case "backend exit":
+			healthy = false
+		case "held readings":
+			held = 4
+		}
+		s.setRunHealth(healthy, held)
+		if e := s.SaveDue(time.Now()); e != nil {
+			t.Fatal(e)
+		}
+		r := reopen(t, c)
+		if lane == "unchanged" {
+			if s.seq != seq {
+				t.Fatalf("unchanged: seq %d -> %d", seq, s.seq)
+			}
+			continue
+		}
+		if s.seq != seq+1 || r.State.BackendHealthy != healthy || r.State.Health.ClockHeldReadings != held {
+			t.Fatalf("%s: seq %d -> %d, durable healthy %t held %d", lane, seq, s.seq, r.State.BackendHealthy, r.State.Health.ClockHeldReadings)
+		}
+	}
+}

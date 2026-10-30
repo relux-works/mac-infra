@@ -443,9 +443,9 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	// Registered before collector cleanup: the final save runs after both
 	// feeders end and discarded queue lines have been counted.
 	defer func() {
-		s.State.BackendHealthy = cl.Healthy()
-		s.State.Health.ClockHeldReadings = clock.heldCount()
-		err = errors.Join(err, s.Save(s.now()))
+		now := s.now()
+		s.setRunHealth(cl.Healthy(), clock.heldCount())
+		err = errors.Join(err, s.Save(now))
 		// A refused write ends the run; the marker lets the next start label
 		// the restart (refusal.go).
 		if errors.Is(err, errInvalidState) {
@@ -505,9 +505,9 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	// save is the tick's and the netfilter end's durable write: a heartbeat
 	// with any pending records, or a snapshot when due.
 	save := func() error {
-		s.State.BackendHealthy = cl.Healthy()
-		s.State.Health.ClockHeldReadings = clock.heldCount()
-		e := s.Checkpoint(s.now())
+		now := s.now()
+		s.setRunHealth(cl.Healthy(), clock.heldCount())
+		e := s.Checkpoint(now)
 		if e == nil {
 			saveTick.Reset(duration(c.SaveInterval))
 		}
@@ -516,9 +516,9 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	// saveDue is the save timer's write: pending silent changes become durable
 	// when the timer fires, whatever the run clock reads (Store.SaveDue).
 	saveDue := func() error {
-		s.State.BackendHealthy = cl.Healthy()
-		s.State.Health.ClockHeldReadings = clock.heldCount()
-		e := s.SaveDue(s.now())
+		now := s.now()
+		s.setRunHealth(cl.Healthy(), clock.heldCount())
+		e := s.SaveDue(now)
 		if e == nil {
 			saveTick.Reset(duration(c.SaveInterval))
 		}
@@ -526,8 +526,9 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	}
 	flush := func(emitted bool) error {
 		previous := s.lastSave
-		s.State.BackendHealthy = cl.Healthy()
-		e := s.Flush(s.now(), emitted, false)
+		now := s.now()
+		s.setRunHealth(cl.Healthy(), clock.heldCount())
+		e := s.Flush(now, emitted, false)
 		if !s.lastSave.Equal(previous) {
 			saveTick.Reset(duration(c.SaveInterval))
 		}

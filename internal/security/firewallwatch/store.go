@@ -802,17 +802,32 @@ func (s *Store) Checkpoint(now time.Time) error {
 }
 
 // SaveDue is the save timer's write. The timer runs on elapsed time and
-// restarts at every durable write that moves lastSave, so when it fires
-// save_interval has passed since the last one and pending silent changes are
-// due: they become durable now, as a heartbeat or a due snapshot. Flush's own
-// test compares wall times, and while the run clock holds during a backward
-// wall-clock step it would keep waiting, leaving a silent refresh older than
-// save_interval exposed to a crash. Without pending changes it writes nothing.
+// restarts at every heartbeat or snapshot (they move lastSave; an urgent
+// append alone does not), so when it fires save_interval has passed since
+// the last one and pending silent changes are due: they become durable now,
+// as a heartbeat or a due snapshot. Flush's own test compares wall times, and
+// while the run clock holds during a backward wall-clock step it would keep
+// waiting, leaving a silent refresh older than save_interval exposed to a
+// crash. Pending means what marks the store dirty or urgent: observations,
+// parser and collector changes, and the backend health and held readings
+// that setRunHealth records. Without them it writes nothing; a write's own
+// timing summary rides the next write and does not start one.
 func (s *Store) SaveDue(now time.Time) error {
 	if !s.dirty && !s.delta.urgent {
 		return nil
 	}
 	return s.Checkpoint(now)
+}
+
+// setRunHealth records the backend's health and the run clock's held
+// readings, and marks the store dirty when either changed, so the next
+// heartbeat carries them: an idle watcher whose backend exits, or whose clock
+// holds, still writes that within save_interval (SaveDue).
+func (s *Store) setRunHealth(healthy bool, held uint64) {
+	if s.State.BackendHealthy != healthy || s.State.Health.ClockHeldReadings != held {
+		s.dirty = true
+	}
+	s.State.BackendHealthy, s.State.Health.ClockHeldReadings = healthy, held
 }
 
 func (s *Store) journalOrSnapshot(now time.Time, beat bool) error {
