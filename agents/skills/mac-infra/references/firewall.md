@@ -556,13 +556,17 @@ once; coverage is pruned and compacted only by snapshots, so between snapshots
 it can briefly exceed `max_entries`. Those later prunes apply every cutoff an earlier observation had, both
 by monotonic and by wall readings. A clock correction, or a save handed an
 earlier time, never brings back an item an earlier observation had expired.
-The first observation after a backward wall step runs one full prune, and
-its removals are appended at once.
+Under `watch run` the run clock (below) never steps back, so a later reading
+never lowers the expiry cutoff an earlier one set: what an earlier reading
+expired stays expired. For times that do step back (a caller of the store
+passing raw readings), the first observation after the step runs one full
+prune first, and its removals are appended at once.
 
 Clock steps. `state.json` and the journal hold wall-clock times only, while
 the system time daemon can set the wall clock back, by fractions of a second
-and often. Every timestamp a run stores comes from
-one run clock that never runs backward: during a backward step it holds its
+and often. Every entry, event and coverage time a run stores comes
+from one run clock that never runs backward (health timings and slow-operation
+times are not ordered by the reader and keep the system clock): during a backward step it holds its
 latest value until the wall clock passes it again, so stored times can be up
 to the step size late, and `health.clock_held_readings` counts the held
 readings. An entry's `last_seen` never moves back in wall time either: a

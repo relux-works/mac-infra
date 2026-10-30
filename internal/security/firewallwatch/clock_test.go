@@ -258,3 +258,39 @@ func TestBackwardStepPruneIsAppendedAtOnce(t *testing.T) {
 		}
 	}
 }
+
+// Under the run clock a backward wall step is never seen by the store: the
+// backward-step branch (prune with the earlier references, then reset them)
+// is not taken, the expiry references keep the latest reading, and an entry
+// an earlier reading expired stays expired, so observing it again makes it
+// new (it emits). This is why production needs no backward-step prune (the
+// review found the branch unreachable there). Negative control: a clock that
+// does not hold passes the step through, the branch resets the references to
+// the earlier reading, and the reference check fails.
+func TestRunClockKeepsTheExpiryCutoff(t *testing.T) {
+	s := pruneFixture(t, 20)
+	base := time.Now().Round(0)
+	retention := time.Duration(s.Config.RetentionDays) * 24 * time.Hour
+	old, recent := newKey(1), newKey(2)
+	observeFlush(t, s, old, base.Add(-retention+time.Second))
+	observeFlush(t, s, recent, base)
+	if e := s.Save(base); e != nil {
+		t.Fatal(e)
+	}
+	clock := &wallClock{read: steppedClock(base.Add(2*time.Second), base.Add(-time.Second), base.Add(-500*time.Millisecond))}
+	observeFlush(t, s, recent, clock.now()) // sets the cutoff past old's last_seen
+	seq := s.seq
+	observeFlush(t, s, recent, clock.now()) // the wall clock stepped back: held
+	if !s.refs.wallAll.Equal(base.Add(2*time.Second)) || s.seq != seq {
+		t.Fatalf("references at %v, seq %d -> %d; want the latest reading kept and no prune append", s.refs.wallAll, seq, s.seq)
+	}
+	if !s.expired(s.State.Entries[key(old)].LastSeen, s.refs) {
+		t.Fatal("the backward step lowered the expiry cutoff")
+	}
+	if len(observeFlush(t, s, old, clock.now())) != 1 {
+		t.Fatal("an expired entry seen again after the step must be new")
+	}
+	if clock.heldCount() != 2 {
+		t.Fatalf("held %d readings; want 2", clock.heldCount())
+	}
+}

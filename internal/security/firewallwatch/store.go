@@ -511,6 +511,8 @@ func (s *Store) observe(it Item, now time.Time, classify func(Item) Decision, sh
 	// decided, once per step (PR66 review r1).
 	// The removals of that prune are appended at once: lost in a crash, they
 	// would bring back entries and change which key the cap evicts next.
+	// Under Run the clock never steps back (clock.go) and the cutoff cannot
+	// lower, so this applies only to callers passing raw readings.
 	if !s.refs.wallAll.IsZero() && now.Round(0).Before(s.refs.wallAll) {
 		removed := len(s.delta.removedEntries) + len(s.delta.removedEvents) + len(s.delta.removedSigners)
 		s.pruneItems(s.refs.with(now))

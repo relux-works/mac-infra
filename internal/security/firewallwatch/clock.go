@@ -5,8 +5,9 @@ import (
 	"time"
 )
 
-// wallClock is the watcher's clock for every timestamp it stores: wall time
-// that never runs backward. state.json and the journal hold wall times only,
+// wallClock is the watcher's clock for the entry, event and coverage times
+// it stores (the times the reader checks for order): wall time that never
+// runs backward. state.json and the journal hold wall times only,
 // while time.Now also carries a monotonic reading that time comparisons
 // prefer; after the wall clock was set back (this host's time daemon steps it
 // by tenths of a second every hour or two) two readings could then be ordered
