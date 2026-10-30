@@ -413,6 +413,30 @@ func sampleTick(sample func() (bool, error), save func() error, maintain func())
 	return save()
 }
 
+// finishRun is the run's last step: the final snapshot, the refusal marker
+// when a write was refused (refusal.go), then the flag writer's drain, so
+// Run returns only once the flag is current.
+func (s *Store) finishRun(err error, now time.Time) error {
+	err = errors.Join(err, s.Save(now))
+	// A refused write ends the run; the marker lets the next start label the
+	// restart.
+	if errors.Is(err, errInvalidState) {
+		err = errors.Join(err, s.markWriteRefusal(err))
+	}
+	return errors.Join(err, s.stopFlags())
+}
+
+// stopFlags writes the last flag stamp posted, stops the flag writer and
+// returns its first write error; later flag writes are synchronous again.
+func (s *Store) stopFlags() error {
+	if s.flags == nil {
+		return nil
+	}
+	e := s.flags.stop()
+	s.flags = nil
+	return e
+}
+
 func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	if e := safeDir(c.StateDir); e != nil {
 		return e
@@ -430,6 +454,9 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	if e != nil {
 		return e
 	}
+	// Stops the flag writer on a return before the final save is
+	// registered; after it, finishRun has stopped it already.
+	defer func() { err = errors.Join(err, s.stopFlags()) }()
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := collectorCommand(childCtx, "log")
@@ -442,15 +469,12 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 	}
 	// Registered before collector cleanup: the final save runs after both
 	// feeders end and discarded queue lines have been counted.
+	// The final snapshot posts the last flag stamp; the writer then drains
+	// it, so Run returns only once the flag is current.
 	defer func() {
 		now := s.now()
 		s.setRunHealth(cl.Healthy(), clock.heldCount())
-		err = errors.Join(err, s.Save(now))
-		// A refused write ends the run; the marker lets the next start label
-		// the restart (refusal.go).
-		if errors.Is(err, errInvalidState) {
-			err = errors.Join(err, s.markWriteRefusal(err))
-		}
+		err = s.finishRun(err, now)
 	}()
 	// A bounded queue provides backpressure while classification is slow.
 	lines := make(chan []byte, 64)
@@ -587,6 +611,7 @@ func Run(ctx context.Context, c Config, cl *Classifier) (err error) {
 		alf: lines, netfilter: &netLines, saveTick: saveTick.C,
 		tick: tick, interval: duration(c.NettopInterval), sampler: sampler,
 		onALF: onALF, onNetfilter: onNetfilter, flush: flush, saveDue: saveDue,
+		flagFailed: s.flags.failure(), flagErr: s.flags.error,
 		sample: func(run nettopRun, start time.Time) error {
 			return sampleTick(func() (bool, error) {
 				return s.sampleNettop(run, start, collect, flush, drain)
@@ -610,6 +635,10 @@ type runLoop struct {
 	flush       func(emitted bool) error
 	saveDue     func() error
 	sample      func(run nettopRun, start time.Time) error
+	// flagFailed is closed when the flag writer's write fails (nil without
+	// a writer); flagErr returns that error.
+	flagFailed <-chan struct{}
+	flagErr    func() error
 }
 
 // run handles collector lines, the save timer and nettop results until ctx
@@ -634,6 +663,8 @@ func (l *runLoop) run(ctx context.Context) error {
 			if e := l.onNetfilter(line, ok); e != nil {
 				return e
 			}
+		case <-l.flagFailed:
+			return l.flagErr()
 		case <-l.tick.C:
 			l.sampler.begin(ctx, l.interval)
 		case run := <-l.sampler.done:

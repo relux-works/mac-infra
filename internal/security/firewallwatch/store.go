@@ -162,6 +162,9 @@ type Store struct {
 	replayIDs  int
 	// journalWrite replaces the append's single write in tests.
 	journalWrite func(*os.File, []byte) error
+	// flags writes new-events.flag off the run loop while Run runs
+	// (openRun); without it writeFlag writes synchronously.
+	flags *flagWriter
 }
 
 // checkDir applies safeDir's checks to an existing state dir without
@@ -1192,11 +1195,6 @@ func (s *Store) saveProjections(now, start time.Time) (e error) {
 			}
 		}
 	}
-	if !s.State.LastEvent.IsZero() {
-		if e = s.writeFlag(); e != nil {
-			return e
-		}
-	}
 	if e = s.rotateJournal(); e != nil {
 		return e
 	}
@@ -1206,6 +1204,14 @@ func (s *Store) saveProjections(now, start time.Time) (e error) {
 	// The save interval runs from completion: a save slower than the interval
 	// must not make the next silent flush save again at once (BUG-261030-v6ahj5).
 	s.lastSave = now.Add(time.Since(start))
+	// The flag stamps the latest event only now, after rotateJournal's
+	// directory sync made the snapshot durable: it never shows an event that
+	// a crash could still take back.
+	if !s.State.LastEvent.IsZero() {
+		if e = s.writeFlag(); e != nil {
+			return e
+		}
+	}
 	return nil
 }
 
@@ -1300,13 +1306,23 @@ func sortedCoverageSources(m map[string]*SourceCoverage) []string {
 	return keys
 }
 
-// writeFlag stamps new-events.flag with the latest event time, if it changed.
+// writeFlag stamps new-events.flag with the latest event time, if it
+// changed: through the flag writer while Run runs, directly otherwise.
 func (s *Store) writeFlag() error {
+	stamp := []byte(s.State.LastEvent.Format(time.RFC3339Nano) + "\n")
+	if s.flags != nil {
+		return s.flags.post(stamp)
+	}
+	return s.writeFlagFile(stamp)
+}
+
+// writeFlagFile writes stamp to new-events.flag unless it already holds it.
+// It reads only Config, so the flag writer goroutine may call it.
+func (s *Store) writeFlagFile(stamp []byte) error {
 	flagPath := filepath.Join(s.Config.StateDir, "new-events.flag")
 	if e := safeExisting(flagPath); e != nil {
 		return e
 	}
-	stamp := []byte(s.State.LastEvent.Format(time.RFC3339Nano) + "\n")
 	existing, readErr := os.ReadFile(flagPath)
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return readErr

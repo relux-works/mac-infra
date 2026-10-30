@@ -494,8 +494,22 @@ removed, the events added, the identities of the events its prunes removed
 eviction times. An append is due at once for new-key, spike and escalation
 events of every source, for any change of deny-window state (window start,
 deny count, spike or escalation marks) and for a new or changed signer
-inspection result; `new-events.flag`, which holds the latest event RFC3339
-timestamp, is updated with each append that carries events. Other changes
+inspection result. Each emitted event keeps its own durable append.
+`new-events.flag`, which holds the latest event RFC3339 timestamp, is written
+by one flag writer next to the run loop, its only writer while the watcher
+runs (startup, snapshots and shutdown included). An append that carries
+events, and a snapshot, hand it the latest stamp after they have returned
+successfully, so the flag never shows an event the journal or snapshot does
+not hold; the writer keeps only the newest stamp and writes it, pausing
+a fixed 100 ms (not configurable) after each write so the flag's full sync does not compete with the
+journal for the drive. While the watcher runs, the flag lags the journal by
+at most the flag write in progress, 100 ms and one more write, whatever the
+run loop is doing; shutdown waits for the last stamp. A crash can leave the
+flag behind by the stamps not yet written at that moment, never ahead of the
+journal; the next start's startup snapshot brings it current. A flag write error ends the
+run, as before. The flag is a notification that something new exists, never
+a durability signal; the state and `watch digest` are authoritative. Other
+changes
 (last-seen times and counts, signer refreshes) and the silent state (parser
 and nettop counters, errors, backend health, run-loop health, coverage) follow
 in a heartbeat append once `save_interval` has passed since the last heartbeat
@@ -578,7 +592,9 @@ nothing. Row collection, backend maintenance, journal appends and snapshots
 still run on the run loop. Each new item that emits an event costs one journal
 append with `F_FULLFSYNC`, so a flood of lines that are each a new item (for
 example loopback flows to many fresh ports) is handled at the speed of those
-appends, tens of lines per second, and can still stall the feeders. An observation decides only its own key's retention: an entry last
+appends, several tens of lines per second on the measured host, and can still
+stall the feeders. Per-event durability is deliberate: an emitted event is
+security evidence, and a crash during a flood is when it matters most. An observation decides only its own key's retention: an entry last
 seen before the cutoff counts as new. Entries, events and coverage spans nobody
 observes expire at the next snapshot. When an observation takes entries,
 events or signers over `max_entries`, their retention and bound prune runs at

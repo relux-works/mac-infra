@@ -13,8 +13,9 @@ import (
 func fixedClock(t time.Time) func() time.Time { return func() time.Time { return t.Round(0) } }
 
 // refuseAndEnd makes the run's next heartbeat refused, as a stall whose times
-// run backward by wall time would be, and ends the run the way Run does: the
-// final save, then the marker. It returns the run's error.
+// run backward by wall time would be, and ends the run the way Run does
+// (finishRun: the final save, the marker, the flag writer's drain). It
+// returns the run's error.
 func refuseAndEnd(t *testing.T, s *Store, at time.Time) error {
 	t.Helper()
 	back := sameWallLaterMono(t, at.Add(-time.Second), 2*time.Second)
@@ -24,8 +25,7 @@ func refuseAndEnd(t *testing.T, s *Store, at time.Time) error {
 	if !errors.Is(err, errInvalidState) {
 		t.Fatalf("fixture: heartbeat %v; want a refusal", err)
 	}
-	err = errors.Join(err, s.Save(back))
-	return errors.Join(err, s.markWriteRefusal(err))
+	return s.finishRun(err, s.now())
 }
 
 // A refused write leaves a marker holding only {at, field, kind}; the next
@@ -199,6 +199,9 @@ func TestRefusalImportIsIdempotent(t *testing.T) {
 		if e := s.Save(at); e != nil {
 			t.Fatal(e)
 		}
+		if e := s.stopFlags(); e != nil {
+			t.Fatal(e)
+		}
 		if malformed {
 			writeMarker(t, c, []byte("broken"))
 		} else {
@@ -233,6 +236,9 @@ func TestRefusalImportIsIdempotent(t *testing.T) {
 		if _, e := os.Stat(filepath.Join(c.StateDir, refusalMarker)); !os.IsNotExist(e) {
 			t.Fatalf("malformed=%v: marker left after the good start", malformed)
 		}
+		if e := r.stopFlags(); e != nil {
+			t.Fatal(e)
+		}
 	}
 }
 
@@ -252,6 +258,9 @@ func TestSeveralRefusalsInOneGap(t *testing.T) {
 		t.Fatal(e)
 	}
 	for i, check := range []string{checkStallOrder, checkStallOrder, checkEntryOrder} {
+		if e := s.stopFlags(); e != nil {
+			t.Fatal(e)
+		}
 		b, _ := json.Marshal(refusalMarkerFile{At: at.Add(time.Duration(i+2) * time.Second), Field: check, Kind: refusalKindJournal})
 		writeMarker(t, c, b)
 		if s, e = openRun(c, fixedClock(at.Add(time.Duration(i+3)*time.Second))); e != nil {

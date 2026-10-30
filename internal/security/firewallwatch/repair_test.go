@@ -552,7 +552,7 @@ func TestRepairReportsUnsafeRetainedFiles(t *testing.T) {
 			}
 			writeMode(t, filepath.Join(c.StateDir, f), string(b), 0600)
 		}
-		if _, e := openRun(c, time.Now); control != (e == nil) {
+		if e := startAndStop(c); control != (e == nil) {
 			t.Fatalf("%s: start after install: %v", name, e)
 		}
 	}
@@ -648,7 +648,7 @@ func TestStateDirNameIsNotAPattern(t *testing.T) {
 			}
 			writeMode(t, filepath.Join(dir, f), string(b), 0600)
 		}
-		if _, e := openRun(c, time.Now); e != nil {
+		if e := startAndStop(c); e != nil {
 			t.Fatalf("%s: start after install: %v", name, e)
 		}
 		if _, e := os.Stat(filepath.Join(sibling, "events-1900-01-01.jsonl")); e != nil {

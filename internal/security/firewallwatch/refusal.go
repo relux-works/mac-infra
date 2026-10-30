@@ -116,26 +116,36 @@ func (s *Store) clearWriteRefusal() error {
 	return os.Remove(filepath.Join(s.Config.StateDir, refusalMarker))
 }
 
-// openRun opens the store for a run: it sets the run clock, records a write
-// refusal the previous run left, takes the startup snapshot (which folds a
-// replayed journal into state.json and starts a fresh journal) and then
-// removes the marker.
+// openRun opens the store for a run: it sets the run clock, starts the flag
+// writer, records a write refusal the previous run left, takes the startup
+// snapshot (which folds a replayed journal into state.json and starts a fresh
+// journal) and then removes the marker.
 func openRun(c Config, now func() time.Time) (*Store, error) {
 	s, e := OpenStore(c)
 	if e != nil {
 		return nil, e
 	}
+	return s.startRun(now)
+}
+
+// startRun is openRun on a store already opened.
+func (s *Store) startRun(now func() time.Time) (*Store, error) {
 	s.clock = now
+	// The flag writer, the only writer of new-events.flag while the watcher
+	// runs (flagwriter.go), starts before the startup snapshot posts its
+	// stamp; every failure below stops it again.
+	s.flags = startFlagWriter(s.writeFlagFile)
+	fail := func(e error) (*Store, error) { return nil, errors.Join(e, s.stopFlags()) }
 	marked, e := s.takeWriteRefusal()
 	if e != nil {
-		return nil, e
+		return fail(e)
 	}
 	if e = s.Save(s.now()); e != nil {
-		return nil, e
+		return fail(e)
 	}
 	if marked {
 		if e = s.clearWriteRefusal(); e != nil {
-			return nil, e
+			return fail(e)
 		}
 	}
 	return s, nil

@@ -242,10 +242,10 @@ func Repair(c Config, out string) (RepairReport, error) {
 	return report, nil
 }
 
-// checkStart tries a watcher start (openRun: record the marker, then save)
-// on a disposable copy of the repaired files plus the marker, which the
-// install leaves in the state directory, and removes the copy. startErr is
-// openRun's refusal; checkErr is a failure to prepare or remove the copy, in
+// checkStart tries a watcher start (startAndStop: record the marker, save,
+// and the flag writer's first write) on a disposable copy of the repaired
+// files plus the marker, which the install leaves in the state directory,
+// and removes the copy. startErr is the start's refusal; checkErr is a failure to prepare or remove the copy, in
 // which case the start was not tried or the copy was left behind (named).
 func checkStart(c Config, dir string, outputs map[string][]byte, marker []byte) (started bool, startErr, checkErr error) {
 	if e := os.Mkdir(dir, 0700); e != nil {
@@ -267,8 +267,19 @@ func checkStart(c Config, dir string, outputs map[string][]byte, marker []byte) 
 		}
 	}
 	c.StateDir = dir
-	_, startErr = openRun(c, time.Now)
+	startErr = startAndStop(c)
 	return startErr == nil, startErr, remove()
+}
+
+// startAndStop is a watcher start (openRun) without the run: the start's
+// flag writer is stopped again, and its first write error counts as the
+// start's refusal, as it would end a real run.
+func startAndStop(c Config) error {
+	s, e := openRun(c, time.Now)
+	if e != nil {
+		return e
+	}
+	return s.stopFlags()
 }
 
 // retainedUnsafe applies the startup save's file check (safeExisting) to the
