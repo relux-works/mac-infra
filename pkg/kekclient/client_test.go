@@ -414,10 +414,11 @@ func TestUnwrapStopsOnCancellationAfterConnect(t *testing.T) {
 }
 
 // A refused answer leaves no KEK bytes in the client's own buffers: the
-// answer buffer is cleared when the read ends with an error after a whole
+// whole read buffer (the only one the answer is read into; no bufio copy)
+// is cleared, also when the read ends with an error after a whole
 // KEK-bearing answer arrived without its newline, and a KEK decoded from a
 // well-formed answer naming another contract is cleared. Review r5's
-// witnesses. Controls: a valid answer is returned (its buffer still
+// witnesses. Controls: a valid answer is returned (the read buffer still
 // cleared), and an answer about another key clears its decoded KEK.
 func TestRefusedAnswersAreCleared(t *testing.T) {
 	sealed, env := testEnvelope(t)

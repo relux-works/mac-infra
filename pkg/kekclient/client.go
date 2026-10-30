@@ -211,12 +211,14 @@ func talk(ctx context.Context, stdout io.Reader, sock, op string, env Envelope, 
 	if _, err := conn.Write(append(line, '\n')); err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
-	// ReadBytes returns what arrived even with an error (cancellation, EOF,
-	// deadline), and that can be a whole answer without its newline, KEK
-	// included; it is cleared on every path.
-	answer, err := bufio.NewReader(io.LimitReader(conn, 2*maxEnvelopeBytes)).ReadBytes('\n')
-	answerRead(answer)
-	defer clear(answer)
+	// The answer is read into one buffer of fixed size that this code owns
+	// and clears in full on every path, including an error after a whole
+	// answer arrived without its newline. No bufio reader: its internal
+	// buffer would keep a copy of the KEK-bearing line.
+	buf := make([]byte, 2*maxEnvelopeBytes)
+	defer clear(buf)
+	answer, err := readLine(conn, buf)
+	answerRead(buf)
 	if err != nil {
 		return nil, fmt.Errorf("%w: no answer line: %v", ErrProtocol, err)
 	}
@@ -224,6 +226,29 @@ func talk(ctx context.Context, stdout io.Reader, sock, op string, env Envelope, 
 		return nil, fmt.Errorf("exchange cancelled: %w", err)
 	}
 	return checkResponse(answer, env)
+}
+
+// readLine reads from r into buf until a newline, and returns the line,
+// newline included, as a view into buf. It never grows buf, so no copy of
+// what it read is left elsewhere; a line longer than buf is an error.
+func readLine(r io.Reader, buf []byte) ([]byte, error) {
+	n := 0
+	for {
+		if i := bytes.IndexByte(buf[:n], '\n'); i >= 0 {
+			return buf[:i+1], nil
+		}
+		if n == len(buf) {
+			return nil, errors.New("answer line too long")
+		}
+		k, err := r.Read(buf[n:])
+		n += k
+		if err != nil {
+			if i := bytes.IndexByte(buf[:n], '\n'); i >= 0 {
+				return buf[:i+1], nil
+			}
+			return nil, err
+		}
+	}
 }
 
 // checkResponse admits only a contract answer about the envelope's key. A
