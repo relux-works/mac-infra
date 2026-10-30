@@ -121,6 +121,9 @@ func (c *SourceCoverage) DropLines(n uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.droppedLines = addCount(c.droppedLines, n)
+	if n > 0 {
+		c.reported = true
+	}
 }
 
 func addCount(a, b uint64) uint64 {
@@ -169,6 +172,7 @@ func (c *SourceCoverage) queueDepthAt(n int, at time.Time) {
 		c.queueHighWater = n
 		at = at.UTC()
 		c.queueHighWaterAt = &at
+		c.reported = true
 	}
 }
 

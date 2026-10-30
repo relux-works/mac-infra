@@ -491,8 +491,10 @@ each nettop tick and when the netfilter stream ends. The save timer counts
 elapsed time, not wall time: when it fires, pending changes are written even
 while the run clock holds during a backward wall-clock step, so the
 `save_interval` bound below holds through a step. A change in backend health
-or in held clock readings is pending too, so an idle watcher still writes it
-within `save_interval`. A
+or in held clock readings is pending too, and so is a collector report that
+arrives after the heartbeat that took its line (a new queue high-water mark,
+a stall, the collector's end). An idle watcher still writes these within
+`save_interval`. A
 heartbeat carries, of the coverage, what changed since the last snapshot, by
 position: the current value of each source's open span there, and the spans
 appended since. Only snapshots prune or reorder coverage, so nothing else can

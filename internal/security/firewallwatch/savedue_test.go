@@ -93,7 +93,7 @@ func TestSaveTimerWritesChangedRunHealth(t *testing.T) {
 	for _, lane := range []string{"backend exit", "held readings", "unchanged"} {
 		s, c := journalStore(t)
 		s.setRunHealth(true, 1)
-		if e := s.SaveDue(time.Now()); e != nil {
+		if e := s.Checkpoint(time.Now()); e != nil {
 			t.Fatal(e)
 		}
 		if s.dirty || s.delta.urgent {
@@ -120,6 +120,57 @@ func TestSaveTimerWritesChangedRunHealth(t *testing.T) {
 		}
 		if s.seq != seq+1 || r.State.BackendHealthy != healthy || r.State.Health.ClockHeldReadings != held {
 			t.Fatalf("%s: seq %d -> %d, durable healthy %t held %d", lane, seq, s.seq, r.State.BackendHealthy, r.State.Health.ClockHeldReadings)
+		}
+	}
+}
+
+// A feeder can report after the heartbeat that took its row (it records the
+// queue depth after sending the line), and the watcher may then stay idle.
+// Such a report is pending: after a heartbeat left nothing pending, a new
+// queue high-water mark or a closed stall is written by the next timer write,
+// and a reopened store has it. Positive control: a queue depth below the
+// recorded mark reports nothing, and the tick writes nothing. Limit: the
+// feeder interleaving itself is not driven; the test makes the reports
+// directly through the feeders' methods.
+func TestSaveTimerWritesLateCollectorReports(t *testing.T) {
+	for _, lane := range []string{"queue high water", "stall closed", "lower depth"} {
+		s, c := journalStore(t)
+		at := time.Now().Round(0)
+		s.BeginCoverage(at)
+		s.QueueDepth(3)
+		if e := s.Checkpoint(at.Add(time.Second)); e != nil {
+			t.Fatal(e)
+		}
+		if s.dirty || s.delta.urgent || s.collectorsReported() {
+			t.Fatalf("%s: the heartbeat left changes pending", lane)
+		}
+		seq := s.seq
+		switch lane {
+		case "queue high water":
+			s.QueueDepth(7)
+		case "stall closed":
+			s.StallCoverage(at.Add(2 * time.Second))
+			s.ResumeCoverage(at.Add(3 * time.Second))
+		case "lower depth":
+			s.QueueDepth(2)
+		}
+		if e := s.SaveDue(at.Add(4 * time.Second)); e != nil {
+			t.Fatal(e)
+		}
+		r := reopen(t, c)
+		switch lane {
+		case "queue high water":
+			if s.seq != seq+1 || r.State.Health.LineQueueHighWater.ALF != 7 {
+				t.Fatalf("queue high water: seq %d -> %d, durable %d", seq, s.seq, r.State.Health.LineQueueHighWater.ALF)
+			}
+		case "stall closed":
+			if s.seq != seq+1 || len(r.State.Coverage) < 2 {
+				t.Fatalf("stall closed: seq %d -> %d, durable spans %d", seq, s.seq, len(r.State.Coverage))
+			}
+		case "lower depth":
+			if s.seq != seq || r.State.Health.LineQueueHighWater.ALF != 3 {
+				t.Fatalf("lower depth: seq %d -> %d, durable %d", seq, s.seq, r.State.Health.LineQueueHighWater.ALF)
+			}
 		}
 	}
 }

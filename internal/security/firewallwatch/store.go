@@ -121,6 +121,11 @@ type SourceCoverage struct {
 	queueHighWater   int
 	queueHighWaterAt *time.Time
 	droppedLines     uint64
+	// reported is set when a feeder records something new (a stall, its end,
+	// a queue high-water mark, the collector's end, dropped lines) and
+	// cleared when a write takes the observations (applyCollectors). It makes
+	// a report that arrives after a heartbeat pending (SaveDue).
+	reported bool
 }
 
 type Store struct {
@@ -808,15 +813,30 @@ func (s *Store) Checkpoint(now time.Time) error {
 // as a heartbeat or a due snapshot. Flush's own test compares wall times, and
 // while the run clock holds during a backward wall-clock step it would keep
 // waiting, leaving a silent refresh older than save_interval exposed to a
-// crash. Pending means what marks the store dirty or urgent: observations,
-// parser and collector changes, and the backend health and held readings
-// that setRunHealth records. Without them it writes nothing; a write's own
-// timing summary rides the next write and does not start one.
+// crash. Pending means what marks the store dirty or urgent (observations,
+// parser changes, and the backend health and held readings that
+// setRunHealth records) and what a feeder reported since the last write
+// (collectorsReported). Without them it writes nothing; a write's own timing
+// summary rides the next write and does not start one.
 func (s *Store) SaveDue(now time.Time) error {
-	if !s.dirty && !s.delta.urgent {
+	if !s.dirty && !s.delta.urgent && !s.collectorsReported() {
 		return nil
 	}
 	return s.Checkpoint(now)
+}
+
+// collectorsReported is whether a feeder recorded something since a write
+// last took the collectors' observations (SourceCoverage.reported).
+func (s *Store) collectorsReported() bool {
+	for _, c := range s.coverage {
+		c.mu.Lock()
+		reported := c.reported
+		c.mu.Unlock()
+		if reported {
+			return true
+		}
+	}
+	return false
 }
 
 // setRunHealth records the backend's health and the run clock's held
@@ -885,6 +905,7 @@ func (c *SourceCoverage) StallCoverage(at time.Time) {
 	defer c.mu.Unlock()
 	if c.stalledAt.IsZero() {
 		c.stalledAt = at
+		c.reported = true
 	}
 }
 
@@ -908,6 +929,7 @@ func (c *SourceCoverage) ResumeCoverage(at time.Time) {
 			}
 		}
 		c.stalledAt = time.Time{}
+		c.reported = true
 	}
 }
 
@@ -919,6 +941,7 @@ func (c *SourceCoverage) EndCoverage(at time.Time) {
 	defer c.mu.Unlock()
 	if c.endedAt.IsZero() {
 		c.endedAt = at
+		c.reported = true
 	}
 }
 
@@ -1063,6 +1086,10 @@ func (s *Store) applyCollectors(now time.Time) {
 		c.mu.Lock()
 		dropped := c.droppedLines
 		c.droppedLines = 0
+		// Cleared before the observations are taken below: a report arriving
+		// in between is written now and also counts as pending, so at worst
+		// it costs one more heartbeat, never a lost report.
+		c.reported = false
 		c.mu.Unlock()
 		drops := &s.State.Health.ShutdownDroppedLines.ALF
 		if source == SourceNetfilter {
