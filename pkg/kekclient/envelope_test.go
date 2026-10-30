@@ -9,6 +9,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -300,6 +301,40 @@ func TestParsePayloadChecksItsEnvelope(t *testing.T) {
 	} {
 		if _, err := ParsePayload(data, env); err == nil {
 			t.Fatalf("%s: parsed", name)
+		}
+	}
+}
+
+// A refused answer has no KEK decoded at all: every nested shape is checked
+// on the raw bytes before the typed decode, so a repeated or case-aliased
+// "kek" (with a string or null second value) cannot leave an overwritten
+// decoded allocation behind. Review r6's witness. Control: the valid
+// answer decodes its KEK.
+func TestRefusedNestedAnswerDecodesNoKEK(t *testing.T) {
+	_, env := func() ([]byte, Envelope) {
+		k := newTestKey(t)
+		sealed, _ := Wrap(testSpec(k), testKEK())
+		e, _ := ParseEnvelope(sealed)
+		return sealed, e
+	}()
+	b64 := base64.StdEncoding.EncodeToString(testKEK())
+	head := `{"contract":"kek-1","ok":true,"result":{"address":"` + env.Address + `","generation":1,"fingerprint":"` + env.Fingerprint + `",`
+	valid := head + `"kek":"` + b64 + `"}}`
+	resp, err := parseResponse([]byte(valid))
+	if err != nil || resp.Result == nil || !bytes.Equal(resp.Result.KEK, testKEK()) {
+		t.Fatalf("control: %+v %v", resp.Result, err)
+	}
+	cases := map[string]string{
+		"repeated kek, string": head + `"kek":"` + b64 + `","kek":"` + b64 + `"}}`,
+		"repeated kek, null":   head + `"kek":"` + b64 + `","kek":null}}`,
+		"alias KEK, string":    head + `"kek":"` + b64 + `","KEK":"` + b64 + `"}}`,
+		"alias KEK, null":      head + `"kek":"` + b64 + `","KEK":null}}`,
+		"unknown member":       head + `"kek":"` + b64 + `","note":"x"}}`,
+	}
+	for name, line := range cases {
+		resp, err := parseResponse([]byte(line))
+		if err == nil || resp.Result != nil {
+			t.Fatalf("%s: err=%v, a result was decoded: %+v", name, err, resp.Result)
 		}
 	}
 }

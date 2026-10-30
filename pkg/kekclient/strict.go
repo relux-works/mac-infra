@@ -161,19 +161,24 @@ func ParseRequest(data []byte) (Request, Envelope, error) {
 }
 
 // parseResponse reads an answer line strictly, nested result and error
-// objects included, and requires exactly one of them, matching ok.
+// objects included, and requires exactly one of them, matching ok. Every
+// shape, nested ones too, is checked on the raw bytes BEFORE the typed
+// decode, so a refused answer never has a KEK decoded at all: a repeated
+// or case-aliased "kek" member cannot leave an overwritten, uncleared
+// allocation behind.
 func parseResponse(data []byte) (Response, error) {
 	var resp Response
-	members, err := decodeStrict(data, responseShape, &resp)
+	members, err := checkShape(data, responseShape)
 	if err != nil {
 		return resp, err
 	}
+	ok := bytes.Equal(bytes.TrimSpace(members["ok"]), []byte("true"))
 	result, hasResult := members["result"]
 	errObj, hasError := members["error"]
 	switch {
-	case resp.OK && (!hasResult || hasError):
+	case ok && (!hasResult || hasError):
 		return resp, errors.New("success without exactly one result")
-	case !resp.OK && (hasResult || !hasError):
+	case !ok && (hasResult || !hasError):
 		return resp, errors.New("refusal without exactly one error")
 	}
 	if hasResult {
@@ -192,5 +197,5 @@ func parseResponse(data []byte) (Response, error) {
 			return resp, fmt.Errorf("error: %w", err)
 		}
 	}
-	return resp, nil
+	return resp, json.Unmarshal(data, &resp)
 }
