@@ -32,6 +32,9 @@ const (
 	// ("delay") after reading the request; it writes fakeMarkerEnv first.
 	fakeAfterReadEnv = "KEKCLIENT_FAKE_AFTER_READ"
 	fakeMarkerEnv    = "KEKCLIENT_FAKE_MARKER"
+	// fakeNoNewlineEnv makes the fake send its answer without the newline
+	// and close: the client reads a whole answer and an EOF.
+	fakeNoNewlineEnv = "KEKCLIENT_FAKE_NO_NEWLINE"
 )
 
 func TestMain(m *testing.M) {
@@ -104,6 +107,10 @@ func fakeBroker(args []string) int {
 		b, _ := json.Marshal(Response{Contract: Contract, OK: true, Result: &Result{Address: env.Address, Generation: env.Generation, Fingerprint: env.Fingerprint, KEK: testKEK()}})
 		answer = string(b)
 	}
+	if os.Getenv(fakeNoNewlineEnv) != "" {
+		fmt.Fprint(conn, answer)
+		return 0
+	}
 	fmt.Fprintln(conn, answer)
 	return 0
 }
@@ -133,6 +140,7 @@ func fakeOptions(t *testing.T, answer, ready string) Options {
 	t.Setenv(fakeReadyEnv, ready)
 	t.Setenv(fakeLingerEnv, "")
 	t.Setenv(fakeAfterReadEnv, "")
+	t.Setenv(fakeNoNewlineEnv, "")
 	// The fake broker is this test binary. Under -race its runtime sleeps
 	// a second at exit by default, longer than exitGrace, and a correctly
 	// answering fake would be killed; a real broker is not race-built.
@@ -400,6 +408,66 @@ func TestUnwrapStopsOnCancellationAfterConnect(t *testing.T) {
 			}
 			if took := o.at.Sub(cancelled); took > 300*time.Millisecond {
 				t.Fatalf("cancellation took effect after %v", took)
+			}
+		})
+	}
+}
+
+// A refused answer leaves no KEK bytes in the client's own buffers: the
+// answer buffer is cleared when the read ends with an error after a whole
+// KEK-bearing answer arrived without its newline, and a KEK decoded from a
+// well-formed answer naming another contract is cleared. Review r5's
+// witnesses. Controls: a valid answer is returned (its buffer still
+// cleared), and an answer about another key clears its decoded KEK.
+func TestRefusedAnswersAreCleared(t *testing.T) {
+	sealed, env := testEnvelope(t)
+	savedRead, savedDecoded := answerRead, responseDecoded
+	t.Cleanup(func() { answerRead, responseDecoded = savedRead, savedDecoded })
+	var buffers [][]byte
+	var decoded []*Response
+	answerRead = func(b []byte) { buffers = append(buffers, b) }
+	responseDecoded = func(r *Response) { decoded = append(decoded, r) }
+	zero := func(b []byte) bool {
+		for _, c := range b {
+			if c != 0 {
+				return false
+			}
+		}
+		return len(b) > 0
+	}
+	answerFor := func(contract, fingerprint string) string {
+		b, _ := json.Marshal(Response{Contract: contract, OK: true, Result: &Result{Address: env.Address, Generation: env.Generation, Fingerprint: fingerprint, KEK: testKEK()}})
+		return string(b)
+	}
+	cases := []struct {
+		name, answer string
+		noNewline    bool
+		wantKEK      bool
+		checkDecoded bool
+	}{
+		{"partial answer", answerFor(Contract, env.Fingerprint), true, false, false},
+		{"wrong contract", answerFor("kek-2", env.Fingerprint), false, false, true},
+		{"control: other key", answerFor(Contract, "other"), false, false, true},
+		{"control: valid answer", answerFor(Contract, env.Fingerprint), false, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buffers, decoded = nil, nil
+			opts := fakeOptions(t, tc.answer, "")
+			if tc.noNewline {
+				t.Setenv(fakeNoNewlineEnv, "1")
+			}
+			kek, err := Unwrap(context.Background(), opts, sealed)
+			if tc.wantKEK != (err == nil && bytes.Equal(kek, testKEK())) {
+				t.Fatalf("kek=%x err=%v", kek, err)
+			}
+			if len(buffers) != 1 || !zero(buffers[0]) {
+				t.Fatalf("answer buffer not cleared: %d buffers %q", len(buffers), buffers)
+			}
+			if tc.checkDecoded {
+				if len(decoded) != 1 || decoded[0].Result == nil || !zero(decoded[0].Result.KEK) {
+					t.Fatalf("decoded KEK not cleared")
+				}
 			}
 		})
 	}

@@ -25,6 +25,13 @@ const waitDelay = 2 * time.Second
 // exitGrace is how long a broker that answered gets to exit by itself.
 const exitGrace = time.Second
 
+// answerRead and responseDecoded see the answer buffer and the decoded
+// response; tests replace them to check that refused answers are cleared.
+var (
+	answerRead      = func([]byte) {}
+	responseDecoded = func(*Response) {}
+)
+
 // killGroup sends SIGKILL to the process group pgid; tests replace it to
 // check when it runs.
 var killGroup = func(pgid int) { syscall.Kill(-pgid, syscall.SIGKILL) }
@@ -204,25 +211,33 @@ func talk(ctx context.Context, stdout io.Reader, sock, op string, env Envelope, 
 	if _, err := conn.Write(append(line, '\n')); err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
+	// ReadBytes returns what arrived even with an error (cancellation, EOF,
+	// deadline), and that can be a whole answer without its newline, KEK
+	// included; it is cleared on every path.
 	answer, err := bufio.NewReader(io.LimitReader(conn, 2*maxEnvelopeBytes)).ReadBytes('\n')
+	answerRead(answer)
+	defer clear(answer)
 	if err != nil {
 		return nil, fmt.Errorf("%w: no answer line: %v", ErrProtocol, err)
 	}
-	defer clear(answer)
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("exchange cancelled: %w", err)
 	}
 	return checkResponse(answer, env)
 }
 
-// checkResponse admits only a contract answer about the envelope's key.
-func checkResponse(line []byte, env Envelope) (*Result, error) {
-	resp, err := parseResponse(bytes.TrimSuffix(line, []byte("\n")))
-	if err != nil {
-		if resp.Result != nil {
+// checkResponse admits only a contract answer about the envelope's key. A
+// KEK decoded from an answer it refuses is cleared on every refusal path.
+func checkResponse(line []byte, env Envelope) (res *Result, err error) {
+	resp, perr := parseResponse(bytes.TrimSuffix(line, []byte("\n")))
+	responseDecoded(&resp)
+	defer func() {
+		if err != nil && resp.Result != nil {
 			clear(resp.Result.KEK)
 		}
-		return nil, fmt.Errorf("%w: %v", ErrProtocol, err)
+	}()
+	if perr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrProtocol, perr)
 	}
 	if resp.Contract != Contract {
 		return nil, fmt.Errorf("%w: contract %q", ErrProtocol, resp.Contract)
@@ -233,9 +248,8 @@ func checkResponse(line []byte, env Envelope) (*Result, error) {
 		}
 		return nil, resp.Error
 	}
-	res := resp.Result
+	res = resp.Result
 	if res.Address != env.Address || res.Generation != env.Generation || res.Fingerprint != env.Fingerprint {
-		clear(res.KEK)
 		return nil, fmt.Errorf("%w: answer is about another key", ErrProtocol)
 	}
 	return res, nil
