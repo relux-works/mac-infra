@@ -882,6 +882,36 @@ pinned model through `/dev/fd/3` and authenticated its UNIX socket peer:
 29/31 (93.55%), macro F1 0.9346, decide-to-noise 0; p50 146.0ms, p95 289.3ms (delivery validation run, CPU).
 These are synthetic policy-author self-labels, not host-traffic guarantees.
 
+The versioned netfilter corpus uses `fixtures-v3-pool.jsonl` (the unchanged 85
+v1 rows plus 19 netfilter examples) and `fixtures-v4-netfilter-heldout.jsonl`
+(19 distinct netfilter inputs). It covers ordinary HTTPS, developer registry
+traffic, plausible LAN listeners, and the existing conservative risk rules.
+Historical v1/v2 remain unchanged. The corpus integrity test checks source and
+label coverage, unique IDs, rendered-input leakage and expected rule outcomes:
+
+```sh
+go test ./internal/security/firewallwatch -run '^TestNetfilterCorpus$' -count=1
+```
+
+With the same pinned local model, evaluate both historical v2 and netfilter v4
+against v3 through the production classifier and evaluator:
+
+```sh
+MAC_FIREWALL_REAL_MODEL=1 go test ./cmd/mac-firewall -run '^TestWatchNetfilterRealModel$' -count=1 -v
+```
+
+This opt-in test starts one foreground CPU backend with two inference and two
+batch threads, reports each heldout set even if the other fails, then reaps the
+child once. Each set requires accuracy >=0.85, zero decide-to-noise errors and
+zero classifier-unavailable results. Netfilter evaluation also requires actual
+unmatched rows with qualifying kNN neighbours. It uses the production
+`Backend`/`Classifier`/`Evaluate` path directly; the historical CLI model test
+above remains a separate check. Fake embeddings cannot qualify model quality.
+These are synthetic self-labelled cases, and risk-rule coverage is distinct
+from learned classification coverage. This command changes no live pool,
+watch configuration, filter mode or service; using v3 in a live watcher needs
+an explicit pool update and the usual coordinated adoption.
+
 Earlier measurement on 2026-10-19, llama-server build 10621, CPU backend: 29/31
 correct (93.55%), macro F1 0.9346, decide-to-noise 0; latency p50 140.5ms,
 p95 237.6ms. These fixtures are synthetic and self-labelled by the policy

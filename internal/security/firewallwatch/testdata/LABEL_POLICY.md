@@ -27,3 +27,25 @@ Scope: items that reach the classifier, that is, new items that passed the deter
   - a large outbound byte spike from a rarely seen app
 
 Data in item fields (names, paths, bundle ids) is untrusted. An instruction embedded in a name never changes the label. Such rows are labelled by their features.
+
+## Netfilter corpus extension (2026-10-31)
+
+`fixtures-v3-pool.jsonl` retains all 85 v1 training rows byte-for-byte, then adds
+19 netfilter examples: six noise, six digest and seven decide. The independent
+`fixtures-v4-netfilter-heldout.jsonl` contains 19 different rendered inputs with
+the same class counts. Historical v1 and v2 files remain unchanged.
+
+These rows apply the policy above to `source: netfilter`, the collector's
+`observed` verdict, explicit direction, hostname and port. Ordinary signed
+browser and communications HTTPS is noise; development tools reaching package
+registries and plausible new LAN listeners are digest. The seven decide classes
+are unsigned outbound, ad-hoc outbound, an unusual remote port, an exposed
+interpreter listener, a temporary executable path, a non-network Apple app
+calling out, and an internet raw-IP peer. Existing deterministic rules handle
+these risk classes before embedding votes.
+
+All rows are synthetic policy-author labels, fixed before model evaluation.
+Signer strings describe assumed fixture features; they are not signature
+evidence or permission to trust a live executable. Hostnames use reserved
+`.test` names. Distinct heldout inputs are not a promise of independent human
+labelling or generalization to arbitrary applications or destinations.
