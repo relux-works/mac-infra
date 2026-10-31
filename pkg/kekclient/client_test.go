@@ -35,6 +35,7 @@ const (
 	// fakeNoNewlineEnv makes the fake send its answer without the newline
 	// and close: the client reads a whole answer and an EOF.
 	fakeNoNewlineEnv = "KEKCLIENT_FAKE_NO_NEWLINE"
+	fakeStartedEnv   = "KEKCLIENT_FAKE_STARTED"
 )
 
 func TestMain(m *testing.M) {
@@ -50,6 +51,11 @@ func fakeBroker(args []string) int {
 	sock := fs.String("socket", "", "")
 	if len(args) < 1 || fs.Parse(args[1:]) != nil || *address == "" {
 		return 2
+	}
+	if marker := os.Getenv(fakeStartedEnv); marker != "" {
+		if err := os.WriteFile(marker, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
+			return 2
+		}
 	}
 	l, err := net.Listen("unix", *sock)
 	if err != nil {
@@ -141,6 +147,7 @@ func fakeOptions(t *testing.T, answer, ready string) Options {
 	t.Setenv(fakeLingerEnv, "")
 	t.Setenv(fakeAfterReadEnv, "")
 	t.Setenv(fakeNoNewlineEnv, "")
+	t.Setenv(fakeStartedEnv, "")
 	// The fake broker is this test binary. Under -race its runtime sleeps
 	// a second at exit by default, longer than exitGrace, and a correctly
 	// answering fake would be killed; a real broker is not race-built.
