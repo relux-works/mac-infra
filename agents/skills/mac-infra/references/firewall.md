@@ -628,8 +628,13 @@ A resolved path:
   provenance. Older entries, including the older writer's text-plus-hash
   entries, are re-inspected after either snapshot loading or journal replay.
   Older readers ignore the new provenance field; an older writer that rewrites
-  an entry drops it, so upgrading again re-inspects it. Other sources still
-  read the signer from `codesign` text. Native Security calls are synchronous:
+  an entry drops it, so upgrading again re-inspects it. Plain lookups used by
+  ALF and unresolved rows also read typed signature facts and require the same
+  cache provenance; no production signer authority comes from `codesign` text.
+  Plain lookups have no running-image hash to match, so they describe the file's
+  code-directory signature, not the image of an ALF process or the integrity of
+  all executable/resource contents. Bundle-directory successes are re-inspected;
+  failures retain their bounded retry TTL. Native Security calls are synchronous:
   the classifier timeout cannot interrupt them, and local filesystem/trust
   service delays remain possible despite the offline policy.
 - joins the row's dedup identity, so two binaries behind one process name are
@@ -775,7 +780,7 @@ that leaf. stdout/stderr write to the caller's destinations; the plist chooses
 separate files under the state directory. These streams need operator rotation.
 The selected llama-server binary is a trusted input and is not sandboxed or
 hash-pinned. The watcher's inherited environment is also a trusted input to
-its own runtime. Collector/codesign children receive only `PATH=/usr/bin:/bin`
+its own runtime. Collector children receive only `PATH=/usr/bin:/bin`
 and `LANG=C`; llama-server receives an empty environment, so inherited loader
 and `LLAMA_ARG_*` settings cannot steer it. The watcher does not guarantee all
 filesystem/network side effects of an arbitrary trusted backend executable.

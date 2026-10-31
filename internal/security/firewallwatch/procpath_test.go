@@ -222,34 +222,35 @@ func TestRunningSignerRequiresImageHash(t *testing.T) {
 	}
 }
 
-// An entry from codesign's text, whose signer the file's owner can forge
-// through the path, never attests a running process: the signature is
-// inspected once and its signer wins, and later lookups of either kind reuse
-// it (PR81 review r2). The text entry is still used for a plain lookup
-// (control).
-func TestRunningSignerIgnoresTextEntries(t *testing.T) {
-	s, path, runs := signerFixture(t, "no designated requirement", hashA)
-	texts := 0
+// Plain and running lookups share attested native facts. A plain result with
+// a matching signature hash is reused by nettop, while a different running
+// hash still refuses; no second inspector or text fallback supplies authority.
+func TestRunningSignerReusesPlainSignatureFacts(t *testing.T) {
+	s, path, runs := signerFixture(t, "unused", hashA)
+	plains := 0
 	s.inspectSigner = func(context.Context, string) (codeFacts, error) {
-		texts++
-		return codeFacts{Signer: "Apple", CDHash: hashA}, nil
+		plains++
+		return codeFacts{Signer: "no designated requirement", CDHash: hashA}, nil
 	}
 	ctx := context.Background()
-	if got := s.signer(ctx, path); got != "Apple" || texts != 1 {
-		t.Fatalf("plain lookup: %q after %d text runs", got, texts)
+	if got := s.signer(ctx, path); got != "no designated requirement" || plains != 1 {
+		t.Fatalf("plain lookup: %q after %d inspections", got, plains)
 	}
 	for _, v := range s.State.Signers {
-		if v.CDHash != "" {
-			t.Fatalf("a text entry recorded hash %q", v.CDHash)
+		if v.CDHash != hashA || v.SignatureSource != signatureSourceV1 {
+			t.Fatalf("plain signature facts lost: %+v", v)
 		}
 	}
 	for i := 0; i < 2; i++ {
-		if got := s.runningSigner(ctx, path, hashA); got != "no designated requirement" || *runs != 1 {
-			t.Fatalf("running lookup %d: %q after %d signature runs", i, got, *runs)
+		if got := s.runningSigner(ctx, path, hashA); got != "no designated requirement" || *runs != 0 {
+			t.Fatalf("running lookup %d: %q after %d extra inspections", i, got, *runs)
 		}
 	}
-	if got := s.signer(ctx, path); got != "no designated requirement" || texts != 1 {
-		t.Fatalf("plain lookup after the signature: %q after %d text runs", got, texts)
+	if got := s.runningSigner(ctx, path, hashB); got != "unknown" || *runs != 0 {
+		t.Fatalf("changed running hash: %q after %d extra inspections", got, *runs)
+	}
+	if got := s.signer(ctx, path); got != "no designated requirement" || plains != 1 {
+		t.Fatalf("plain reuse: %q after %d inspections", got, plains)
 	}
 }
 
@@ -279,7 +280,7 @@ func TestRunningSignerReinspectsLegacyPersistence(t *testing.T) {
 				s.inspectSigner = signerOnly(func(context.Context, string) (string, error) { return "Developer ID: PRIVATE_PATH_MARKER", nil })
 				s.signer(context.Background(), path)
 				for k, v := range s.State.Signers {
-					v.CDHash, v.Failed = old.hash, old.failed
+					v.CDHash, v.Failed, v.SignatureSource = old.hash, old.failed, ""
 					s.State.Signers[k] = v
 					s.signerChanged(k)
 				}

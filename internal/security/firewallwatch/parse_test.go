@@ -107,8 +107,9 @@ func TestNettopPrivacy(t *testing.T) {
 	}
 }
 
-// Signer parsing distinguishes identities and failed inspection cannot claim Apple.
-func TestSigner(t *testing.T) {
+// Historical benign transcript labels remain a compatibility reference only;
+// production authority never uses this deliberately forgeable text parser.
+func TestLegacyTextSignerReference(t *testing.T) {
 	for _, tc := range []struct {
 		raw    string
 		failed bool
@@ -121,8 +122,39 @@ func TestSigner(t *testing.T) {
 		{"Authority=Software Signing\nAuthority=Apple Root CA", true, "unknown"},
 		{"", false, "no designated requirement"},
 	} {
-		if got := ParseSigner(tc.raw, tc.failed); got != tc.want {
+		if got := legacyTextSigner(tc.raw, tc.failed); got != tc.want {
 			t.Errorf("%q: %q", tc.raw, got)
 		}
 	}
+}
+
+// legacyTextSigner preserves the previous reader solely for benign-format
+// compatibility controls, never for signer admission.
+func legacyTextSigner(output string, failed bool) string {
+	switch {
+	case strings.Contains(output, "not signed at all"):
+		return "unsigned"
+	case strings.Contains(output, "Signature=adhoc"):
+		return "ad-hoc"
+	case strings.Contains(output, "no designated requirement"):
+		return "no designated requirement"
+	case failed:
+		return "unknown"
+	case strings.Contains(output, "Authority=Developer ID Application:"):
+		for _, line := range strings.Split(output, "\n") {
+			if strings.HasPrefix(line, "Authority=Developer ID Application:") {
+				return Sanitize("Developer ID: " + strings.TrimSpace(strings.TrimPrefix(line, "Authority=Developer ID Application:")))
+			}
+		}
+	case strings.Contains(output, "Authority=Apple Mac OS Application Signing") || strings.Contains(output, "Authority=Mac App Store Application Signing"):
+		for _, line := range strings.Split(output, "\n") {
+			if strings.HasPrefix(line, "TeamIdentifier=") {
+				return Sanitize("App Store: " + strings.TrimPrefix(line, "TeamIdentifier="))
+			}
+		}
+		return "App Store"
+	case strings.Contains(output, "Authority=Software Signing") && strings.Contains(output, "Authority=Apple Root CA"):
+		return "Apple"
+	}
+	return "no designated requirement"
 }

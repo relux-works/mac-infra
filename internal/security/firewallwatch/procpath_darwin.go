@@ -177,7 +177,7 @@ func kernelImage(pid int) (processImage, bool) {
 
 // staticCodeFacts reads a file's signer and code directory hash from its
 // signature through the Security framework. The signer kinds and their text
-// match ParseSigner's; the Developer ID name comes from the validated leaf
+// retain the established labels; the Developer ID name comes from the validated leaf
 // certificate and the App Store team from the signature, never from a path.
 func staticCodeFacts(path string) (codeFacts, error) {
 	cpath := C.CString(path)

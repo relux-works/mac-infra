@@ -393,12 +393,10 @@ func TestReviewChildCommands(t *testing.T) {
 	t.Setenv("DYLD_INSERT_LIBRARIES", "untrusted")
 	t.Setenv("LLAMA_ARG_HOST", "0.0.0.0")
 	ctx := context.Background()
-	path := "/Applications/Tool 192.168.1.5.app"
 	for _, tc := range []struct {
 		cmd  *exec.Cmd
 		argv []string
 	}{
-		{codesignCommand(ctx, path), []string{"/usr/bin/codesign", "-dv", "--verbose=2", path}},
 		{collectorCommand(ctx, "log"), []string{"/usr/bin/log", "stream", "--style", "ndjson", "--info", "--predicate", `subsystem == "com.apple.ALF.ApplicationFirewall"`}},
 		{collectorCommand(ctx, "nettop"), []string{"/usr/bin/nettop", "-L", "1", "-n", "-x", "-J", "bytes_out"}},
 	} {

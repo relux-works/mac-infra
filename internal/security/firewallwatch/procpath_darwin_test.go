@@ -316,12 +316,15 @@ func TestStaticCodeFactsMatchText(t *testing.T) {
 			t.Logf("optional application %s refused: %v", p, err)
 			continue
 		}
-		text, err := inspectSigner(context.Background(), p)
-		if err != nil {
+		cmd := exec.Command("/usr/bin/codesign", "-dv", "--verbose=2", p)
+		cmd.Env = append([]string{}, childEnv...)
+		output, textErr := cmd.CombinedOutput()
+		text := legacyTextSigner(string(output), textErr != nil)
+		if text == "unknown" {
 			continue
 		}
-		if f.Signer != text.Signer || (want[p] != "" && f.Signer != want[p]) {
-			t.Fatalf("%s: signature %q, text %q, want %q", p, f.Signer, text.Signer, want[p])
+		if f.Signer != text || (want[p] != "" && f.Signer != want[p]) {
+			t.Fatalf("%s: signature %q, text %q, want %q", p, f.Signer, text, want[p])
 		}
 		if f.Signer != "unsigned" && !validCDHash(f.CDHash) {
 			t.Fatalf("%s: hash %q", p, f.CDHash)

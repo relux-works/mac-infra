@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -27,34 +26,6 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 		return 0, errors.New("collector output limit")
 	}
 	return b.Buffer.Write(p)
-}
-func ParseSigner(output string, failed bool) string {
-	switch {
-	case strings.Contains(output, "not signed at all"):
-		return "unsigned"
-	case strings.Contains(output, "Signature=adhoc"):
-		return "ad-hoc"
-	case strings.Contains(output, "no designated requirement"):
-		return "no designated requirement"
-	case failed:
-		return "unknown"
-	case strings.Contains(output, "Authority=Developer ID Application:"):
-		for _, line := range strings.Split(output, "\n") {
-			if strings.HasPrefix(line, "Authority=Developer ID Application:") {
-				return Sanitize("Developer ID: " + strings.TrimSpace(strings.TrimPrefix(line, "Authority=Developer ID Application:")))
-			}
-		}
-	case strings.Contains(output, "Authority=Apple Mac OS Application Signing") || strings.Contains(output, "Authority=Mac App Store Application Signing"):
-		for _, line := range strings.Split(output, "\n") {
-			if strings.HasPrefix(line, "TeamIdentifier=") {
-				return Sanitize("App Store: " + strings.TrimPrefix(line, "TeamIdentifier="))
-			}
-		}
-		return "App Store"
-	case strings.Contains(output, "Authority=Software Signing") && strings.Contains(output, "Authority=Apple Root CA"):
-		return "Apple"
-	}
-	return "no designated requirement"
 }
 
 var childEnv = []string{"PATH=/usr/bin:/bin", "LANG=C"}
@@ -78,9 +49,9 @@ func collectorCommand(ctx context.Context, name string) *exec.Cmd {
 // provenance marker, since older writers paired hashes with codesign text.
 const noCDHash = "none"
 
-// signatureSourceV1 is emitted only by the signature inspector, never the
-// text inspector. It distinguishes entries from the older text-plus-hash
-// writer in both snapshots and journals; this is cache provenance, not a MAC
+// signatureSourceV1 is emitted only by the native signature inspector. It
+// distinguishes entries from the older text-plus-hash writer in snapshots
+// and journals; this is cache provenance, not a MAC
 // against someone who can rewrite the user's whole state file.
 const signatureSourceV1 = "security-framework-v1"
 
@@ -90,27 +61,12 @@ type codeFacts struct {
 	CDHash string
 }
 
-func codesignCommand(ctx context.Context, path string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "-dv", "--verbose=2", path)
-	cmd.Env = append([]string{}, childEnv...)
-	return cmd
-}
-
-// inspectSigner reads a signer from codesign's text output. That text
-// carries the path and the signing identifier, which the file's owner
-// chooses, so it never yields a code directory hash and never attests a
-// running process (PR81 review r2).
-func inspectSigner(ctx context.Context, path string) (codeFacts, error) {
-	cmd := codesignCommand(ctx, path)
-	output := &cappedBuffer{limit: 64 * 1024}
-	cmd.Stdout = output
-	cmd.Stderr = output
-	err := cmd.Run()
-	v := ParseSigner(output.String(), err != nil)
-	if v != "unknown" {
-		err = nil
-	}
-	return codeFacts{Signer: v}, err
+// inspectSigner reads plain/ALF signer facts from the same offline native
+// signature inspector as running-image lookups. Owner-chosen path and identifier
+// text never supplies certificate authority. Native calls are synchronous and
+// cannot be interrupted by ctx; this does not attest an ALF process image.
+func inspectSigner(_ context.Context, path string) (codeFacts, error) {
+	return staticCodeFacts(path)
 }
 
 // inspectImage reads a file's signer and code directory hash from its
@@ -138,15 +94,13 @@ func (s *Store) runningSigner(ctx context.Context, path, running string) string 
 	return f.Signer
 }
 
-// inspectCode returns the cached or freshly inspected facts for path. With
-// fromSignature, the facts come from the file's signature and an entry
-// without signature facts is inspected again; otherwise from codesign's text,
-// or from a cached entry of either kind.
+// inspectCode returns cached or freshly inspected signature facts for path.
+// Both plain and running lookups require native-inspection provenance; older
+// codesign-text entries must be re-inspected even when their file identity
+// or old populated hash still matches. fromSignature selects the running-image
+// inspection seam; it never weakens plain lookup authority.
 func (s *Store) inspectCode(ctx context.Context, path string, fromSignature bool) codeFacts {
-	unknown := codeFacts{Signer: "unknown"}
-	if fromSignature {
-		unknown.CDHash = noCDHash
-	}
+	unknown := codeFacts{Signer: "unknown", CDHash: noCDHash}
 	if !filepath.IsAbs(path) || len(path) > LineLimit {
 		return unknown
 	}
@@ -168,7 +122,7 @@ func (s *Store) inspectCode(ctx context.Context, path string, fromSignature bool
 	now := s.now()
 	// A bundle directory identity cannot attest its inner code. Re-inspect successes;
 	// failed inspections still use the bounded failure TTL.
-	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) && (!fromSignature || (v.SignatureSource == signatureSourceV1 && v.CDHash != "")) {
+	if v, ok := s.State.Signers[cacheKey]; ok && v.Identity == identity && (info.Mode().IsRegular() || v.Failed) && (!v.Failed || now.Before(v.Inspected.Add(duration(s.Config.SignerFailureTTL)))) && (v.SignatureSource == signatureSourceV1 && v.CDHash != "") {
 		v.LastSeen = now
 		s.State.Signers[cacheKey] = v
 		s.signerChanged(cacheKey)
@@ -190,17 +144,11 @@ func (s *Store) inspectCode(ctx context.Context, path string, fromSignature bool
 	if err != nil {
 		f = unknown
 	}
-	switch {
-	case !fromSignature:
-		f.CDHash = ""
-	case !validCDHash(f.CDHash):
+	if !validCDHash(f.CDHash) {
 		f.CDHash = noCDHash
 	}
 	f.Signer = Sanitize(f.Signer)
-	entry := SignerEntry{Value: f.Signer, CDHash: f.CDHash, LastSeen: now, Identity: identity, Failed: err != nil, Inspected: now}
-	if fromSignature {
-		entry.SignatureSource = signatureSourceV1
-	}
+	entry := SignerEntry{Value: f.Signer, CDHash: f.CDHash, SignatureSource: signatureSourceV1, LastSeen: now, Identity: identity, Failed: err != nil, Inspected: now}
 	// A new or changed result is journaled at once; re-inspections with the
 	// same result (bundle directories, failure retries) only refresh times,
 	// which follow with the next append.
