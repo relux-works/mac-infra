@@ -792,6 +792,19 @@ and unknown message samples are redacted as well. Samples mask digits and
 are bounded to 16 templates of 256 bytes. Invalid/truncated/oversize JSON
 increments a separate counter; unknown `fw` shapes are counted and sampled.
 
+Unknown-message templates remain private diagnostic state. Public JSON health
+(`watch status --json` and split digest `health.unrecognized_samples`) exposes
+only generated `unrecognized-fw-template-1` through `unrecognized-fw-template-N`
+labels, in retained order, with at most 16 labels. The field keeps its string
+array shape and distinguishes a legacy null sample list from an empty array;
+`unrecognized` and `invalid_json` counters retain their meanings. This projection
+also covers templates loaded from old snapshots or journals without rewriting
+or clearing them. Labels identify template positions, not occurrence counts or
+complete diagnostic coverage. Raw template text can contain paths despite its
+IP/digit redaction and stays in the private state; it is not included in public
+health. Other existing app fields retain their own output contract, so this is
+not a claim that every digest string is path-free.
+
 ### Proposals and limits
 
 Hard rules precede policy: inbound allow by unsigned/ad-hoc/no-designated-

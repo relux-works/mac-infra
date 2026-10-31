@@ -1295,7 +1295,7 @@ func (s *Store) health() map[string]any {
 		"health_as_of":              s.State.Updated,
 		"unrecognized":              s.State.Parser.Unrecognized + s.State.NettopUnrecognized,
 		"invalid_json":              s.State.Parser.Invalid,
-		"unrecognized_samples":      s.State.Parser.Samples,
+		"unrecognized_samples":      publicALFSamples(s.State.Parser.Samples),
 		"nettop_error":              s.State.NettopError,
 		"netfilter_invalid":         s.State.Netfilter.Invalid,
 		"netfilter_rejected_sender": s.State.Netfilter.RejectedSender,
@@ -1308,6 +1308,20 @@ func (s *Store) health() map[string]any {
 		"journal_torn_tail": s.State.Health.JournalTornTail,
 	}
 }
+
+// Public health exposes only template positions, never retained message text.
+// Keep nil versus empty and allocate a separate slice from private state.
+func publicALFSamples(samples []string) []string {
+	if samples == nil {
+		return nil
+	}
+	labels := make([]string, len(samples))
+	for i := range labels {
+		labels[i] = fmt.Sprintf("unrecognized-fw-template-%d", i+1)
+	}
+	return labels
+}
+
 func (s *Store) String() string {
 	return fmt.Sprintf("%d entries, %d retained events", len(s.State.Entries), len(s.State.Events))
 }
