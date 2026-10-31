@@ -5,6 +5,8 @@ typedef struct {
     int valid;
     int status;
     char cdhash[41];
+    char identifier[256];
+    char certificateSHA1[41];
     unsigned int flags;
     int getTaskAllow;
 } KekCode;

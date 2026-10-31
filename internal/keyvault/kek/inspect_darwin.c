@@ -3,6 +3,7 @@
 // touches the Keychain.
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
+#include <CommonCrypto/CommonDigest.h>
 #include <bsm/libbsm.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,7 +12,8 @@
 
 #include "inspect_darwin.h"
 
-// Reads cdhash, signature flags and get-task-allow from signing information.
+// Reads facts only after the caller validated this code with network access
+// disabled. Ad-hoc code has no certificate; no ambient signing identity is used.
 static int KekDescribe(SecStaticCodeRef code, KekCode *out) {
     CFDictionaryRef info = NULL;
     OSStatus status = SecCodeCopySigningInformation(code, kSecCSSigningInformation | kSecCSRequirementInformation, &info);
@@ -20,6 +22,32 @@ static int KekDescribe(SecStaticCodeRef code, KekCode *out) {
     if (unique != NULL && CFGetTypeID(unique) == CFDataGetTypeID() && CFDataGetLength(unique) == 20) {
         const UInt8 *bytes = CFDataGetBytePtr(unique);
         for (int i = 0; i < 20; i++) snprintf(out->cdhash + 2 * i, 3, "%02x", bytes[i]);
+    }
+    CFTypeRef identifier = CFDictionaryGetValue(info, kSecCodeInfoIdentifier);
+    if (identifier != NULL && CFGetTypeID(identifier) == CFStringGetTypeID()) {
+        // CFStringGetCString refuses truncation. Leave no partial identifier.
+        if (!CFStringGetCString(identifier, out->identifier, sizeof(out->identifier), kCFStringEncodingASCII) ||
+            strlen(out->identifier) != (size_t)CFStringGetLength(identifier))
+            memset(out->identifier, 0, sizeof(out->identifier));
+    }
+    CFTypeRef certificates = CFDictionaryGetValue(info, kSecCodeInfoCertificates);
+    if (certificates != NULL && CFGetTypeID(certificates) == CFArrayGetTypeID() && CFArrayGetCount(certificates) > 0) {
+        CFTypeRef leaf = CFArrayGetValueAtIndex(certificates, 0);
+        if (leaf != NULL && CFGetTypeID(leaf) == SecCertificateGetTypeID()) {
+            CFDataRef der = SecCertificateCopyData((SecCertificateRef)leaf);
+            if (der != NULL) {
+                CFIndex length = CFDataGetLength(der);
+                if (length > 0 && length <= UINT32_MAX) {
+                    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+                    // Apple's requirement language pins SHA-1 of certificate
+                    // DER. This is identification, not a SHA-1 data signature.
+                    CC_SHA1(CFDataGetBytePtr(der), (CC_LONG)length, digest);
+                    for (int i = 0; i < CC_SHA1_DIGEST_LENGTH; i++)
+                        snprintf(out->certificateSHA1 + 2 * i, 3, "%02x", digest[i]);
+                }
+                CFRelease(der);
+            }
+        }
     }
     CFNumberRef flags = CFDictionaryGetValue(info, kSecCodeInfoFlags);
     if (flags != NULL && CFGetTypeID(flags) == CFNumberGetTypeID()) {
@@ -51,9 +79,9 @@ int KekInspectPeer(int fd, KekCode *out) {
     OSStatus status = SecCodeCopyGuestWithAttributes(NULL, attrs, kSecCSDefaultFlags, &code);
     CFRelease(attrs);
     if (status != errSecSuccess) return (int)status;
-    out->status = (int)SecCodeCheckValidity(code, kSecCSDefaultFlags, NULL);
+    out->status = (int)SecCodeCheckValidity(code, kSecCSNoNetworkAccess, NULL);
     out->valid = out->status == errSecSuccess;
-    int result = KekDescribe((SecStaticCodeRef)code, out);
+    int result = out->valid ? KekDescribe((SecStaticCodeRef)code, out) : out->status;
     CFRelease(code);
     return result;
 }
@@ -66,9 +94,9 @@ int KekInspectFile(const char *path, KekCode *out) {
     OSStatus status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code);
     CFRelease(url);
     if (status != errSecSuccess) return (int)status;
-    out->status = (int)SecStaticCodeCheckValidity(code, kSecCSStrictValidate | kSecCSCheckAllArchitectures, NULL);
+    out->status = (int)SecStaticCodeCheckValidity(code, kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSNoNetworkAccess, NULL);
     out->valid = out->status == errSecSuccess;
-    int result = KekDescribe(code, out);
+    int result = out->valid ? KekDescribe(code, out) : out->status;
     CFRelease(code);
     return result;
 }

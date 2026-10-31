@@ -53,7 +53,27 @@ Every shape, nested ones included, is checked before anything is decoded, so a r
 
 The binding is inside the ciphertext, so a same-user process cannot change it without breaking GCM. It also cannot make an envelope holding the service's KEK without knowing that KEK.
 
-**Admitted requirement form:** only `cdhash H"<40 lowercase hex>"`. The certificate-pinned form joins the allowlist when the dedicated signing identity exists.
+**Admitted requirement forms:**
+
+- `cdhash H"<40 lowercase hex>"`, constructed by `RequirementForCDHash`;
+- `certificate leaf = H"<40 lowercase hex>" and identifier "<identifier>"`,
+  constructed by `RequirementForCertificate(identifier, certificateSHA1)`.
+
+The certificate pin is SHA-1 of the complete leaf-certificate DER, as in Apple's
+code-requirement language, and the identifier is the exact signed identifier.
+It is not a subject name, Team ID, filename or chain anchor. The constructor
+accepts uppercase fingerprint input and emits lowercase; serialized forms are
+lowercase only. Identifiers are case-sensitive ASCII, 1–255 bytes: first
+`[A-Za-z0-9]`, remaining `[A-Za-z0-9._-]`. No wildcard, escaping, alternative
+spacing or additional requirement clause is admitted. `RequirementCertificate`
+returns both fields only for the canonical certificate form;
+`RequirementCDHash` returns false for that mode. No operational certificate is
+a library default.
+
+Wire framing and envelope version remain `kek-1`/1. New readers preserve legacy
+CDHash envelopes. Older readers refuse certificate payloads and publish no KEK;
+qualify and deploy the supporting client and broker pair before provisioning
+that mode. A certificate binding is an explicit provisioning choice.
 
 ## Unwrap
 
@@ -75,7 +95,13 @@ The broker runs these gates, in order:
 2. **The request:** contract `kek-1`, the operation and address this process serves, a valid envelope.
 3. **The key, through keyvault's own policy:** a readable valid record, usage `decrypt`, `not_after` not passed.
 4. **Decryption with the Keychain key.** Then the payload must match the clear header and the key's fingerprint.
-5. **The binding:** the peer's cdhash must be the one the payload binds.
+5. **The binding:** re-identify the same audit-token peer after decryption,
+   recheck all hardening gates and require unchanged observed code facts. Then
+   require the bound CDHash, or both the bound leaf certificate and signed
+   identifier. Ad-hoc signatures have no leaf certificate and cannot satisfy
+   certificate mode. Native validation disables online revocation/notarization
+   access before signing metadata is read. The calls are synchronous and do
+   not promise hard cancellation or measured absence of all network traffic.
 6. **The audit log.** The entry is written and synced before the answer is sent. If the log cannot be written, nothing is answered.
 
 Pipes and inherited descriptors are not a transport: a same-user parent can keep a copy of a pipe across exec.
@@ -112,6 +138,13 @@ A service reinstall changes its cdhash. The bound service (still the old binary)
 
 The new envelope comes back; the KEK never does. The audit log records the new binding.
 
+Successive builds signed with the same pinned leaf certificate and identifier
+already satisfy a certificate binding. `Rebind` returns `rebind_refused` without
+an envelope or KEK, including for a matching installed build. A different
+certificate, identifier or invalid target also refuses. Rebind never changes
+pins or converts binding mode. Certificate rotation or a mode change needs an
+explicit service provisioning procedure.
+
 ## Service-side requirements
 
 - Sign with `codesign --options runtime,library` and no get-task-allow.
@@ -126,7 +159,14 @@ The new envelope comes back; the KEK never does. The audit log records the new b
 ## Limits
 
 - Everything runs as one macOS user, so this is a barrier against casual and accidental use, not a wall. A separate OS user for the service is the real isolation.
-- The binding is to code, not path. Any same-user process can rebind to any binary it can place at the install path and then start the bound service's rebind. Detection is the control: the audit log, plus the chain head posted in each window record and compared at checkpoints.
+- The binding is to code, not path. In CDHash mode a same-user process can put
+  another binary at the install path and start the bound service's rebind.
+  Certificate mode preserves its pins. Neither mode proves repository review or
+  release authorization; those remain the release-signing boundary. Compare the
+  audit chain head against the externally retained checkpoint.
+- Reinspection detects changed or unidentifiable code between its two
+  observations, including exec on a preserved socket. It does not atomically
+  prevent a process from executing another image after the final observation.
 - The audit chain shows an edit inside the log. A same-user rewrite of the whole log passes its own chain, so compare the head with the posted one.
 - The broker is ad-hoc signed. A rebuilt broker is a new code identity, and with UI disabled the key's ACL refuses it silently. `scripts/setup.sh` therefore builds `mac-keyvault-kek` only when it is absent, and keeps an installed `~/.local/bin/mac-keyvault-kek` that names another checkout's broker or is a regular file. `--rebuild-kek` is for a planned owner sitting that also re-provisions the keys. With a stable signing identity this goes away.
 - The key is non-extractable. If the login Keychain is reset or the item is deleted, the envelope cannot be opened again. A service using this must be able to rebuild its store, or keep a recovery envelope elsewhere.
@@ -152,4 +192,29 @@ The new envelope comes back; the KEK never does. The audit log records the new b
   - rebind and its refusals;
   - the audit chain.
 - `TestCodeInspectorReadsSignatures` checks the real inspector against binaries signed by codesign in four variants, and against a changed binary and a symlink.
+- Certificate conformance covers exact and successive-build matches, wrong
+  certificate/identifier and hardening refusals, immutable rebind mode and
+  audit failure with no KEK. These use an in-memory vault. Native public-code
+  certificate fixtures and an owned exec-on-preserved-socket fixture qualify
+  signature facts separately; neither substitutes for installed service-pair
+  acceptance. Run the full keyvault suite through
+  `scripts/keyvault-test-confined.sh`. That wrapper also denies trustd, so its
+  public-certificate case verifies the specific trust refusal and absence of
+  attested facts. It does not qualify certificate matching. Additionally run
+  the following required read-only native lane, in order, with
+  `MAC_KEYVAULT_SKIP_KEYCHAIN=1` and a short task-scoped `TMPDIR`:
+
+  ```bash
+  go test -tags=keyvault_gate_regression -run '^TestSandboxCanary$' ./internal/keyvault/keychaingate -v -count=1
+  go test -run '^TestCodeInspectorPublicCertificate$' ./internal/keyvault/kek -v -count=1
+  ```
+
+  Start the second command only after the canary reports `Applied=true` and
+  the intended read-only nonexistent-item refusal. This uses the existing
+  init-level Keychain gate, which permits trustd. It covers Go init onward,
+  unlike exec-level confinement; review native startup inputs separately.
+  The public-code case must report validated certificate/identifier and both
+  mismatches, not a trust refusal. Neither command creates or accesses a real
+  key, signs code or changes trust. Preserve a verdict per lane; unavailable
+  native positive coverage blocks certificate acceptance.
 - `TestSecurityStoreDecryptOpensGoEnvelope` opens a Go-sealed envelope with a real non-extractable Keychain key and refuses tampered ones. Like every real-Keychain test, it runs only in an attended sitting.

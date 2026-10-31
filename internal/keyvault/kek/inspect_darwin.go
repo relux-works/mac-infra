@@ -29,6 +29,8 @@ func identity(c C.KekCode) CodeIdentity {
 	return CodeIdentity{
 		Valid:             c.valid != 0,
 		CDHash:            C.GoString(&c.cdhash[0]),
+		Identifier:        C.GoString(&c.identifier[0]),
+		CertificateSHA1:   C.GoString(&c.certificateSHA1[0]),
 		Runtime:           c.flags&flagRuntime != 0,
 		LibraryValidation: c.flags&flagLibraryValidation != 0,
 		GetTaskAllow:      c.getTaskAllow != 0,

@@ -27,6 +27,11 @@ type CodeIdentity struct {
 	Valid bool
 	// CDHash is the code directory hash, 40 lowercase hex digits.
 	CDHash string
+	// Identifier and CertificateSHA1 come from the validated code signature.
+	// CertificateSHA1 is the lowercase SHA-1 of the leaf certificate DER;
+	// ad-hoc signatures have no certificate and leave it empty.
+	Identifier      string
+	CertificateSHA1 string
 	// Runtime and LibraryValidation are the signature's hardened-runtime
 	// and library-validation flags.
 	Runtime           bool
@@ -42,7 +47,7 @@ func (c CodeIdentity) Problem() string {
 	switch {
 	case !c.Valid:
 		return "its code signature is not valid"
-	case len(c.CDHash) != 40:
+	case !kekclient.ValidRequirement(`cdhash H"` + c.CDHash + `"`):
 		return "its code directory hash is unknown"
 	case !c.Runtime:
 		return "it is not signed with the hardened runtime"
@@ -229,8 +234,15 @@ func (s *Server) answer(conn *net.UnixConn, entry *AuditEntry) (*kekclient.Resul
 	if err != nil {
 		return nil, refuse(kekclient.CodeEnvelopeInvalid, "%v", err)
 	}
-	bound, _ := kekclient.RequirementCDHash(payload.Requirement)
-	if peer.CDHash != bound {
+	// Re-identify after decryption: a connection survives exec. Reapply all
+	// hardening gates and require the same observed code facts, even when two
+	// builds would individually satisfy a certificate binding. This is a
+	// second observation, not an atomic guarantee against a subsequent exec.
+	current, err := s.Inspector.Peer(conn)
+	if err != nil || current.Problem() != "" || current != peer {
+		return nil, refuse(kekclient.CodeCallerRefused, "the caller's code changed or cannot be revalidated")
+	}
+	if !current.matches(payload.Requirement) {
 		return nil, refuse(kekclient.CodeCallerRefused, "the envelope is bound to other code")
 	}
 	result := &kekclient.Result{Address: env.Address, Generation: env.Generation, Fingerprint: env.Fingerprint}
@@ -250,6 +262,17 @@ func (s *Server) answer(conn *net.UnixConn, entry *AuditEntry) (*kekclient.Resul
 	return result, nil
 }
 
+// matches evaluates only the two canonical contract forms against facts from
+// validated code. No missing certificate, parser failure or identifier alone
+// falls back to another binding mode. Callers must also enforce Problem().
+func (c CodeIdentity) matches(requirement string) bool {
+	if bound, ok := kekclient.RequirementCDHash(requirement); ok {
+		return c.CDHash == bound
+	}
+	identifier, certificate, ok := kekclient.RequirementCertificate(requirement)
+	return ok && c.CertificateSHA1 == certificate && c.Identifier == identifier
+}
+
 // rebind binds the same KEK to the code now installed at the payload's
 // install path. The broker reads that file itself; the caller names nothing.
 func (s *Server) rebind(key keyvault.Key, payload kekclient.Payload) (json.RawMessage, string, error) {
@@ -259,6 +282,12 @@ func (s *Server) rebind(key keyvault.Key, payload kekclient.Payload) (json.RawMe
 	}
 	if problem := target.Problem(); problem != "" {
 		return nil, "", refuse(kekclient.CodeRebindRefused, "the code at %s is refused: %s", payload.InstallPath, problem)
+	}
+	if _, _, certificate := kekclient.RequirementCertificate(payload.Requirement); certificate {
+		if target.matches(payload.Requirement) {
+			return nil, "", refuse(kekclient.CodeRebindRefused, "the installed code already matches the certificate binding")
+		}
+		return nil, "", refuse(kekclient.CodeRebindRefused, "rebind cannot change a certificate binding; explicit provisioning is required")
 	}
 	newReq, err := kekclient.RequirementForCDHash(target.CDHash)
 	if err != nil {

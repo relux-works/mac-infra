@@ -111,6 +111,7 @@ func ValidAddress(address string) bool {
 }
 
 var cdhashRequirement = regexp.MustCompile(`^cdhash H"([0-9a-f]{40})"$`)
+var certificateRequirement = regexp.MustCompile(`^certificate leaf = H"([0-9a-f]{40})" and identifier "([A-Za-z0-9][A-Za-z0-9._-]{0,254})"$`)
 
 // RequirementForCDHash is the interim binding: exactly one code directory
 // hash (SHA-1 truncated form, 40 hex digits, as codesign prints it).
@@ -122,12 +123,32 @@ func RequirementForCDHash(cdhash string) (string, error) {
 	return req, nil
 }
 
-// ValidRequirement admits only the requirement forms of the contract. Today
-// that is one form, `cdhash H"<40 lowercase hex>"`; the certificate-pinned
-// form is added when the dedicated signing identity exists. Anything else,
-// including requirement-language expressions that would also be valid for
-// codesign, is refused.
-func ValidRequirement(req string) bool { return cdhashRequirement.MatchString(req) }
+// RequirementForCertificate binds to an explicit leaf-certificate DER SHA-1
+// and signed identifier. Fingerprint input is case-insensitive; identifiers
+// preserve their exact case. The serialized form has one canonical spelling.
+func RequirementForCertificate(identifier, certificateSHA1 string) (string, error) {
+	req := `certificate leaf = H"` + strings.ToLower(certificateSHA1) + `" and identifier "` + identifier + `"`
+	if !certificateRequirement.MatchString(req) {
+		return "", fmt.Errorf("certificate fingerprint or identifier is not an admitted form")
+	}
+	return req, nil
+}
+
+// ValidRequirement admits only the canonical cdhash and leaf-certificate plus
+// identifier forms. It does not parse general code-requirement expressions.
+func ValidRequirement(req string) bool {
+	return cdhashRequirement.MatchString(req) || certificateRequirement.MatchString(req)
+}
+
+// RequirementCertificate returns both pinned fields only for the exact
+// canonical certificate form; cdhash and malformed forms return false.
+func RequirementCertificate(req string) (identifier, certificateSHA1 string, ok bool) {
+	m := certificateRequirement.FindStringSubmatch(req)
+	if m == nil {
+		return "", "", false
+	}
+	return m[2], m[1], true
+}
 
 // RequirementCDHash returns the cdhash a valid requirement binds.
 func RequirementCDHash(req string) (string, bool) {

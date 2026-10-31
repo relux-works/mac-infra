@@ -176,9 +176,8 @@ func TestWrapRefusesUnpinnedOrMalformedSpecs(t *testing.T) {
 	}
 }
 
-// Only `cdhash H"<40 lowercase hex>"` is admitted as a binding. Valid
-// codesign expressions that would widen it, other hash lengths and
-// spellings are refused.
+// The legacy cdhash form retains its exact spelling and constructor behavior.
+// Expressions that widen it, other hash lengths and spellings refuse.
 func TestRequirementAllowlist(t *testing.T) {
 	good := `cdhash H"` + testCDHash + `"`
 	if !ValidRequirement(good) {

@@ -132,12 +132,21 @@ func eciesOpen(priv *ecdh.PrivateKey, sealed []byte) ([]byte, error) {
 // fakeInspector answers fixed identities: one for every peer, and one per
 // file path.
 type fakeInspector struct {
-	peer    CodeIdentity
-	peerErr error
-	files   map[string]CodeIdentity
+	peer        CodeIdentity
+	peerErr     error
+	files       map[string]CodeIdentity
+	nextPeer    *CodeIdentity
+	nextPeerErr error
+	peerCalls   int
 }
 
-func (f *fakeInspector) Peer(*net.UnixConn) (CodeIdentity, error) { return f.peer, f.peerErr }
+func (f *fakeInspector) Peer(*net.UnixConn) (CodeIdentity, error) {
+	f.peerCalls++
+	if f.peerCalls > 1 && f.nextPeer != nil {
+		return *f.nextPeer, f.nextPeerErr
+	}
+	return f.peer, f.peerErr
+}
 
 func (f *fakeInspector) File(path string) (CodeIdentity, error) {
 	id, ok := f.files[path]
@@ -228,6 +237,7 @@ func (f *fixture) call(op string, line []byte) (kekclient.Response, []byte) {
 	}
 	defer l.Close()
 	s := &Server{Vault: f.manager, Inspector: f.inspect, Audit: f.audit, Op: op, Address: address, Timeout: 5 * time.Second, Now: func() time.Time { return f.now }}
+	f.inspect.peerCalls = 0
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(l) }()
 	conn, err := net.Dial("unix", sock)
