@@ -1,0 +1,314 @@
+{
+  "schema": "product-card/v3",
+  "product": {
+    "id": "mac-infra",
+    "description": "macOS workstation infrastructure and local diagnostic tools. Desired staffing starts with one Go developer and one independent architect; remaining seats are filled as load requires.",
+    "privacy": "private",
+    "keeper": "keeper-altair",
+    "default_binding": "local-gr",
+    "topology": {
+      "connection": "gr",
+      "space": "!Ddjqznk-Zmq20l2_1LloHBnkDXRKarouHdqGROFXKnM",
+      "lobby": "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+      "escalations": "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+      "grouped_rooms": [
+        "!AsuSdHdY81pL5IBq4DmOsUDzivI9ydVqY-dBrvbmqmQ",
+        "!EzGbiIYRVOdjWXsadtAuJbnvY7UT-t96UEjaG2AE60o",
+        "!CHEu95svRySKGThv2xOKwW5Yjum_AC1J2Jy42XytDx0"
+      ]
+    }
+  },
+  "external_members": [
+    "m1max_meta-keeper_keeper"
+  ],
+  "connections": {
+    "gr": {
+      "homeserver": "https://gr.relux.works",
+      "server_name": "gr.relux.works"
+    }
+  },
+  "bindings": {
+    "local-gr": {
+      "operator": "alexis",
+      "host": "m1max",
+      "connection": "gr",
+      "identity_prefix": "mac-infra."
+    }
+  },
+  "profiles_root": "../agents-curator-profiles/profiles",
+  "profiles": {
+    "mac-infra-keeper": {
+      "path": "mac-infra-keeper",
+      "requirement": {
+        "context": "m1max-mac-infra-keeper-context",
+        "compatible": ">=0.1.10 <0.2.0"
+      },
+      "selected": {
+        "version": "0.1.10",
+        "source_rev": "0abe223af5450837d3b37ea9ede3895b72956479",
+        "lock_sha256": "9e7560f7fd09d9d3a165bde0210b3cdfcd3b974a2f6364bff3df0cc4f7675e91"
+      }
+    },
+    "go-developer": {
+      "registry": {
+        "repo": "https://github.com/relux-works/alexis-curator-profile-registry",
+        "directory": "profiles/development_go_developer"
+      },
+      "requirement": {
+        "context": "alexis-development-go-developer-context",
+        "compatible": ">=0.1.4 <0.2.0"
+      },
+      "selected": {
+        "version": "0.1.4",
+        "source_rev": "44a6c4b727a50f0a9fd69591c57af5889ca61d89",
+        "lock_sha256": "81edbe1fc5575d23458e03541abeaff05f2d766cf1a2432635a512327fc1b946"
+      }
+    },
+    "solution-architect": {
+      "registry": {
+        "repo": "https://github.com/relux-works/alexis-curator-profile-registry",
+        "directory": "profiles/development_product_solution-architect"
+      },
+      "requirement": {
+        "context": "alexis-development-product-solution-architect-context",
+        "compatible": ">=0.1.2 <0.2.0"
+      },
+      "selected": {
+        "version": "0.1.2",
+        "source_rev": "44a6c4b727a50f0a9fd69591c57af5889ca61d89",
+        "lock_sha256": "698fa1d48501b25acf5ae9d8bdf6f3116442ee131dd9d2ea4afc2ca4316fe7d8"
+      }
+    },
+    "tester-automator": {
+      "registry": {
+        "repo": "https://github.com/relux-works/alexis-curator-profile-registry",
+        "directory": "profiles/development_product_tester-automator"
+      },
+      "requirement": {
+        "context": "alexis-development-product-tester-automator-context",
+        "compatible": ">=0.1.1 <0.2.0"
+      },
+      "selected": {
+        "version": "0.1.1",
+        "source_rev": "44a6c4b727a50f0a9fd69591c57af5889ca61d89",
+        "lock_sha256": "8932fbf3f899bd8f1f5a9d3877739c78974e6aec236c46f9c72f3769c9612c49"
+      }
+    }
+  },
+  "projects": [
+    {
+      "id": "mac-infra",
+      "description": "macOS infrastructure tooling in this repository.",
+      "path": ".",
+      "repo": "https://github.com/relux-works/mac-infra",
+      "desired_state": "active",
+      "orchestrator": "keeper-altair",
+      "orchestrator_mode": "keeper",
+      "orchestrator_ref": "Owner standing instruction, 2026-10-30: product keeper manages the single project with no separate orchestrator.",
+      "task_system": {
+        "kind": "task-board",
+        "path": "task-board.config.json"
+      },
+      "channels": {
+        "mode": "shared",
+        "team_room": "!AsuSdHdY81pL5IBq4DmOsUDzivI9ydVqY-dBrvbmqmQ"
+      }
+    }
+  ],
+  "members": [
+    {
+      "id": "keeper-altair",
+      "role": "keeper",
+      "parent": "m1max_meta-keeper_keeper",
+      "profile": "mac-infra-keeper",
+      "project": "mac-infra",
+      "binding": "local-gr",
+      "runtime": {
+        "kind": "codex_cli",
+        "model": "gpt-6.1-sol",
+        "effort": "high"
+      },
+      "lifecycle": "persistent",
+      "desired_state": "active",
+      "context_mode": "continue",
+      "clone": ".",
+      "a2a": {
+        "connection": "gr",
+        "parent_route": "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+        "rooms": [
+          "!AsuSdHdY81pL5IBq4DmOsUDzivI9ydVqY-dBrvbmqmQ",
+          "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+          "!EzGbiIYRVOdjWXsadtAuJbnvY7UT-t96UEjaG2AE60o",
+          "!CHEu95svRySKGThv2xOKwW5Yjum_AC1J2Jy42XytDx0",
+          "!Ddjqznk-Zmq20l2_1LloHBnkDXRKarouHdqGROFXKnM"
+        ],
+        "spaces": [
+          "!Ddjqznk-Zmq20l2_1LloHBnkDXRKarouHdqGROFXKnM"
+        ],
+        "subscriptions": {
+          "required": [
+            {
+              "rooms": [
+                "!AsuSdHdY81pL5IBq4DmOsUDzivI9ydVqY-dBrvbmqmQ",
+                "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+                "!EzGbiIYRVOdjWXsadtAuJbnvY7UT-t96UEjaG2AE60o",
+                "!CHEu95svRySKGThv2xOKwW5Yjum_AC1J2Jy42XytDx0"
+              ],
+              "kinds": [
+                "system",
+                "owner-needed",
+                "decision"
+              ]
+            },
+            {
+              "from_mxid": "@alexis:gr.relux.works"
+            },
+            {
+              "from_mxid": "@alexis:relux.works"
+            }
+          ],
+          "self": []
+        }
+      },
+      "staffing": [
+        {
+          "role": "architect",
+          "profile": "solution-architect",
+          "count": 2,
+          "lifecycle": "persistent",
+          "context_mode": "fresh",
+          "independent_of_producer": true
+        },
+        {
+          "role": "developer",
+          "profile": "go-developer",
+          "count": 2,
+          "lifecycle": "persistent",
+          "context_mode": "continue"
+        },
+        {
+          "role": "tester",
+          "profile": "tester-automator",
+          "count": 1,
+          "lifecycle": "persistent",
+          "context_mode": "continue"
+        }
+      ]
+    },
+    {
+      "id": "dev-capella",
+      "role": "developer",
+      "parent": "keeper-altair",
+      "profile": "go-developer",
+      "project": "mac-infra",
+      "binding": "local-gr",
+      "runtime": {
+        "kind": "codex_cli",
+        "model": "gpt-6.1-sol",
+        "effort": "high"
+      },
+      "lifecycle": "persistent",
+      "desired_state": "active",
+      "context_mode": "continue",
+      "clone": ".",
+      "a2a": {
+        "connection": "gr",
+        "parent_route": "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+        "rooms": [
+          "!AsuSdHdY81pL5IBq4DmOsUDzivI9ydVqY-dBrvbmqmQ",
+          "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+          "!EzGbiIYRVOdjWXsadtAuJbnvY7UT-t96UEjaG2AE60o",
+          "!CHEu95svRySKGThv2xOKwW5Yjum_AC1J2Jy42XytDx0",
+          "!Ddjqznk-Zmq20l2_1LloHBnkDXRKarouHdqGROFXKnM"
+        ],
+        "spaces": [
+          "!Ddjqznk-Zmq20l2_1LloHBnkDXRKarouHdqGROFXKnM"
+        ],
+        "subscriptions": {
+          "required": [
+            {
+              "rooms": [
+                "!AsuSdHdY81pL5IBq4DmOsUDzivI9ydVqY-dBrvbmqmQ",
+                "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+                "!EzGbiIYRVOdjWXsadtAuJbnvY7UT-t96UEjaG2AE60o",
+                "!CHEu95svRySKGThv2xOKwW5Yjum_AC1J2Jy42XytDx0"
+              ],
+              "kinds": [
+                "system",
+                "owner-needed",
+                "decision"
+              ]
+            },
+            {
+              "from_mxid": "@alexis:gr.relux.works"
+            },
+            {
+              "from_mxid": "@alexis:relux.works"
+            }
+          ],
+          "self": []
+        }
+      },
+      "result_route": "a2a",
+      "chat_admission": "Owner standing instruction, 2026-10-30: stable local product members have their own a2a identity and receive board assignments over a2a. Desired membership does not provision an account or prove liveness."
+    },
+    {
+      "id": "arch-procyon",
+      "role": "architect",
+      "parent": "keeper-altair",
+      "profile": "solution-architect",
+      "project": "mac-infra",
+      "binding": "local-gr",
+      "runtime": {
+        "kind": "codex_cli",
+        "model": "gpt-6.1-sol",
+        "effort": "xhigh"
+      },
+      "lifecycle": "persistent",
+      "desired_state": "active",
+      "context_mode": "fresh",
+      "clone": ".",
+      "a2a": {
+        "connection": "gr",
+        "parent_route": "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+        "rooms": [
+          "!AsuSdHdY81pL5IBq4DmOsUDzivI9ydVqY-dBrvbmqmQ",
+          "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+          "!EzGbiIYRVOdjWXsadtAuJbnvY7UT-t96UEjaG2AE60o",
+          "!CHEu95svRySKGThv2xOKwW5Yjum_AC1J2Jy42XytDx0",
+          "!Ddjqznk-Zmq20l2_1LloHBnkDXRKarouHdqGROFXKnM"
+        ],
+        "spaces": [
+          "!Ddjqznk-Zmq20l2_1LloHBnkDXRKarouHdqGROFXKnM"
+        ],
+        "subscriptions": {
+          "required": [
+            {
+              "rooms": [
+                "!AsuSdHdY81pL5IBq4DmOsUDzivI9ydVqY-dBrvbmqmQ",
+                "!iT04U79Z7yTgpV3eu78TBXrbNZzQ3rDMCeJMI8NSXNI",
+                "!EzGbiIYRVOdjWXsadtAuJbnvY7UT-t96UEjaG2AE60o",
+                "!CHEu95svRySKGThv2xOKwW5Yjum_AC1J2Jy42XytDx0"
+              ],
+              "kinds": [
+                "system",
+                "owner-needed",
+                "decision"
+              ]
+            },
+            {
+              "from_mxid": "@alexis:gr.relux.works"
+            },
+            {
+              "from_mxid": "@alexis:relux.works"
+            }
+          ],
+          "self": []
+        }
+      },
+      "result_route": "a2a",
+      "chat_admission": "Owner standing instruction, 2026-10-30: stable local product members have their own a2a identity and receive board assignments over a2a. Desired membership does not provision an account or prove liveness.",
+      "independent_of_producer": true
+    }
+  ]
+}
