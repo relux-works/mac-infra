@@ -29,7 +29,7 @@ func (p *paths) Set(s string) error {
 
 func execute(ctx context.Context, args []string, out io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "mac-policy-journal run --user-root ABS --journal ABS --rescan 30s [--duration 0] [--home ABS ...]\nObserves ~/.claude and ~/.curator/environments/*/claude_code under user-root.\nAdditional CLAUDE_CONFIG_DIR homes require --home. Metadata only; notifications can coalesce.\nThe journal parent must already be private (0700). No policy contents are read.")
+		fmt.Fprintln(out, "mac-policy-journal run --user-root ABS --journal ABS --rescan 30s [--duration 0] [--home ABS ...]\nObserves ~/.claude and ~/.curator/environments/*/claude_code under user-root.\nAdditional CLAUDE_CONFIG_DIR homes require --home. Metadata only; notifications can coalesce.\nThe journal must be a lowercase .jsonl or .log file in an existing private (0700) directory\noutside every observed home. A declared --home that is absent is recorded as home_absent.\nNo policy contents are read.")
 		fmt.Fprintln(out, "mac-policy-journal enable [--home ABS ...] | status | disable\nEnable creates a user LaunchAgent, never overwrites an existing plist. Disable retains its plist and journal.")
 		return 0
 	}
@@ -58,7 +58,8 @@ func execute(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintln(out, "user root unavailable")
 		return 1
 	}
-	log, e := policyjournal.OpenJournal(journal)
+	homes, _, _, _ := policyjournal.Discover(policyjournal.OSMetadata{}, root, extra)
+	log, e := policyjournal.OpenJournal(journal, homes)
 	if e != nil {
 		fmt.Fprintln(out, "journal output refused")
 		return 1
@@ -69,7 +70,7 @@ func execute(ctx context.Context, args []string, out io.Writer) int {
 		ctx, cancel = context.WithTimeout(ctx, duration)
 		defer cancel()
 	}
-	o := &policyjournal.Observer{FS: policyjournal.OSMetadata{}, Writer: log}
+	o := &policyjournal.Observer{FS: policyjournal.OSMetadata{}, Writer: log, JournalDir: filepath.Dir(journal)}
 	if e = policyjournal.Run(ctx, root, extra, interval, o); e != nil {
 		fmt.Fprintln(out, "observer failed; coverage interrupted")
 		return 1

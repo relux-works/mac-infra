@@ -4,6 +4,7 @@ package policyjournal
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -92,20 +93,20 @@ func TestPrivateJournalAdmission(t *testing.T) {
 	}
 	_ = os.Chmod(r, 0700)
 	p := filepath.Join(r, "journal.jsonl")
-	f, e := OpenJournal(p)
+	f, e := OpenJournal(p, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
-	if second, e := OpenJournal(p); e == nil {
+	if second, e := OpenJournal(p, nil); e == nil {
 		second.Close()
 		t.Fatal("duplicate writer admitted")
 	}
 	_ = f.Close()
 	secret := filepath.Join(r, "secret")
 	put(t, secret, "SENTINEL")
-	link := filepath.Join(r, "link")
+	link := filepath.Join(r, "link.jsonl")
 	_ = os.Symlink(secret, link)
-	fifo := filepath.Join(r, "fifo")
+	fifo := filepath.Join(r, "fifo.jsonl")
 	if e := unix.Mkfifo(fifo, 0600); e != nil {
 		t.Fatal(e)
 	}
@@ -113,7 +114,7 @@ func TestPrivateJournalAdmission(t *testing.T) {
 		t.Fatal(s)
 	}
 	for _, bad := range []string{link, fifo, filepath.Join(r, Names[0])} {
-		if f, e := OpenJournal(bad); e == nil {
+		if f, e := OpenJournal(bad, nil); e == nil {
 			f.Close()
 			t.Fatal("unsafe journal admitted")
 		}
@@ -122,22 +123,145 @@ func TestPrivateJournalAdmission(t *testing.T) {
 	if !bytes.Equal(data, []byte("SENTINEL")) {
 		t.Fatal("secret changed")
 	}
-	hard := filepath.Join(r, "hard")
+	hard := filepath.Join(r, "hard.jsonl")
 	_ = os.Link(secret, hard)
-	if f, e := OpenJournal(hard); e == nil {
+	if f, e := OpenJournal(hard, nil); e == nil {
 		f.Close()
 		t.Fatal("hardlink admitted")
 	}
-	public := filepath.Join(r, "public")
+	public := filepath.Join(r, "public.log")
 	put(t, public, "SENTINEL")
 	_ = os.Chmod(public, 0644)
-	if f, e := OpenJournal(public); e == nil {
+	if f, e := OpenJournal(public, nil); e == nil {
 		f.Close()
 		t.Fatal("public log admitted")
 	}
 	_ = os.Chmod(r, 0755)
-	if f, e := OpenJournal(p); e == nil {
+	if f, e := OpenJournal(p, nil); e == nil {
 		f.Close()
 		t.Fatal("public parent admitted")
+	}
+}
+
+// Proves the journal name allowlist: the forms the pipeline emits (events.jsonl,
+// service.log) and other lowercase .jsonl/.log names are admitted; policy names,
+// their case aliases, other extensions, uppercase and non-ASCII names are not.
+func TestJournalNameForms(t *testing.T) {
+	for _, ok := range []string{"events.jsonl", "service.log", "a.b-c_d.jsonl", "2026-11-04.log"} {
+		if !journalName.MatchString(ok) {
+			t.Errorf("valid %q refused", ok)
+		}
+	}
+	for _, bad := range []string{Names[0], Names[1], "REMOTE-SETTINGS.JSON", "Policy-Limits.json", "journal", "events.json", "Events.jsonl", "events.JSONL", "x.jsonl.json", ".hidden.jsonl", "événements.jsonl", "events.jsonl/"} {
+		if journalName.MatchString(bad) {
+			t.Errorf("invalid %q admitted", bad)
+		}
+	}
+}
+
+// Proves output admission separates the journal from monitored inputs under the
+// filesystem's real name and object equivalence: exact names, case aliases (an
+// existing and a not-yet-created policy), a valid name inside a monitored home
+// or a case alias of that home, a symlink and a hardlink to a policy are all
+// refused, every policy byte stays unchanged and no file is created in the home.
+// A separate private journal is admitted as the paired positive control. On a
+// case-sensitive filesystem the aliases are distinct names; they must still be
+// refused, so the test does not depend on the volume's case behaviour.
+func TestJournalSeparatedFromPolicyInputs(t *testing.T) {
+	r, e := filepath.EvalSymlinks(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	_ = os.Chmod(r, 0700)
+	h := filepath.Join(r, ".claude")
+	if e = os.Mkdir(h, 0700); e != nil {
+		t.Fatal(e)
+	}
+	settings := filepath.Join(h, Names[0])
+	put(t, settings, "POLICY_SENTINEL")
+	homes := []string{h}
+	unchanged := func(label string) {
+		t.Helper()
+		data, e := os.ReadFile(settings)
+		if e != nil || string(data) != "POLICY_SENTINEL" {
+			t.Fatalf("%s: policy changed: %q %v", label, data, e)
+		}
+		entries, e := os.ReadDir(h)
+		if e != nil || len(entries) != 1 {
+			t.Fatalf("%s: home contents changed: %v %v", label, entries, e)
+		}
+	}
+	link := filepath.Join(r, "to-policy.jsonl")
+	if e = os.Symlink(settings, link); e != nil {
+		t.Fatal(e)
+	}
+	hard := filepath.Join(r, "policy-hard.jsonl")
+	if e = os.Link(settings, hard); e != nil {
+		t.Fatal(e)
+	}
+	for _, bad := range []string{
+		settings,
+		filepath.Join(h, Names[1]),
+		filepath.Join(h, "REMOTE-SETTINGS.JSON"),
+		filepath.Join(h, "POLICY-LIMITS.JSON"),
+		filepath.Join(h, "events.jsonl"),
+		filepath.Join(r, ".CLAUDE", "events.jsonl"),
+		link,
+		hard,
+	} {
+		if f, e := OpenJournal(bad, homes); e == nil {
+			f.Close()
+			t.Fatalf("%s admitted", bad)
+		}
+		unchanged(bad)
+	}
+	if _, e = os.Lstat(filepath.Join(h, Names[1])); !os.IsNotExist(e) {
+		t.Fatal("absent policy created")
+	}
+	_ = os.Remove(hard)
+	for _, ok := range []string{filepath.Join(r, "events.jsonl"), filepath.Join(r, "service.log")} {
+		f, e := OpenJournal(ok, homes)
+		if e != nil {
+			t.Fatalf("%s refused: %v", ok, e)
+		}
+		if _, e = f.WriteString("{}\n"); e != nil {
+			t.Fatal(e)
+		}
+		_ = f.Close()
+		unchanged(ok)
+	}
+}
+
+// Proves the per-scan recheck: an observer whose journal directory is a
+// monitored home stops with an error before scanning, and writes no record
+// for any policy file.
+func TestRunStopsWhenJournalDirIsHome(t *testing.T) {
+	r, e := filepath.EvalSymlinks(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	h := filepath.Join(r, ".claude")
+	if e = os.Mkdir(h, 0700); e != nil {
+		t.Fatal(e)
+	}
+	put(t, filepath.Join(h, Names[0]), "POLICY_SENTINEL")
+	var out bytes.Buffer
+	o := &Observer{FS: OSMetadata{}, Writer: &out, JournalDir: h}
+	if e = Run(t.Context(), r, nil, time.Second, o); e == nil {
+		t.Fatal("observer ran with its journal inside a monitored home")
+	}
+	if bytes.Contains(out.Bytes(), []byte(`"file"`)) {
+		t.Fatalf("scanned after separation failure: %s", out.String())
+	}
+	// Positive control: the same root with a separate journal directory scans.
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	out.Reset()
+	o = &Observer{FS: OSMetadata{}, Writer: &out, JournalDir: r}
+	if e = Run(ctx, r, nil, time.Second, o); e != nil {
+		t.Fatal(e)
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"kind":"baseline"`)) {
+		t.Fatalf("no baseline: %s", out.String())
 	}
 }

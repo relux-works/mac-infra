@@ -135,7 +135,7 @@ func TestDiscoveryScope(t *testing.T) {
 	}
 	put(t, filepath.Join(h, "credentials.json"), "SECRET")
 	f := &tracedFS{}
-	homes, _, gap := Discover(f, r, nil)
+	homes, _, _, gap := Discover(f, r, nil)
 	if gap || len(homes) != 2 {
 		t.Fatalf("%v %v", homes, gap)
 	}
@@ -149,7 +149,7 @@ func TestDiscoveryScope(t *testing.T) {
 	}
 	newHome := filepath.Join(r, ".curator", "environments", "new", "claude_code")
 	_ = os.MkdirAll(newHome, 0700)
-	homes, _, gap = Discover(f, r, nil)
+	homes, _, _, gap = Discover(f, r, nil)
 	if gap || len(homes) != 3 {
 		t.Fatalf("%v %v", homes, gap)
 	}
@@ -162,13 +162,13 @@ func TestDiscoveryExtraAndSymlink(t *testing.T) {
 	h := home(t, r)
 	extra := filepath.Join(r, "custom")
 	_ = os.Mkdir(extra, 0700)
-	homes, _, gap := Discover(OSMetadata{}, r, []string{extra})
+	homes, _, _, gap := Discover(OSMetadata{}, r, []string{extra})
 	if gap || len(homes) != 2 {
 		t.Fatalf("%v %v", homes, gap)
 	}
 	alias := filepath.Join(r, "alias")
 	_ = os.Symlink(r, alias)
-	homes, _, gap = Discover(OSMetadata{}, r, []string{filepath.Join(alias, "custom")})
+	homes, _, _, gap = Discover(OSMetadata{}, r, []string{filepath.Join(alias, "custom")})
 	if !gap || len(homes) != 1 || homes[0] != h {
 		t.Fatalf("%v %v", homes, gap)
 	}
@@ -217,5 +217,96 @@ func TestEmptyAndAbsentFields(t *testing.T) {
 				t.Fatal(m)
 			}
 		}
+	}
+}
+
+// Proves declared-home visibility: an explicitly requested home that is absent
+// below a valid parent is returned as missing with its parent watched, while a
+// present one is a home, a regular file or symlink in its place is a coverage
+// gap (not missing), and absent optional default homes stay silent.
+func TestDeclaredHomeVisibility(t *testing.T) {
+	r := privateRoot(t)
+	declared := filepath.Join(r, "explicit-home")
+	homes, dirs, missing, gap := Discover(OSMetadata{}, r, []string{declared})
+	if gap || len(homes) != 0 || len(missing) != 1 || missing[0] != declared {
+		t.Fatalf("absent: homes=%v missing=%v gap=%v", homes, missing, gap)
+	}
+	watched := false
+	for _, d := range dirs {
+		watched = watched || d == r
+	}
+	if !watched {
+		t.Fatalf("parent of a missing declared home is not watched: %v", dirs)
+	}
+	if e := os.Mkdir(declared, 0700); e != nil {
+		t.Fatal(e)
+	}
+	homes, _, missing, gap = Discover(OSMetadata{}, r, []string{declared})
+	if gap || len(homes) != 1 || homes[0] != declared || len(missing) != 0 {
+		t.Fatalf("present: homes=%v missing=%v gap=%v", homes, missing, gap)
+	}
+	_ = os.Remove(declared)
+	put(t, declared, "not a directory")
+	homes, _, missing, gap = Discover(OSMetadata{}, r, []string{declared})
+	if !gap || len(homes) != 0 || len(missing) != 0 {
+		t.Fatalf("regular file: homes=%v missing=%v gap=%v", homes, missing, gap)
+	}
+	_ = os.Remove(declared)
+	target := filepath.Join(r, "target")
+	_ = os.Mkdir(target, 0700)
+	if e := os.Symlink(target, declared); e != nil {
+		t.Fatal(e)
+	}
+	homes, _, missing, gap = Discover(OSMetadata{}, r, []string{declared})
+	if !gap || len(homes) != 0 || len(missing) != 0 {
+		t.Fatalf("symlink: homes=%v missing=%v gap=%v", homes, missing, gap)
+	}
+	// No declared home and no default directories: silent, not missing.
+	empty := privateRoot(t)
+	homes, _, missing, gap = Discover(OSMetadata{}, empty, nil)
+	if gap || len(homes) != 0 || len(missing) != 0 {
+		t.Fatalf("defaults: homes=%v missing=%v gap=%v", homes, missing, gap)
+	}
+	// A missing parent is a gap, not a missing home: its path cannot be watched.
+	homes, _, missing, gap = Discover(OSMetadata{}, r, []string{filepath.Join(r, "no-parent", "home")})
+	if !gap || len(missing) != 0 {
+		t.Fatalf("missing parent: missing=%v gap=%v", missing, gap)
+	}
+}
+
+// Proves home_absent is emitted once per absence, not on every rescan, and
+// again after the home was created (and baselined) and then removed.
+func TestReportMissingLifecycle(t *testing.T) {
+	r := privateRoot(t)
+	declared := filepath.Join(r, "explicit-home")
+	var out bytes.Buffer
+	o := &Observer{FS: OSMetadata{}, Writer: &out}
+	count := func() int { return strings.Count(out.String(), `"kind":"home_absent"`) }
+	step := func() {
+		t.Helper()
+		homes, _, missing, _ := Discover(o.FS, r, []string{declared})
+		if e := o.ReportMissing(time.Now(), missing); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := o.Scan(time.Now(), homes, nil); e != nil {
+			t.Fatal(e)
+		}
+	}
+	step()
+	step()
+	if count() != 1 || !strings.Contains(out.String(), `"home":"`+declared+`"`) {
+		t.Fatalf("first absence: %s", out.String())
+	}
+	if e := os.Mkdir(declared, 0700); e != nil {
+		t.Fatal(e)
+	}
+	step()
+	if count() != 1 || !strings.Contains(out.String(), `"kind":"baseline"`) {
+		t.Fatalf("creation not baselined: %s", out.String())
+	}
+	_ = os.Remove(declared)
+	step()
+	if count() != 2 {
+		t.Fatalf("second absence not reported: %s", out.String())
 	}
 }

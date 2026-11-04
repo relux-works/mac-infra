@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"syscall"
 	"time"
 
@@ -143,9 +144,17 @@ func Run(ctx context.Context, user string, extra []string, rescan time.Duration,
 			return o.Emit(Record{At: time.Now().UTC().Format(time.RFC3339Nano), Kind: "observer_stop"})
 		}
 		if last.IsZero() || len(notified) > 0 || time.Since(last) >= rescan {
-			homes, dirs, gap := Discover(o.FS, user, extra)
+			homes, dirs, missing, gap := Discover(o.FS, user, extra)
+			if o.JournalDir != "" {
+				if e = separateFromHomes(o.JournalDir, homes); e != nil {
+					return e
+				}
+			}
 			// Arm directory watches first; a following scan captures current state.
 			gap = w.Sync(append(dirs, knownFiles(o)...)) || gap
+			if e = o.ReportMissing(time.Now(), missing); e != nil {
+				return e
+			}
 			files, e := o.Scan(time.Now(), homes, notified)
 			if e != nil {
 				return e
@@ -175,16 +184,43 @@ func knownFiles(o *Observer) []string {
 	return p
 }
 
+// journalName is the complete set of admitted output basenames: lowercase ASCII
+// ending in .jsonl or .log. Under case and Unicode-normalization folding no such
+// name equals a monitored .json policy name, including a not-yet-created one.
+var journalName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,200}\.(jsonl|log)$`)
+
+func objectID(p string) ([2]uint64, bool) {
+	var st unix.Stat_t
+	if unix.Lstat(p, &st) != nil {
+		return [2]uint64{}, false
+	}
+	return [2]uint64{uint64(st.Dev), st.Ino}, true
+}
+
+// separateFromHomes refuses a journal directory that is the same filesystem
+// object as a monitored home, whatever path spelling reaches it.
+func separateFromHomes(dir string, homes []string) error {
+	id, ok := objectID(dir)
+	if !ok {
+		return errors.New("journal directory unavailable")
+	}
+	for _, h := range homes {
+		if hid, ok := objectID(h); ok && hid == id {
+			return errors.New("journal directory is a monitored home")
+		}
+	}
+	return nil
+}
+
 // OpenJournal opens only the journal output, never a monitored input. Its lock
-// lasts for the entire observer process, preventing duplicate writers.
-func OpenJournal(path string) (*os.File, error) {
+// lasts for the entire observer process, preventing duplicate writers. homes are
+// the monitored homes known at open; Run rechecks the separation on every scan.
+func OpenJournal(path string, homes []string) (*os.File, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errors.New("absolute clean journal path required")
 	}
-	for _, n := range Names {
-		if filepath.Base(path) == n {
-			return nil, errors.New("journal cannot be a policy file")
-		}
+	if !journalName.MatchString(filepath.Base(path)) {
+		return nil, errors.New("journal name must be lowercase .jsonl or .log")
 	}
 	parent := filepath.Dir(path)
 	for p := parent; ; p = filepath.Dir(p) {
@@ -202,6 +238,9 @@ func OpenJournal(path string) (*os.File, error) {
 			break
 		}
 	}
+	if e := separateFromHomes(parent, homes); e != nil {
+		return nil, e
+	}
 	fd, e := unix.Open(path, unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0600)
 	if e != nil {
 		return nil, errors.New("journal open refused")
@@ -211,6 +250,15 @@ func OpenJournal(path string) (*os.File, error) {
 	if unix.Fstat(fd, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Getuid()) || st.Mode&0077 != 0 || st.Nlink != 1 {
 		_ = f.Close()
 		return nil, errors.New("journal must be private owned regular file with one link")
+	}
+	own := [2]uint64{uint64(st.Dev), st.Ino}
+	for _, h := range homes {
+		for _, n := range Names {
+			if id, ok := objectID(filepath.Join(h, n)); ok && id == own {
+				_ = f.Close()
+				return nil, errors.New("journal cannot be a policy file")
+			}
+		}
 	}
 	if unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB) != nil {
 		_ = f.Close()

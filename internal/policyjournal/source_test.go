@@ -17,15 +17,15 @@ func inputOperations(src string) []string {
 		return []string{"parse"}
 	}
 	allowed := map[string]bool{}
-	for _, s := range strings.Fields(`json.NewEncoder errors.Is errors.New os.Lstat os.ReadDir os.NewFile os.Getuid filepath.Join filepath.Dir filepath.Base filepath.IsAbs filepath.Clean sort.Strings time.Now time.Since unix.Kqueue unix.CloseOnExec unix.Close unix.Lstat unix.Open unix.Fstat unix.Kevent unix.NsecToTimespec unix.Flock`) {
+	for _, s := range strings.Fields(`json.NewEncoder errors.Is errors.New os.Lstat os.ReadDir os.NewFile os.Getuid filepath.Join filepath.Dir filepath.Base filepath.IsAbs filepath.Clean sort.Strings time.Now time.Since unix.Kqueue unix.CloseOnExec unix.Close unix.Lstat unix.Open unix.Fstat unix.Kevent unix.NsecToTimespec unix.Flock regexp.MustCompile`) {
 		allowed[s] = true
 	}
 	methods := map[string]bool{}
-	for _, s := range strings.Fields(`IsDir IsRegular Type Name Perm Mode Size ModTime Sys UTC Format IsZero Encode Lstat ReadDir Emit Scan Close Err Wait Sync`) {
+	for _, s := range strings.Fields(`IsDir IsRegular Type Name Perm Mode Size ModTime Sys UTC Format IsZero Encode Lstat ReadDir Emit Scan Close Err Wait Sync MatchString ReportMissing`) {
 		methods[s] = true
 	}
 	packages := map[string]bool{}
-	for _, s := range strings.Fields(`json errors os filepath sort time unix io fs syscall context`) {
+	for _, s := range strings.Fields(`json errors os filepath sort time unix io fs syscall context regexp`) {
 		packages[s] = true
 	}
 	var bad []string
@@ -71,6 +71,7 @@ func TestInputOperationVocabulary(t *testing.T) {
 		{`package p; func f(){ unix.Read(fd,buf) }`, "unix.Read"},
 		{`package p; func f(){ file.Read(buf) }`, "method.Read"},
 		{`package p; func f(){ io.Copy(w,r) }`, "io.Copy"},
+		{`package p; func f(){ regexp.MatchReader(re, r) }`, "regexp.MatchReader"},
 	} {
 		bad := strings.Join(inputOperations(control.code), ",")
 		if bad != control.want {

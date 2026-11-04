@@ -101,3 +101,68 @@ func TestServiceDirectoryNoAlias(t *testing.T) {
 		t.Fatal("forbidden descendant created")
 	}
 }
+
+// Proves the review reproductions now fail closed: --journal as an uppercase
+// alias of either monitored policy file exits 1 and leaves the policy byte-for-
+// byte unchanged, while a separate private journal exits 0 with the same policy
+// unchanged.
+func TestRunRefusesPolicyCaseAliasJournal(t *testing.T) {
+	r, e := filepath.EvalSymlinks(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	_ = os.Chmod(r, 0700)
+	h := filepath.Join(r, ".claude")
+	_ = os.Mkdir(h, 0700)
+	for _, n := range []string{"remote-settings.json", "policy-limits.json"} {
+		_ = os.WriteFile(filepath.Join(h, n), []byte(`{"synthetic":"policy"}`), 0600)
+	}
+	check := func(label string) {
+		t.Helper()
+		for _, n := range []string{"remote-settings.json", "policy-limits.json"} {
+			if data, e := os.ReadFile(filepath.Join(h, n)); e != nil || string(data) != `{"synthetic":"policy"}` {
+				t.Fatalf("%s: %s changed: %q", label, n, data)
+			}
+		}
+	}
+	for _, alias := range []string{"REMOTE-SETTINGS.JSON", "POLICY-LIMITS.JSON"} {
+		var b bytes.Buffer
+		if code := execute(context.Background(), []string{"run", "--user-root", r, "--journal", filepath.Join(h, alias), "--rescan", "1s", "--duration", "10ms"}, &b); code != 1 {
+			t.Fatalf("%s: exit %d %s", alias, code, b.String())
+		}
+		check(alias)
+	}
+	var b bytes.Buffer
+	if code := execute(context.Background(), []string{"run", "--user-root", r, "--journal", filepath.Join(r, "events.jsonl"), "--rescan", "1s", "--duration", "10ms"}, &b); code != 0 {
+		t.Fatalf("separate journal: exit %d %s", code, b.String())
+	}
+	check("separate journal")
+}
+
+// Proves an explicitly requested absent home is visible: exit 0 with a
+// home_absent record for that path, paired with a present declared home that is
+// baselined in the same run.
+func TestRunReportsMissingDeclaredHome(t *testing.T) {
+	r, e := filepath.EvalSymlinks(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	_ = os.Chmod(r, 0700)
+	_ = os.Mkdir(filepath.Join(r, ".claude"), 0700)
+	present := filepath.Join(r, "present-home")
+	_ = os.Mkdir(present, 0700)
+	missing := filepath.Join(r, "explicit-home")
+	journal := filepath.Join(r, "events.jsonl")
+	var b bytes.Buffer
+	if code := execute(context.Background(), []string{"run", "--user-root", r, "--journal", journal, "--rescan", "1s", "--duration", "100ms", "--home", missing, "--home", present}, &b); code != 0 {
+		t.Fatalf("exit %d %s", code, b.String())
+	}
+	data, e := os.ReadFile(journal)
+	if e != nil {
+		t.Fatal(e)
+	}
+	s := string(data)
+	if !strings.Contains(s, `"kind":"home_absent","home":"`+missing+`"`) || !strings.Contains(s, `"home":"`+present+`"`) {
+		t.Fatal(s)
+	}
+}

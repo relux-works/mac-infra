@@ -18,6 +18,25 @@ Directory symlinks, including ancestor components, are not followed; declare
 the canonical home instead. Coverage is therefore the declared topology, not
 a claim to discover arbitrary paths used by unknown processes.
 
+Optional default homes that do not exist are skipped silently. An explicitly
+declared `--home` that does not exist below a valid parent is recorded as
+`home_absent`, once per absence, and its parent directory is watched so that a
+later creation is baselined. A declared home whose path is a regular file, a
+symlink or below an unusable parent is a `coverage_gap`.
+
+## Output admission
+
+The journal basename must be lowercase ASCII ending in `.jsonl` or `.log`
+(`events.jsonl` and `service.log` are the forms the service uses). Under case
+and Unicode-normalization folding no such name equals a monitored `.json`
+policy file, so an alias such as `REMOTE-SETTINGS.JSON` is refused before any
+open, including when the policy file does not exist yet. The journal directory
+must not be the same filesystem object as a monitored home, whatever path
+reaches it; the observer rechecks this on every discovery and stops instead of
+writing there. After opening, the journal must not be the same object as any
+monitored policy file. Symlinked components, hardlinked files, other owners and
+group/world permissions are refused as before.
+
 ## Run and installation
 
 Build/install from a clean standalone checkout of the accepted commit:
@@ -95,6 +114,10 @@ GOWORK=off GOTOOLCHAIN=local go test ./internal/policyjournal ./cmd/mac-policy-j
 
 Tests use synthetic homes only. They cover metadata transitions, exact output
 fields with sentinel content excluded, bounded discovery, aliases refused,
+journal name forms, output separation from policy files and homes (exact names,
+case aliases of present and absent policies, symlink and hardlink), declared
+homes that are absent, present, replaced by a file or a symlink, and their
+creation and removal,
 real vnode notifications and replacement, unreadable-file coverage gaps,
 the actual event-descriptor read-isolation limit, a source-operation guard
 with violating read-call controls, private

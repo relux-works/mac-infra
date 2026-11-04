@@ -472,7 +472,9 @@ own user LaunchAgent, `status` projects only loaded/PID, and `disable` stops
 that observer while retaining records. It observes only remote-settings.json
 and policy-limits.json: home path, size, mtime and inode, without contents,
 hash or diff. Automatic discovery covers ~/.claude and Curator environments;
-other canonical homes require explicit --home. Notifications can coalesce;
+other canonical homes require explicit --home; a declared home that is absent
+is recorded as home_absent. The journal must be a lowercase .jsonl or .log file
+outside every monitored home. Notifications can coalesce;
 coverage gaps and baselines do not prove policy semantics or in-memory state.
 Never change live policy files to manufacture a journal witness. Use synthetic
 homes for write/replacement/deletion tests. No auth/session/config reads,

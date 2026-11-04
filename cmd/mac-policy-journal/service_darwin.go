@@ -117,13 +117,14 @@ func service(args []string, out io.Writer) int {
 		fmt.Fprintln(out, "private state directory unavailable")
 		return 1
 	}
-	log, e := policyjournal.OpenJournal(filepath.Join(dir, "events.jsonl"))
+	homes, _, _, _ := policyjournal.Discover(policyjournal.OSMetadata{}, h, extra)
+	log, e := policyjournal.OpenJournal(filepath.Join(dir, "events.jsonl"), homes)
 	if e != nil {
 		fmt.Fprintln(out, "private journal preflight refused")
 		return 1
 	}
 	_ = log.Close()
-	serviceLog, e := policyjournal.OpenJournal(filepath.Join(dir, "service.log"))
+	serviceLog, e := policyjournal.OpenJournal(filepath.Join(dir, "service.log"), homes)
 	if e != nil {
 		fmt.Fprintln(out, "private service log preflight refused")
 		return 1
