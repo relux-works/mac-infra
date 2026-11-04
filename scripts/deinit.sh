@@ -59,7 +59,17 @@ if [[ -x "$BIN_DIR/mac-infra-core" ]]; then
   }
 fi
 
-rm -f "$BIN_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-sweep" "$BIN_DIR/mac-load-profile" "$BIN_DIR/mac-video-profile" "$BIN_DIR/mac-disk-profile" "$BIN_DIR/mac-cleanup" "$BIN_DIR/mac-infra-core" "$BIN_DIR/mac-safari-session" "$BIN_DIR/mac-chrome-session" "$BIN_DIR/mac-browser-site" "$BIN_DIR/mac-document-sanitize" "$BIN_DIR/mac-keyvault" "$BIN_DIR/mac-security" "$BIN_DIR/mac-netnone" "$BIN_DIR/mac-firewall"
+# Do not strand the policy observer while removing its executable. Keep its
+# private journal and plist for explicit recovery; never touch native homes.
+policy_job="gui/$(id -u)/works.relux.mac-infra-claude-policy-journal"
+if /bin/launchctl print "$policy_job" >/dev/null 2>&1; then
+  /bin/launchctl bootout "$policy_job" || {
+    echo "ERROR: policy journal is still loaded; retaining its executable" >&2
+    exit 1
+  }
+fi
+
+rm -f "$BIN_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-sweep" "$BIN_DIR/mac-load-profile" "$BIN_DIR/mac-video-profile" "$BIN_DIR/mac-disk-profile" "$BIN_DIR/mac-cleanup" "$BIN_DIR/mac-infra-core" "$BIN_DIR/mac-safari-session" "$BIN_DIR/mac-chrome-session" "$BIN_DIR/mac-browser-site" "$BIN_DIR/mac-document-sanitize" "$BIN_DIR/mac-keyvault" "$BIN_DIR/mac-security" "$BIN_DIR/mac-policy-journal" "$BIN_DIR/mac-netnone" "$BIN_DIR/mac-firewall"
 # One-time migration cleanup for installs predating Curator distribution.
 # Current setup.sh no longer creates these retired global skill paths.
 rm -f "$HOME/.codex/skills/$SKILL_NAME" "$HOME/.claude/skills/$SKILL_NAME"

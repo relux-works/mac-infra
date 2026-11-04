@@ -463,6 +463,21 @@ mac-load-profile fsevents
 - `mac-load-profile` is read-only. It must not stop, restart, kill, or mutate
   processes.
 
+## Claude Policy Metadata Journal
+
+For an owner-authorized metadata-only policy-file journal, use
+`mac-policy-journal`; see `docs/claude-policy-journal.md` in the mac-infra
+source repository for installation, coverage and limits. `enable` starts its
+own user LaunchAgent, `status` projects only loaded/PID, and `disable` stops
+that observer while retaining records. It observes only remote-settings.json
+and policy-limits.json: home path, size, mtime and inode, without contents,
+hash or diff. Automatic discovery covers ~/.claude and Curator environments;
+other canonical homes require explicit --home. Notifications can coalesce;
+coverage gaps and baselines do not prove policy semantics or in-memory state.
+Never change live policy files to manufacture a journal witness. Use synthetic
+homes for write/replacement/deletion tests. No auth/session/config reads,
+immutable-flag changes or native session restart follow from journal scope.
+
 ## FSEvents Bloat Workflow
 
 Use this when the Mac is sluggish and `fseventsd` shows up with a large RSS

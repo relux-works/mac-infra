@@ -101,6 +101,7 @@ ALL_BINARIES=(
   "mac-document-sanitize"
   "mac-infra-core"
   "mac-security"
+  "mac-policy-journal"
   "mac-tool-secret"
   "mac-tool-secret-probe"
   "mac-netnone"
@@ -299,6 +300,10 @@ if selected mac-infra-core; then
   echo "Building mac-infra-core..."
   go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-infra-core" ./cmd/mac-infra-core
 fi
+if selected mac-policy-journal; then
+  echo "Building mac-policy-journal..."
+  go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-policy-journal" ./cmd/mac-policy-journal
+fi
 if selected mac-security; then
   echo "Building mac-security..."
   go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-security" ./cmd/mac-security
@@ -365,6 +370,7 @@ BUILT_BINARIES=(
   "mac-document-sanitize"
   "mac-infra-core"
   "mac-security"
+  "mac-policy-journal"
   "mac-tool-secret"
   "mac-tool-secret-probe"
   "mac-netnone"
@@ -451,6 +457,9 @@ fi
 if selected mac-infra-core; then
   ln -sf "$BUILD_DIR/mac-infra-core" "$BIN_DIR/mac-infra-core"
 fi
+if selected mac-policy-journal; then
+  ln -sf "$BUILD_DIR/mac-policy-journal" "$BIN_DIR/mac-policy-journal"
+fi
 if selected mac-security; then
   ln -sf "$BUILD_DIR/mac-security" "$BIN_DIR/mac-security"
 fi
@@ -522,6 +531,9 @@ if selected mac-document-sanitize; then
 fi
 if selected mac-infra-core; then
   echo "  $BIN_DIR/mac-infra-core  -> $BUILD_DIR/mac-infra-core"
+fi
+if selected mac-policy-journal; then
+  echo "  $BIN_DIR/mac-policy-journal -> $BUILD_DIR/mac-policy-journal"
 fi
 if selected mac-security; then
   echo "  $BIN_DIR/mac-security -> $BUILD_DIR/mac-security"
