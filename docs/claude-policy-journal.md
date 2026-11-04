@@ -22,7 +22,9 @@ Optional default homes that do not exist are skipped silently. An explicitly
 declared `--home` that does not exist below a valid parent is recorded as
 `home_absent`, once per absence, and its parent directory is watched so that a
 later creation is baselined. A declared home whose path is a regular file, a
-symlink or below an unusable parent is a `coverage_gap`.
+symlink or below an unusable parent is a `coverage_gap`. A declared home whose
+directory cannot be searched is observed, and each policy file in it is
+recorded with state `unavailable` until access returns.
 
 ## Output admission
 

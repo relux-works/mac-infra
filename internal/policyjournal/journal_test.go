@@ -310,3 +310,51 @@ func TestReportMissingLifecycle(t *testing.T) {
 		t.Fatalf("second absence not reported: %s", out.String())
 	}
 }
+
+// Proves an unreadable declared home stays visible: a home whose directory
+// denies search is still a home and each policy file is recorded as
+// unavailable, and a declared home below an unreadable parent is a coverage gap,
+// never a silent omission or a missing home. Restoring permissions recovers the
+// normal absent baseline.
+func TestDeclaredHomeUnreadable(t *testing.T) {
+	r := privateRoot(t)
+	declared := filepath.Join(r, "locked-home")
+	if e := os.Mkdir(declared, 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Chmod(declared, 0); e != nil {
+		t.Fatal(e)
+	}
+	defer os.Chmod(declared, 0700)
+	homes, _, missing, gap := Discover(OSMetadata{}, r, []string{declared})
+	if gap || len(homes) != 1 || homes[0] != declared || len(missing) != 0 {
+		t.Fatalf("unreadable home: homes=%v missing=%v gap=%v", homes, missing, gap)
+	}
+	var out bytes.Buffer
+	o := &Observer{FS: OSMetadata{}, Writer: &out}
+	if _, e := o.Scan(time.Now(), homes, nil); e != nil {
+		t.Fatal(e)
+	}
+	if strings.Count(out.String(), `"state":"unavailable"`) != len(Names) {
+		t.Fatalf("unreadable home files not unavailable: %s", out.String())
+	}
+	_ = os.Chmod(declared, 0700)
+	out.Reset()
+	if _, e := o.Scan(time.Now(), homes, nil); e != nil {
+		t.Fatal(e)
+	}
+	if strings.Count(out.String(), `"state":"absent"`) != len(Names) {
+		t.Fatalf("recovery not recorded: %s", out.String())
+	}
+	parent := filepath.Join(r, "locked-parent")
+	_ = os.Mkdir(parent, 0700)
+	_ = os.Mkdir(filepath.Join(parent, "home"), 0700)
+	if e := os.Chmod(parent, 0); e != nil {
+		t.Fatal(e)
+	}
+	defer os.Chmod(parent, 0700)
+	homes, _, missing, gap = Discover(OSMetadata{}, r, []string{filepath.Join(parent, "home")})
+	if !gap || len(homes) != 0 || len(missing) != 0 {
+		t.Fatalf("unreadable parent: homes=%v missing=%v gap=%v", homes, missing, gap)
+	}
+}
