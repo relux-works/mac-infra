@@ -19,6 +19,7 @@ var (
 	ErrOriginMismatch      = errors.New("browser target origin changed")
 	ErrTargetMissing       = errors.New("browser target is no longer available")
 	ErrUnreadableResponse  = errors.New("browser response could not be verified")
+	ErrScriptException     = errors.New("page JavaScript threw an exception")
 	ErrEvalBlocked         = errors.New("page blocks eval")
 	ErrCSPExpression       = errors.New("page blocks eval; under this CSP the source must be a single expression (use an IIFE for statements)")
 )
@@ -145,6 +146,7 @@ func wrapJavaScript(source, expectedOrigin string, checkFrame func(string) error
   if (__macExpectedOrigin && location.origin !== __macExpectedOrigin) {
     return JSON.stringify({__macBrowserSessionGuard:__macGuard,outcome:"origin-mismatch",origin:String(location.origin || "")});
   }
+  try {
 %s
   let __macText = "";
   if (__macValue !== undefined) {
@@ -161,6 +163,11 @@ func wrapJavaScript(source, expectedOrigin string, checkFrame func(string) error
     readyState:String(document.readyState || ""),
     value:__macText
   });
+  } catch (__macError) {
+    let __macMessage = "unprintable exception";
+    try { __macMessage = String(__macError).slice(0, 2048); } catch (_) {}
+    return JSON.stringify({__macBrowserSessionGuard:__macGuard,outcome:"script-error",origin:String(location.origin || ""),readyState:String(document.readyState || ""),value:__macMessage});
+  }
 })()`, string(sentinelJSON), string(originJSON), evaluation), nil
 }
 
@@ -192,7 +199,7 @@ func executeJavaScript(source, expectedOrigin string, execute func(string) (stri
 	if err == nil {
 		result, err = ParseJavaScriptResult(raw, expectedOrigin)
 	}
-	if err != nil && !errors.Is(err, ErrOriginMismatch) && !errors.Is(err, ErrTargetMissing) {
+	if err != nil && !errors.Is(err, ErrOriginMismatch) && !errors.Is(err, ErrTargetMissing) && !errors.Is(err, ErrScriptException) {
 		return ExecutionResult{}, fmt.Errorf("%w: expression execution failed: %w", ErrCSPExpression, err)
 	}
 	return result, err
@@ -223,6 +230,11 @@ func ParseJavaScriptResult(raw, expectedOrigin string) (ExecutionResult, error) 
 			return ExecutionResult{}, &OriginMismatchError{Expected: strings.TrimSpace(expectedOrigin), Observed: envelope.Origin}
 		}
 		return ExecutionResult{}, ErrEvalBlocked
+	case "script-error":
+		if strings.TrimSpace(expectedOrigin) != "" && envelope.Origin != strings.TrimSpace(expectedOrigin) {
+			return ExecutionResult{}, &OriginMismatchError{Expected: strings.TrimSpace(expectedOrigin), Observed: envelope.Origin}
+		}
+		return ExecutionResult{}, fmt.Errorf("%w: %s", ErrScriptException, envelope.Value)
 	case "ok":
 		if strings.TrimSpace(expectedOrigin) != "" && envelope.Origin != strings.TrimSpace(expectedOrigin) {
 			return ExecutionResult{}, &OriginMismatchError{Expected: strings.TrimSpace(expectedOrigin), Observed: envelope.Origin}

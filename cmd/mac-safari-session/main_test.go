@@ -87,6 +87,31 @@ func TestRunJSRequiresExactWindowAndOriginBeforeSafari(t *testing.T) {
 	}
 }
 
+func TestRunJSScriptExceptionReportsCauseWithoutPublishingOutput(t *testing.T) {
+	// Use the real CLI and session parser with a synthetic automation response.
+	// The page wrapper itself is executed by the browsersession engine regression.
+	response := `{"__macBrowserSessionGuard":"works.relux.mac-infra/browser-session-guard/v1","outcome":"script-error","origin":"https://example.com","readyState":"complete","value":"TypeError: client is null; javascript errorMessage"}`
+	installSafariFetchTestRuntime(t, []string{response})
+	outPath := filepath.Join(t.TempDir(), "result.txt")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"run-js", "--window-id", "123", "--origin", "https://example.com", "--script", `(() => { throw new TypeError("client is null"); })()`, "--artifact-dir", t.TempDir(), "--out", outPath}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "TypeError: client is null") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, wrong := range []string{"page blocks eval", "empty automation output", "Safari blocked JavaScript automation"} {
+		if strings.Contains(stderr.String(), wrong) {
+			t.Fatalf("misleading script exception diagnostic: %s", stderr.String())
+		}
+	}
+	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+		t.Fatalf("failed script published output: %v", err)
+	}
+	calls, err := os.ReadFile(os.Getenv("SAFARI_FETCH_TEST_STATE"))
+	if err != nil || string(calls) != "1" {
+		t.Fatalf("script exception retried: calls=%q err=%v", calls, err)
+	}
+}
+
 func TestRunJSHelpDocumentsWindowID(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"run-js", "--help"}, &stdout, &stderr)
