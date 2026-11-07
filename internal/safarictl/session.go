@@ -352,6 +352,9 @@ func FormatAutomationError(err error) string {
 		return ""
 	}
 	msg := err.Error()
+	if errors.Is(err, browsersession.ErrScriptException) {
+		return msg
+	}
 	lower := strings.ToLower(msg)
 	if strings.Contains(lower, "not allowed to send javascript") ||
 		strings.Contains(lower, "allow javascript from apple events") ||

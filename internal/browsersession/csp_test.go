@@ -190,13 +190,14 @@ func TestJavaScriptCoreCallerErrorsAreNotRetried(t *testing.T) {
 			calls := 0
 			_, err := ExecuteJavaScript(`(() => {++globalThis.__runs; throw new `+kind+`("caller failed");})()`, "https://example.com", func(wrapped string) (string, error) {
 				calls++
-				out := runJSC(t, pageStub+"\ntry {print("+wrapped+");} catch(e) {print(e.name);print(globalThis.__runs);}")
-				if out != kind+"\n1" {
+				out := runJSC(t, pageStub+"\nprint("+wrapped+");print(globalThis.__runs);")
+				lines := strings.Split(out, "\n")
+				if len(lines) != 2 || lines[1] != "1" {
 					t.Fatalf("caller failure was swallowed or repeated: %q", out)
 				}
-				return "", errors.New("page execution failed")
+				return lines[0], nil
 			})
-			if err == nil || calls != 1 {
+			if !errors.Is(err, ErrScriptException) || !strings.Contains(err.Error(), kind+": caller failed") || calls != 1 {
 				t.Fatalf("err=%v calls=%d", err, calls)
 			}
 		})

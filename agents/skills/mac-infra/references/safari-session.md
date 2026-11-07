@@ -62,7 +62,11 @@ On this CSP fallback, omit a trailing semicolon and use an IIFE for statements,
 for example `(() => { const state = document.readyState; return state; })()`.
 Statements retain their existing completion-value behavior on pages that allow
 eval. A failed fallback reports that this CSP requires a single expression;
-syntax and runtime failures still return nonzero. `check-js` uses the expression
+syntax failures still return nonzero. Runtime exceptions on either route return
+nonzero with `page JavaScript threw an exception` and the exception's string
+(limited to 2048 characters, without a stack). A verified runtime exception is
+never labeled as a CSP failure or retried. Unverifiable or empty automation
+output remains a response verification failure. `check-js` uses the expression
 `document.readyState` and supports the same fallback. Exact-window targeting,
 the sentinel checks, and the secret-token guard apply to both routes.
 
