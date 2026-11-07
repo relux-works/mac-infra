@@ -115,6 +115,9 @@ func FormatAutomationError(err error) string {
 		return ""
 	}
 	msg := err.Error()
+	if errors.Is(err, browsersession.ErrScriptException) {
+		return msg
+	}
 	lower := strings.ToLower(msg)
 	if strings.Contains(lower, "javascript") && (strings.Contains(lower, "apple events") || strings.Contains(lower, "applescript") || strings.Contains(lower, "turned off")) {
 		return msg + "\n\nChrome blocked JavaScript automation. Enable View -> Developer -> Allow JavaScript from Apple Events, then rerun the command."
