@@ -1,10 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,9 +46,18 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 	}
 	done := make(chan result, 1)
 	cmd := exec.Command(bin, args...)
-	var buf bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &buf, &buf
-	cmd.WaitDelay = 2 * time.Second // a lingering descendant holding our pipes cannot keep the slot
+	// Output goes to an unlinked temporary file, not a pipe: the child's exit is observed as soon as
+	// it exits, even when a descendant keeps the output open, so a delivered post is never mistaken
+	// for a failure because output collection was still waiting.
+	out, err := os.CreateTemp("", "host-watch-out-*")
+	if err != nil {
+		r.mu.Lock()
+		delete(r.inflight, key)
+		r.mu.Unlock()
+		return "", err
+	}
+	_ = os.Remove(out.Name())
+	cmd.Stdout, cmd.Stderr = out, out
 
 	var pmu sync.Mutex
 	var proc *os.Process
@@ -60,6 +69,7 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 			r.mu.Unlock()
 		}()
 		if err := r.start(cmd); err != nil {
+			out.Close()
 			done <- result{nil, err}
 			return
 		}
@@ -71,13 +81,16 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 			_ = proc.Kill()
 		}
 		err := cmd.Wait()
-		done <- result{buf.Bytes(), err}
+		var collected []byte
+		if _, serr := out.Seek(0, 0); serr == nil {
+			collected, _ = io.ReadAll(io.LimitReader(out, 1<<20))
+		}
+		out.Close()
+		done <- result{collected, err}
 	}()
 	select {
 	case res := <-done:
-		// ErrWaitDelay after a successful exit means only output collection timed out because a
-		// descendant kept the pipes; the child itself succeeded.
-		if res.err != nil && !(errors.Is(res.err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success()) {
+		if res.err != nil {
 			return string(res.out), fmt.Errorf("%s: %w", filepath.Base(bin), res.err)
 		}
 		return string(res.out), nil

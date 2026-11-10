@@ -87,6 +87,7 @@ type watcher struct {
 	postBusy      bool
 	acked         int64 // highest alert sequence confirmed delivered
 	ackDirty      bool  // an acknowledgement write failed; retried before any new post
+	saveMu        sync.Mutex
 	mem           *state // dry-run keeps its state here and never writes the state directory
 	writeAck      func(path string, data []byte) error
 	wg            sync.WaitGroup
@@ -169,6 +170,11 @@ func (w *watcher) save(s state) error {
 		w.mem = &s // never written: a dry run leaves the live state untouched
 		return nil
 	}
+	w.saveMu.Lock()
+	defer w.saveMu.Unlock()
+	// Every save drops entries already delivered, so a stale in-memory copy cannot bring a
+	// delivered batch back, and the state file is a second durable record of delivery.
+	w.dropAcked(&s)
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
@@ -363,7 +369,7 @@ func (w *watcher) tick(now time.Time) error {
 
 // reportChecks scans the report directories and returns true when a new syspolicyd report appeared.
 func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp string) bool {
-	reports, errs := w.sys.reports()
+	reports, errs, scanned := w.sys.reports()
 	sources := reportSources(w.o.reportsDirs)
 	sort.Strings(sources)
 	for _, src := range sources {
@@ -390,7 +396,7 @@ func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp s
 		fresh[r.Class] = append(fresh[r.Class], label)
 	}
 	for _, src := range sources {
-		if _, bad := errs[src]; !bad {
+		if scanned[src] {
 			s.SeededSources[src] = true
 		}
 	}
@@ -600,20 +606,36 @@ func (w *watcher) maybeStartPost(s state) {
 		ctx, cancel := context.WithTimeout(context.Background(), w.o.postTimeout)
 		err := w.sys.post(ctx, text)
 		cancel()
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		if err == nil && last > w.acked {
-			w.acked = last
-			if w.o.dryRun {
-				// no durable acknowledgement in a dry run
-			} else if werr := w.writeAck(w.ackPath(), []byte(strconv.FormatInt(last, 10)+"\n")); werr != nil {
-				w.ackDirty = true
-				fmt.Fprintln(os.Stderr, "host-watch: ack write failed, holding new posts until it succeeds:", werr)
-			}
-		} else if err != nil {
+		defer func() {
+			w.mu.Lock()
+			w.postBusy = false
+			w.mu.Unlock()
+		}()
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "host-watch: post deferred:", err)
+			return
 		}
-		w.postBusy = false
+		w.mu.Lock()
+		if last > w.acked {
+			w.acked = last
+		}
+		w.mu.Unlock()
+		if w.o.dryRun {
+			return // no durable acknowledgement in a dry run
+		}
+		if werr := w.writeAck(w.ackPath(), []byte(strconv.FormatInt(last, 10)+"\n")); werr != nil {
+			w.mu.Lock()
+			w.ackDirty = true
+			w.mu.Unlock()
+			fmt.Fprintln(os.Stderr, "host-watch: ack write failed, holding new posts until it succeeds:", werr)
+			// Second durable record: the queue without the delivered batch, so a restart before
+			// the acknowledgement is rewritten does not resend it.
+			if st, lerr := w.load(); lerr == nil {
+				if serr := w.save(st); serr != nil {
+					fmt.Fprintln(os.Stderr, "host-watch: compacted queue save failed:", serr)
+				}
+			}
+		}
 	}()
 }
 

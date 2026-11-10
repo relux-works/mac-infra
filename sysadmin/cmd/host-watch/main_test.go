@@ -86,6 +86,7 @@ type fake struct {
 	svcErr    error
 	reports   []report
 	repErrs   map[string]error
+	absent    map[string]bool
 	ps        string
 	psErr     error
 	probe     time.Duration
@@ -109,14 +110,20 @@ type fake struct {
 func (f *fake) system() system {
 	return system{
 		syspolicy: func(context.Context) (serviceState, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.svc, f.svcErr },
-		reports: func() ([]report, map[string]error) {
+		reports: func() ([]report, map[string]error, map[string]bool) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			errs := map[string]error{}
 			for k, v := range f.repErrs {
 				errs[k] = v
 			}
-			return append([]report(nil), f.reports...), errs
+			scanned := map[string]bool{}
+			for _, src := range reportSources([]string{"/sys-reports", "/user-reports"}) {
+				if errs[src] == nil && !f.absent[src] {
+					scanned[src] = true
+				}
+			}
+			return append([]report(nil), f.reports...), errs, scanned
 		},
 		ps:          func(context.Context) (string, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.ps, f.psErr },
 		pressure:    func(context.Context) (int, error) { return f.pressure, nil },
@@ -578,7 +585,7 @@ func TestListReports(t *testing.T) {
 		}
 	}
 	missing := filepath.Join(dir, "absent")
-	got, errs := listReports([]string{dir, missing}, []string{"mac-firewall", "host-watch"})
+	got, errs, _ := listReports([]string{dir, missing}, []string{"mac-firewall", "host-watch"})
 	classes := map[string]int{}
 	for _, r := range got {
 		classes[r.Class]++
@@ -988,7 +995,7 @@ func TestRetiredIsItsOwnSource(t *testing.T) {
 		} else if err := os.WriteFile(ret, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		got, errs := listReports([]string{dir}, []string{"mac-firewall"})
+		got, errs, _ := listReports([]string{dir}, []string{"mac-firewall"})
 		if len(got) != 1 || got[0].Name != "syspolicyd-a.ips" || errs[ret] == nil || errs[dir] != nil {
 			t.Fatalf("%s: got=%+v errs=%v", mode, got, errs)
 		}
@@ -1032,5 +1039,121 @@ func TestOnceObservesOnly(t *testing.T) {
 	step(t, w, t0)
 	if probes != 0 || f.attempts != 0 {
 		t.Fatalf("once mode probed=%d posted=%d", probes, f.attempts)
+	}
+}
+
+// A component replaced by a symlink between its check and its open is detected: neither publication
+// nor removal goes through it, and the marker at the redirect target is untouched.
+func TestFlagSwapBetweenCheckAndUse(t *testing.T) {
+	for _, op := range []string{"write", "remove"} {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		canonical, err := canonicalFlagPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		as := filepath.Join(home, "Library", "Application Support")
+		if err := os.MkdirAll(filepath.Join(as, "host-health"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The redirect stays inside the anchored parent and the symlink is relative, so os.Root itself
+		// would follow it; only the identity check can catch the swap.
+		redirect := filepath.Join(home, "Library", "redirect")
+		if err := os.MkdirAll(filepath.Join(redirect, "host-health"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(redirect, "host-health", "exec-degraded")
+		if err := os.WriteFile(marker, []byte("redirected"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		flagDirHook = func(comp string) {
+			if comp == "Application Support" {
+				_ = os.Rename(as, as+".real")
+				_ = os.Symlink("redirect", as)
+			}
+		}
+		if op == "write" {
+			err = writeDegradedFlag(canonical, degradedFlag{Reason: "r", Since: "s", HostWatchPID: 1})
+		} else {
+			err = removeDegradedFlag(canonical)
+		}
+		flagDirHook = nil
+		if err == nil {
+			t.Fatalf("%s went through a component swapped between check and open", op)
+		}
+		if raw, _ := os.ReadFile(marker); string(raw) != "redirected" {
+			t.Fatalf("%s changed the marker at the redirect target", op)
+		}
+	}
+}
+
+// After a delivered post whose acknowledgement write fails, a watcher restarted from the saved
+// state before any retry does not send the batch again.
+func TestAckFailureRestartBeforeRetry(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	w.writeAck = func(string, []byte) error { return errors.New("ack disk error") }
+	at := warm(t, w, t0)
+	f.set(func(f *fake) { f.disk = 4 })
+	step(t, w, at.Add(15*time.Second)) // posted; ack write fails; no retry tick follows
+	if len(f.posts) != 1 {
+		t.Fatalf("precondition: posts=%v", f.posts)
+	}
+	re := newWatcher(w.o, f.system())
+	step(t, re, at.Add(30*time.Second))
+	step(t, re, at.Add(45*time.Second))
+	if strings.Count(strings.Join(f.posts, "\n"), "ALERT disk.free") != 1 {
+		t.Fatalf("delivered batch sent again after restart: %v", f.posts)
+	}
+}
+
+// A Retired directory that is absent at first and appears later with history does not alert: an
+// absent source is not a scan, so its first real enumeration seeds it.
+func TestAbsentRetiredSeedsOnFirstEnumeration(t *testing.T) {
+	f := newFake()
+	f.absent = map[string]bool{"/sys-reports/Retired": true}
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	f.set(func(f *fake) {
+		f.absent = nil
+		f.reports = []report{{Name: "syspolicyd-historical.ips", Class: "syspolicyd", Source: "/sys-reports/Retired"}}
+	})
+	step(t, w, at.Add(15*time.Second))
+	if strings.Contains(strings.Join(f.notes, "\n"), "syspolicyd-historical.ips") || f.flag != nil {
+		t.Fatalf("history of a newly appeared Retired alerted: notes=%v flag=%v", f.notes, f.flag)
+	}
+	dir := t.TempDir()
+	_, _, scanned := listReports([]string{dir}, []string{"mac-firewall"})
+	if !scanned[dir] || scanned[filepath.Join(dir, "Retired")] {
+		t.Fatalf("scanned=%v: a missing Retired must not count as enumerated", scanned)
+	}
+}
+
+// With the shortest allowed post deadline, a child that succeeds while a descendant keeps its
+// output open is reported as success promptly.
+func TestRunnerShortDeadlineDescendant(t *testing.T) {
+	r := newRunner()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	t1 := time.Now()
+	out, err := r.run(ctx, "a2a-post", "/bin/sh", "-c", "/bin/sleep 6 & echo posted")
+	if err != nil || !strings.Contains(out, "posted") || time.Since(t1) > 900*time.Millisecond {
+		t.Fatalf("out=%q err=%v after %s", out, err, time.Since(t1))
+	}
+}
+
+// A configured report directory given as a symlink (an alias) is still read.
+func TestReportDirAlias(t *testing.T) {
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "syspolicyd-a.ips"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	got, errs, scanned := listReports([]string{alias}, []string{"mac-firewall"})
+	if len(got) != 1 || errs[alias] != nil || !scanned[alias] {
+		t.Fatalf("alias: got=%v errs=%v scanned=%v", got, errs, scanned)
 	}
 }

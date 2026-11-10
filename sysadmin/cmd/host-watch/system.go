@@ -27,7 +27,7 @@ const (
 // system is every observation and side channel host-watch uses; tests replace it.
 type system struct {
 	syspolicy   func(ctx context.Context) (serviceState, error)
-	reports     func() ([]report, map[string]error)
+	reports     func() ([]report, map[string]error, map[string]bool)
 	ps          func(ctx context.Context) (string, error)
 	pressure    func(ctx context.Context) (int, error)
 	swap        func(ctx context.Context) (used, total float64, err error)
@@ -51,7 +51,9 @@ func liveSystem(o options, self string) system {
 			}
 			return parseLaunchctl(out)
 		},
-		reports: func() ([]report, map[string]error) { return listReports(o.reportsDirs, o.toolPrefixes) },
+		reports: func() ([]report, map[string]error, map[string]bool) {
+			return listReports(o.reportsDirs, o.toolPrefixes)
+		},
 		ps: func(ctx context.Context) (string, error) {
 			return r.run(ctx, "ps", psPath, "-axo", "pid=,etime=,rss=,state=,comm=")
 		},
@@ -114,7 +116,7 @@ func liveSystem(o options, self string) system {
 			_, err := r.run(ctx, "a2a-post", o.a2a, "--as", o.as, "post", o.room, "--kind", "notice", "--to", o.to, text)
 			return err
 		},
-		flagPresent: func(path string) bool { _, err := os.Lstat(path); return err == nil },
+		flagPresent: flagPresentAnchored,
 		writeFlag:   writeDegradedFlag,
 		removeFlag:  removeDegradedFlag,
 	}
@@ -232,14 +234,17 @@ func reportSources(dirs []string) []string {
 
 // listReports scans every source. A source that cannot be read, or a Retired path that is not a
 // directory, is reported in the error map; the results of every other source are kept. A missing
-// Retired directory is not an error.
-func listReports(dirs, toolPrefixes []string) ([]report, map[string]error) {
+// Retired directory is neither an error nor a scan: scanned lists only sources actually enumerated,
+// so history is seeded on the first real enumeration. Configured directories may be symlinks
+// (aliases); scanning is read-only.
+func listReports(dirs, toolPrefixes []string) ([]report, map[string]error, map[string]bool) {
 	classes := reportClassesFor(toolPrefixes)
 	var out []report
 	errs := map[string]error{}
+	scanned := map[string]bool{}
 	for i, d := range reportSources(dirs) {
 		retired := i%2 == 1
-		fi, err := os.Lstat(d)
+		fi, err := os.Stat(d)
 		if err != nil {
 			if !(retired && errors.Is(err, os.ErrNotExist)) {
 				errs[d] = err
@@ -255,6 +260,7 @@ func listReports(dirs, toolPrefixes []string) ([]report, map[string]error) {
 			errs[d] = err
 			continue
 		}
+		scanned[d] = true
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
@@ -268,7 +274,7 @@ func listReports(dirs, toolPrefixes []string) ([]report, map[string]error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, errs
+	return out, errs, scanned
 }
 
 // reportIsCodesign tells whether a crash report records a code-signing termination.
