@@ -48,6 +48,7 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 	cmd := exec.Command(bin, args...)
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
+	cmd.WaitDelay = 2 * time.Second // a lingering descendant holding our pipes cannot keep the slot
 
 	var pmu sync.Mutex
 	var proc *os.Process

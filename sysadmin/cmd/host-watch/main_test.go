@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const runningDump = "system/com.apple.security.syspolicy = {\n\tactive count = 3\n\tstate = running\n\n\tprogram = /usr/libexec/syspolicyd\n\tendpoints = {\n\t\t\"com.apple.security.syspolicy\" = {\n\t\t\tstate = active\n\t\t}\n\t}\n\truns = 1\n\tpid = 549\n}\n"
@@ -582,6 +583,7 @@ func TestListReports(t *testing.T) {
 // contract fields; removal is idempotent.
 func TestFlagFileSafety(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
 	p := filepath.Join(dir, "host-health", "exec-degraded")
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatal(err)
@@ -695,5 +697,105 @@ func TestValidate(t *testing.T) {
 		if err := o.validate(); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+// Queue migration never drops a notice: entries from before sequence numbers existed are renumbered
+// and delivered, and an acknowledgement that outlived a lost state file does not swallow new alerts.
+func TestQueueMigrationKeepsNotices(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	if err := ensurePrivateDir(w.o.stateDir); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"seen":{},"levels":{},"pending":[{"at":"21:00:00Z","key":"reports.syspolicyd","text":"ALERT legacy-notice"}]}`
+	if err := os.WriteFile(w.statePath(), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	warm(t, w, t0)
+	step(t, w, t0.Add(30*time.Second))
+	if !strings.Contains(strings.Join(f.posts, "\n"), "legacy-notice") {
+		t.Fatalf("legacy notice dropped: %v", f.posts)
+	}
+	// Lost state file, leftover acknowledgement: the next alert must still be delivered.
+	if err := os.Remove(w.statePath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(w.ackPath(), []byte("500\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	re := newWatcher(w.o, f.system())
+	at := warm(t, re, t0.Add(time.Minute))
+	f.set(func(f *fake) { f.disk = 4 })
+	step(t, re, at.Add(15*time.Second))
+	step(t, re, at.Add(30*time.Second))
+	if !strings.Contains(strings.Join(f.posts, "\n"), "disk.free") {
+		t.Fatalf("alert after a lost state file swallowed by the old ack: %v", f.posts)
+	}
+}
+
+// The flag path must be exactly the contract path: a dot-dot spelling that cleans to it, and a
+// symlinked host-health directory, are both refused, so the writer and the consumers use one file.
+func TestFlagPathExactAndNoSymlinks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	canonical, err := canonicalFlagPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: time.Minute, clearAfter: 10 * time.Minute}
+	if err := ok.validate(); err != nil {
+		t.Fatalf("canonical path refused: %v", err)
+	}
+	dotted := ok
+	dotted.flagPath = filepath.Join(home, "x") + "/../Library/Application Support/host-health/exec-degraded"
+	if err := dotted.validate(); err == nil {
+		t.Fatal("dot-dot spelling accepted")
+	}
+	elsewhere := filepath.Join(home, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "Library", "Application Support"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(home, "Library", "Application Support", "host-health")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ok.validate(); err == nil {
+		t.Fatal("symlinked host-health directory accepted")
+	}
+	if err := writeDegradedFlag(canonical, degradedFlag{Reason: "r", Since: "s", HostWatchPID: 1}); err == nil {
+		t.Fatal("flag written through a symlinked directory")
+	}
+	if _, err := os.Stat(filepath.Join(elsewhere, "exec-degraded")); err == nil {
+		t.Fatal("flag landed outside the contract path")
+	}
+}
+
+// A child that exits but leaves a descendant holding its output pipes releases its slot within the
+// wait delay instead of keeping it forever.
+func TestRunnerLingeringDescendant(t *testing.T) {
+	r := newRunner()
+	t1 := time.Now()
+	out, _ := r.run(context.Background(), "sh", "/bin/sh", "-c", "/bin/sleep 6 & echo ok")
+	if time.Since(t1) > 4*time.Second {
+		t.Fatalf("run held by a lingering descendant for %s", time.Since(t1))
+	}
+	if !strings.Contains(out, "ok") || r.busy("sh") {
+		t.Fatalf("out=%q busy=%v", out, r.busy("sh"))
+	}
+}
+
+// An over-long notice is cut on a UTF-8 boundary, marked as truncated and kept within the budget.
+func TestTruncateLine(t *testing.T) {
+	for _, long := range []string{strings.Repeat("ж", 2000), "a" + strings.Repeat("ж", 2000)} { // 2-byte runes, both alignments
+		got := truncateLine(long, postMaxBytes)
+		if len(got) > postMaxBytes || !utf8.ValidString(got) || !strings.HasSuffix(got, truncMark) {
+			t.Fatalf("len=%d valid=%v", len(got), utf8.ValidString(got))
+		}
+	}
+	if short := "[host-watch 22:00:00Z] ok"; truncateLine(short, postMaxBytes) != short {
+		t.Fatal("short line changed")
 	}
 }

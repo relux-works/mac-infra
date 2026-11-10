@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Thresholds of the watchdog set.
@@ -130,7 +131,29 @@ func (w *watcher) load() (state, error) {
 			w.mu.Unlock()
 		}
 	}
+	migrateQueue(&s, w.ackedSeq())
 	return s, nil
+}
+
+func (w *watcher) ackedSeq() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.acked
+}
+
+// migrateQueue never drops a pending notice: sequence numbers continue above both the stored next
+// number and the acknowledgement (which may outlive a lost state file), and entries written before
+// sequence numbers existed (seq 0) are renumbered above that point.
+func migrateQueue(s *state, acked int64) {
+	if s.NextSeq < acked {
+		s.NextSeq = acked
+	}
+	for i := range s.Pending {
+		if s.Pending[i].Seq == 0 {
+			s.NextSeq++
+			s.Pending[i].Seq = s.NextSeq
+		}
+	}
 }
 
 func (w *watcher) save(s state) error {
@@ -516,10 +539,7 @@ func (w *watcher) maybeStartPost(s state) {
 		if a.Seq <= w.acked {
 			continue
 		}
-		line := fmt.Sprintf("[host-watch %s] %s", a.At, a.Text)
-		if len(line) > postMaxBytes {
-			line = line[:postMaxBytes]
-		}
+		line := truncateLine(fmt.Sprintf("[host-watch %s] %s", a.At, a.Text), postMaxBytes)
 		if len(batch) > 0 && (len(batch) >= postMaxEntries || size+len(line)+1 > postMaxBytes) {
 			break
 		}
@@ -570,4 +590,22 @@ func (w *watcher) drain() {
 	}
 	w.dropAcked(&s)
 	_ = w.save(s)
+}
+
+const truncMark = " …[truncated; full text in events.jsonl]"
+
+// truncateLine shortens line to at most max bytes on a UTF-8 boundary and says so, so a delivered
+// notice is never a silently cut name; the full text stays in events.jsonl.
+func truncateLine(line string, max int) string {
+	if len(line) <= max {
+		return line
+	}
+	cut := max - len(truncMark)
+	if cut < 0 {
+		cut = 0
+	}
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut] + truncMark
 }

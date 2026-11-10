@@ -129,8 +129,11 @@ func (o options) validate() error {
 	if err != nil {
 		return err
 	}
-	if filepath.Clean(o.flagPath) != canonical {
-		return fmt.Errorf("--degraded-flag must be the contract path %s; consumers read only that path", canonical)
+	if o.flagPath != canonical {
+		return fmt.Errorf("--degraded-flag must be exactly the contract path %s; consumers read only that path", canonical)
+	}
+	if err := checkNoSymlinks(canonical); err != nil {
+		return err
 	}
 	return o.validateBounds()
 }

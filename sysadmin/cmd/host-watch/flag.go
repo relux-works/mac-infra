@@ -30,6 +30,9 @@ func writeDegradedFlag(path string, f degradedFlag) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	if err := checkNoSymlinks(path); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(f)
 	if err != nil {
 		return err
@@ -99,4 +102,46 @@ func ensurePrivateDir(dir string) error {
 		}
 	}
 	return nil
+}
+
+// checkNoSymlinks refuses a flag path whose existing components below the home directory (the
+// host-health directories and the flag itself) are symlinks, so the file written is the file
+// consumers read.
+func checkNoSymlinks(path string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(home, path)
+	if err != nil || rel == ".." || len(rel) >= 3 && rel[:3] == "../" {
+		return fmt.Errorf("flag path %s is outside the home directory", path)
+	}
+	cur := home
+	for _, part := range splitPath(rel) {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("flag path component %s is a symlink", cur)
+		}
+	}
+	return nil
+}
+
+func splitPath(rel string) []string {
+	var parts []string
+	for rel != "." && rel != "" {
+		dir, file := filepath.Split(rel)
+		parts = append([]string{file}, parts...)
+		rel = filepath.Clean(dir)
+		if dir == "" {
+			break
+		}
+	}
+	return parts
 }
