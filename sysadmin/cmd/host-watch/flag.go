@@ -27,6 +27,11 @@ func canonicalFlagPath() (string, error) {
 }
 
 func writeDegradedFlag(path string, f degradedFlag) error {
+	// Check before any mutation so a component redirected after startup is never written through,
+	// then again after creating missing directories.
+	if err := checkNoSymlinks(path); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -41,6 +46,9 @@ func writeDegradedFlag(path string, f degradedFlag) error {
 }
 
 func removeDegradedFlag(path string) error {
+	if err := checkNoSymlinks(path); err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}

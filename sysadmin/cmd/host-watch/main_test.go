@@ -35,8 +35,8 @@ func TestParseLaunchctl(t *testing.T) {
 	}
 }
 
-// The held-exec count takes old, tiny rows with a known non-OS path only; OS binaries, rows whose
-// path ps cannot read (parenthesized), young, large and zombie rows do not count.
+// The held-exec count takes old, tiny rows with a known absolute non-OS path only; OS binaries,
+// bare argv[0] names, parenthesized names, young, large and zombie rows do not count.
 func TestCountStuckExecs(t *testing.T) {
 	ps := strings.Join([]string{
 		"24543 12:36 112 S ugrep",                       // counts: known argv0, not an OS path
@@ -50,7 +50,7 @@ func TestCountStuckExecs(t *testing.T) {
 		"78 05:00 4000 S /opt/example/bin/large",        // large
 	}, "\n")
 	n, err := countStuckExecs(ps, 30*time.Second, 256)
-	if err != nil || n != 2 {
+	if err != nil || n != 1 {
 		t.Fatalf("count=%d err=%v", n, err)
 	}
 	if _, err := countStuckExecs("1 xx 112 S a", 30*time.Second, 256); err == nil {
@@ -291,10 +291,12 @@ func TestFlagWriteRetriedDuringIncident(t *testing.T) {
 func TestDryRunStateDoesNotSuppressLiveFlag(t *testing.T) {
 	f := newFake()
 	o := testOptions(t)
+	od := o
+	od.dryRun = true
 	dry := f.system()
 	dry.flagPresent = func(string) bool { return false }
 	dry.writeFlag = func(string, degradedFlag) error { return nil }
-	wd := newWatcher(o, dry)
+	wd := newWatcher(od, dry)
 	f.set(func(f *fake) { f.svc = serviceState{State: "spawn scheduled", Runs: 2} })
 	step(t, wd, t0)
 	live := newWatcher(o, f.system())
@@ -430,16 +432,27 @@ func TestPostDeliveredOnce(t *testing.T) {
 	if f.attempts != 1 || len(f.posts) != 1 {
 		t.Fatalf("delivered batch selected again: attempts=%d posts=%v", f.attempts, f.posts)
 	}
-	// A failing state save after delivery: the acknowledgement is durable on its own.
-	if err := os.Chmod(w.o.stateDir, 0o500); err != nil {
+	// A failing state save after delivery: the acknowledgement is durable on its own. The save is
+	// made to fail by a directory where state.json belongs.
+	if err := os.Remove(w.statePath()); err != nil {
 		t.Fatal(err)
 	}
-	_ = w.tick(at.Add(30 * time.Second))
-	_ = os.Chmod(w.o.stateDir, 0o700)
+	if err := os.Mkdir(w.statePath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.tick(at.Add(30 * time.Second)); err == nil {
+		t.Fatal("state save did not fail")
+	}
+	w.wg.Wait()
+	if err := os.Remove(w.statePath()); err != nil {
+		t.Fatal(err)
+	}
 	re := newWatcher(w.o, f.system())
 	step(t, re, at.Add(45*time.Second))
 	step(t, re, at.Add(60*time.Second))
-	if strings.Count(strings.Join(f.posts, "\n"), "disk.free") != 1 {
+	// Removing state.json loses the check levels, so a new disk.free alert with a new time is
+	// legitimate; the delivered batch itself must not appear twice.
+	if strings.Count(strings.Join(f.posts, "\n"), "[host-watch 22:00:30Z] ALERT disk.free") != 1 {
 		t.Fatalf("redelivered after restart: %v", f.posts)
 	}
 }
@@ -797,5 +810,227 @@ func TestTruncateLine(t *testing.T) {
 	}
 	if short := "[host-watch 22:00:00Z] ok"; truncateLine(short, postMaxBytes) != short {
 		t.Fatal("short line changed")
+	}
+}
+
+// A dry run never writes the state directory, so it can neither suppress nor clear a live incident:
+// after a live run publishes the flag, a long healthy dry run leaves the live state bytes and the flag.
+func TestDryRunLeavesLiveIncident(t *testing.T) {
+	f := newFake()
+	o := testOptions(t)
+	live := newWatcher(o, f.system())
+	at := warm(t, live, t0)
+	f.set(func(f *fake) { f.svc = serviceState{State: "spawn scheduled", Runs: 2} })
+	step(t, live, at.Add(15*time.Second))
+	before, err := os.ReadFile(live.statePath())
+	if err != nil || f.flag == nil {
+		t.Fatalf("live incident not recorded: %v flag=%v", err, f.flag)
+	}
+	od := o
+	od.dryRun = true
+	dsys := f.system()
+	dsys.removeFlag = func(string) error { return nil }
+	dry := newWatcher(od, dsys)
+	f.set(func(f *fake) { f.svc = serviceState{State: "running", Runs: 3} })
+	for i := 2; i <= 50; i++ {
+		step(t, dry, at.Add(time.Duration(i)*15*time.Second))
+	}
+	after, _ := os.ReadFile(live.statePath())
+	if string(before) != string(after) || f.flag == nil {
+		t.Fatalf("dry run changed the live incident: state changed=%v flag=%v", string(before) != string(after), f.flag)
+	}
+}
+
+// Only a probe launched after the incident began is recovery evidence: with no newer probe the flag
+// stays for longer than clear-after.
+func TestProbeBeforeIncidentIsNotEvidence(t *testing.T) {
+	f := newFake()
+	o := testOptions(t)
+	o.probeEvery = 10 * time.Minute // no new probe during the test window
+	w := newWatcher(o, f.system())
+	step(t, w, t0) // the only probe, launched before the incident
+	f.set(func(f *fake) { f.svc = serviceState{State: "spawn scheduled", Runs: 2} })
+	step(t, w, t0.Add(15*time.Second))
+	f.set(func(f *fake) { f.svc = serviceState{State: "running", Runs: 3} })
+	for i := 2; i <= 50; i++ {
+		step(t, w, t0.Add(time.Duration(i)*15*time.Second))
+	}
+	if f.flag == nil {
+		t.Fatal("a probe from before the incident cleared the flag")
+	}
+}
+
+// An unobserved gap between ticks restarts the health window: health on both sides of a gap is not
+// continuous health.
+func TestObservationGapResetsWindow(t *testing.T) {
+	f := newFake()
+	o := testOptions(t)
+	o.probeEvery = 6 * time.Minute // the probe stays fresh across the gap, so only gap detection can reset
+	w := newWatcher(o, f.system())
+	step(t, w, t0)
+	f.set(func(f *fake) { f.svc = serviceState{State: "spawn scheduled", Runs: 2} })
+	step(t, w, t0.Add(15*time.Second))
+	f.set(func(f *fake) { f.svc = serviceState{State: "running", Runs: 3} })
+	for at := 30 * time.Second; at <= 6*time.Minute+45*time.Second; at += 15 * time.Second {
+		step(t, w, t0.Add(at)) // a probe after the incident launches near 6m; the health window opens
+	}
+	if s, _ := w.load(); s.HealthySince == "" {
+		t.Fatal("precondition: the health window did not open before the gap")
+	}
+	step(t, w, t0.Add(16*time.Minute+30*time.Second)) // next tick only after a 10 min gap
+	if f.flag == nil {
+		t.Fatal("a gap was counted as continuous health")
+	}
+}
+
+// A failed acknowledgement write holds new posts and is retried; after a restart the delivered
+// batch is not sent again.
+func TestAckWriteFailureHoldsPosts(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	failAck := true
+	w.writeAck = func(p string, d []byte) error {
+		if failAck {
+			return errors.New("ack disk error")
+		}
+		return atomicWrite(p, d, 0o600)
+	}
+	at := warm(t, w, t0)
+	f.set(func(f *fake) { f.disk = 4 })
+	step(t, w, at.Add(15*time.Second)) // delivered, ack write fails
+	f.set(func(f *fake) { f.fsev = "fseventsd watchdog LaunchAgent is disabled" })
+	step(t, w, at.Add(30*time.Second)) // ack still failing: no new post
+	if f.attempts != 1 {
+		t.Fatalf("posted while the ack was not durable: attempts=%d", f.attempts)
+	}
+	failAck = false
+	step(t, w, at.Add(45*time.Second)) // ack retried, then the next batch
+	step(t, w, at.Add(60*time.Second))
+	re := newWatcher(w.o, f.system())
+	step(t, re, at.Add(75*time.Second))
+	step(t, re, at.Add(90*time.Second))
+	all := strings.Join(f.posts, "\n")
+	if strings.Count(all, "disk.free") != 1 || strings.Count(all, "fseventsd.watchdog") != 1 {
+		t.Fatalf("posts: %v", f.posts)
+	}
+}
+
+// A child that exits successfully while a descendant keeps its pipes is a success, so a delivered
+// a2a notice is acknowledged once, not retried.
+func TestRunnerWaitDelaySuccess(t *testing.T) {
+	r := newRunner()
+	out, err := r.run(context.Background(), "a2a-post", "/bin/sh", "-c", "/bin/sleep 6 & echo posted")
+	if err != nil || !strings.Contains(out, "posted") {
+		t.Fatalf("successful child reported as failed: out=%q err=%v", out, err)
+	}
+	if _, err := r.run(context.Background(), "x", "/bin/sh", "-c", "/bin/sleep 6 & exit 3"); err == nil {
+		t.Fatal("failing child with a lingering descendant reported as success")
+	}
+}
+
+// A component redirected after startup is never written or removed through, and nothing is created
+// at the redirect target.
+func TestFlagSymlinkAfterStartup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	canonical, err := canonicalFlagPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNoSymlinks(canonical); err != nil {
+		t.Fatalf("clean home refused: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "Library"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, "redirect")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, "Library", "Application Support")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDegradedFlag(canonical, degradedFlag{Reason: "r", Since: "s", HostWatchPID: 1}); err == nil {
+		t.Fatal("flag written through a component redirected after startup")
+	}
+	if _, err := os.Stat(filepath.Join(target, "host-health")); err == nil {
+		t.Fatal("directory created at the redirect target")
+	}
+	if err := os.MkdirAll(filepath.Join(target, "host-health"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(target, "host-health", "exec-degraded")
+	if err := os.WriteFile(planted, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDegradedFlag(canonical); err == nil {
+		t.Fatal("removal through a redirected component accepted")
+	}
+	if _, err := os.Stat(planted); err != nil {
+		t.Fatal("file at the redirect target was removed")
+	}
+}
+
+// An unreadable Retired keeps the active directory's results, and a regular file at Retired is an
+// error of that source only.
+func TestRetiredIsItsOwnSource(t *testing.T) {
+	for _, mode := range []string{"unreadable", "regular-file"} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "syspolicyd-a.ips"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ret := filepath.Join(dir, "Retired")
+		if mode == "unreadable" {
+			if err := os.Mkdir(ret, 0o000); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Chmod(ret, 0o700)
+		} else if err := os.WriteFile(ret, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, errs := listReports([]string{dir}, []string{"mac-firewall"})
+		if len(got) != 1 || got[0].Name != "syspolicyd-a.ips" || errs[ret] == nil || errs[dir] != nil {
+			t.Fatalf("%s: got=%+v errs=%v", mode, got, errs)
+		}
+	}
+}
+
+// A symlink planted at events.jsonl is refused and its target is untouched.
+func TestEventsFileNoFollow(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	if err := ensurePrivateDir(w.o.stateDir); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, w.eventsPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.record(alert{Seq: 1, Text: "x"}); err == nil {
+		t.Fatal("events symlink followed")
+	}
+	raw, _ := os.ReadFile(victim)
+	fi, _ := os.Stat(victim)
+	if string(raw) != "keep" || fi.Mode().Perm() != 0o644 {
+		t.Fatal("events symlink target changed")
+	}
+}
+
+// --once observes only: it starts no exec probe and no a2a post.
+func TestOnceObservesOnly(t *testing.T) {
+	f := newFake()
+	o := testOptions(t)
+	o.once = true
+	var probes int
+	sys := f.system()
+	sys.execProbe = func(context.Context) (time.Duration, time.Duration, error) { probes++; return 0, 0, nil }
+	w := newWatcher(o, sys)
+	f.set(func(f *fake) { f.disk = 4 })
+	step(t, w, t0)
+	if probes != 0 || f.attempts != 0 {
+		t.Fatalf("once mode probed=%d posted=%d", probes, f.attempts)
 	}
 }

@@ -52,7 +52,7 @@ func main() {
 	flag.DurationVar(&o.postTimeout, "post-timeout", 0, "required: hard timeout of one a2a post, e.g. 60s")
 	flag.DurationVar(&o.clearAfter, "clear-after", 0, "required: healthy time before the degraded flag is removed, e.g. 10m")
 	flag.BoolVar(&o.notify, "notify", false, "show macOS notifications (Apple-only channel)")
-	flag.BoolVar(&o.once, "once", false, "run one tick, wait for its background probe and post, and exit")
+	flag.BoolVar(&o.once, "once", false, "observe only: run one tick without the exec probe or any a2a post, and exit")
 	flag.BoolVar(&o.dryRun, "dry-run", false, "record alerts but do not notify, post or write the degraded flag")
 	flag.Parse()
 	for _, d := range strings.Split(reports, ",") {

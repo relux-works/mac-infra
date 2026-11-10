@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -63,6 +64,7 @@ type state struct {
 	HealthySince  string              `json:"healthy_since,omitempty"`
 	StuckRising   int                 `json:"stuck_rising"`
 	LastStuck     int                 `json:"last_stuck"`
+	LastTick      string              `json:"last_tick,omitempty"`
 	ClassAlerted  map[string]string   `json:"class_alerted,omitempty"`
 	HeldReports   map[string][]string `json:"held_reports,omitempty"`
 }
@@ -84,11 +86,14 @@ type watcher struct {
 	lastProbe     *probeResult
 	postBusy      bool
 	acked         int64 // highest alert sequence confirmed delivered
+	ackDirty      bool  // an acknowledgement write failed; retried before any new post
+	mem           *state // dry-run keeps its state here and never writes the state directory
+	writeAck      func(path string, data []byte) error
 	wg            sync.WaitGroup
 }
 
 func newWatcher(o options, sys system) *watcher {
-	return &watcher{o: o, sys: sys, pid: os.Getpid()}
+	return &watcher{o: o, sys: sys, pid: os.Getpid(), writeAck: func(p string, d []byte) error { return atomicWrite(p, d, 0o600) }}
 }
 
 func (w *watcher) statePath() string     { return filepath.Join(w.o.stateDir, "state.json") }
@@ -97,6 +102,9 @@ func (w *watcher) heartbeatPath() string { return filepath.Join(w.o.stateDir, "h
 func (w *watcher) ackPath() string       { return filepath.Join(w.o.stateDir, "acked") }
 
 func (w *watcher) load() (state, error) {
+	if w.o.dryRun && w.mem != nil {
+		return *w.mem, nil
+	}
 	s := state{}
 	raw, err := os.ReadFile(w.statePath())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -157,6 +165,10 @@ func migrateQueue(s *state, acked int64) {
 }
 
 func (w *watcher) save(s state) error {
+	if w.o.dryRun {
+		w.mem = &s // never written: a dry run leaves the live state untouched
+		return nil
+	}
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
@@ -165,11 +177,18 @@ func (w *watcher) save(s state) error {
 }
 
 func (w *watcher) record(a alert) error {
-	f, err := os.OpenFile(w.eventsPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if w.o.dryRun {
+		return nil
+	}
+	// O_NOFOLLOW: a symlink planted at events.jsonl is refused, never followed.
+	f, err := os.OpenFile(w.eventsPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return fmt.Errorf("events file %s is not a regular file", w.eventsPath())
+	}
 	if err := f.Chmod(0o600); err != nil {
 		return err
 	}
@@ -198,16 +217,26 @@ func setLevel(s *state, out *[]alert, stamp, key, level, text string) {
 // tick runs one observation round. It never blocks on a non-Apple exec: the exec probe and the
 // a2a post run in the background with at most one of each outstanding.
 func (w *watcher) tick(now time.Time) error {
-	if err := ensurePrivateDir(w.o.stateDir); err != nil {
-		return err
-	}
-	if err := atomicWrite(w.heartbeatPath(), []byte(now.Format(time.RFC3339)+"\n"), 0o600); err != nil {
-		return err
+	realStart := time.Now()
+	if !w.o.dryRun {
+		if err := ensurePrivateDir(w.o.stateDir); err != nil {
+			return err
+		}
+		if err := atomicWrite(w.heartbeatPath(), []byte(now.Format(time.RFC3339)+"\n"), 0o600); err != nil {
+			return err
+		}
+		w.retryAck()
 	}
 	s, err := w.load()
 	if err != nil {
 		return err
 	}
+	// An unobserved gap (sleep, a stopped process, a hung tick) is never counted as health.
+	gap := false
+	if last, err := time.Parse(time.RFC3339, s.LastTick); err == nil && now.Sub(last) > 2*w.o.interval+observeTimeout {
+		gap = true
+	}
+	s.LastTick = now.Format(time.RFC3339)
 	w.dropAcked(&s)
 	stamp := now.Format("15:04:05Z")
 	var alerts []alert
@@ -252,6 +281,10 @@ func (w *watcher) tick(now time.Time) error {
 		execBad, healthy = true, false
 	case last == nil || now.Sub(last.launchedAt) > 2*w.o.probeEvery+probeTimeout:
 		healthy = false // no fresh probe from this process yet
+	case probeBeforeIncident(s.DegradedSince, last.launchedAt):
+		healthy = false // only a probe launched after the incident began is evidence of recovery
+		lv, text := judgeProbe(*last)
+		setLevel(&s, &alerts, stamp, "exec.probe", lv, text)
 	default:
 		lv, text := judgeProbe(*last)
 		setLevel(&s, &alerts, stamp, "exec.probe", lv, text)
@@ -299,7 +332,7 @@ func (w *watcher) tick(now time.Time) error {
 	w.resourceChecks(&s, &alerts, stamp)
 
 	// The degraded flag: the single automatic action.
-	w.updateDegraded(&s, &alerts, now, stamp, execBad, healthy)
+	w.updateDegraded(&s, &alerts, now, stamp, execBad, healthy && !gap)
 
 	for i := range alerts {
 		s.NextSeq++
@@ -318,8 +351,10 @@ func (w *watcher) tick(now time.Time) error {
 	if err := w.save(s); err != nil {
 		return err
 	}
-	w.maybeStartProbe(now)
-	postAllowed := healthy && (s.DegradedSince == "" || s.HealthySince != "")
+	if !w.o.once {
+		w.maybeStartProbe(now.Add(time.Since(realStart)))
+	}
+	postAllowed := !w.o.once && healthy && (s.DegradedSince == "" || s.HealthySince != "")
 	if postAllowed {
 		w.maybeStartPost(s)
 	}
@@ -329,7 +364,7 @@ func (w *watcher) tick(now time.Time) error {
 // reportChecks scans the report directories and returns true when a new syspolicyd report appeared.
 func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp string) bool {
 	reports, errs := w.sys.reports()
-	sources := append([]string(nil), w.o.reportsDirs...)
+	sources := reportSources(w.o.reportsDirs)
 	sort.Strings(sources)
 	for _, src := range sources {
 		key := "reports.source." + src
@@ -529,7 +564,7 @@ func (w *watcher) maybeStartPost(s state) {
 		return
 	}
 	w.mu.Lock()
-	if w.postBusy {
+	if w.postBusy || w.ackDirty {
 		w.mu.Unlock()
 		return
 	}
@@ -569,8 +604,11 @@ func (w *watcher) maybeStartPost(s state) {
 		defer w.mu.Unlock()
 		if err == nil && last > w.acked {
 			w.acked = last
-			if werr := atomicWrite(w.ackPath(), []byte(strconv.FormatInt(last, 10)+"\n"), 0o600); werr != nil {
-				fmt.Fprintln(os.Stderr, "host-watch: ack write failed:", werr)
+			if w.o.dryRun {
+				// no durable acknowledgement in a dry run
+			} else if werr := w.writeAck(w.ackPath(), []byte(strconv.FormatInt(last, 10)+"\n")); werr != nil {
+				w.ackDirty = true
+				fmt.Fprintln(os.Stderr, "host-watch: ack write failed, holding new posts until it succeeds:", werr)
 			}
 		} else if err != nil {
 			fmt.Fprintln(os.Stderr, "host-watch: post deferred:", err)
@@ -608,4 +646,31 @@ func truncateLine(line string, max int) string {
 		cut--
 	}
 	return line[:cut] + truncMark
+}
+
+// probeBeforeIncident reports whether a probe was launched no later than the incident began.
+func probeBeforeIncident(degradedSince string, launchedAt time.Time) bool {
+	if degradedSince == "" {
+		return false
+	}
+	since, err := time.Parse(time.RFC3339, degradedSince)
+	if err != nil {
+		return true
+	}
+	return !launchedAt.After(since)
+}
+
+// retryAck re-writes an acknowledgement whose earlier write failed; until it succeeds no new post
+// starts, so a restart cannot resend a batch that was already delivered.
+func (w *watcher) retryAck() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.ackDirty {
+		return
+	}
+	if err := w.writeAck(w.ackPath(), []byte(strconv.FormatInt(w.acked, 10)+"\n")); err != nil {
+		fmt.Fprintln(os.Stderr, "host-watch: ack write still failing:", err)
+		return
+	}
+	w.ackDirty = false
 }

@@ -220,39 +220,51 @@ func reportClassesFor(toolPrefixes []string) []reportClass {
 	}
 }
 
-// listReports scans each configured directory and its Retired subdirectory. A directory that
-// cannot be read is reported in the error map; the results of every other directory are kept.
+// reportSources lists the scanned directories: each configured directory and its Retired
+// subdirectory, each a source with its own error and its own first-scan seeding.
+func reportSources(dirs []string) []string {
+	var out []string
+	for _, base := range dirs {
+		out = append(out, base, filepath.Join(base, "Retired"))
+	}
+	return out
+}
+
+// listReports scans every source. A source that cannot be read, or a Retired path that is not a
+// directory, is reported in the error map; the results of every other source are kept. A missing
+// Retired directory is not an error.
 func listReports(dirs, toolPrefixes []string) ([]report, map[string]error) {
 	classes := reportClassesFor(toolPrefixes)
 	var out []report
 	errs := map[string]error{}
-	for _, base := range dirs {
-		var got []report
-		failed := false
-		for _, d := range []string{base, filepath.Join(base, "Retired")} {
-			entries, err := os.ReadDir(d)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) && d != base {
-					continue
-				}
-				errs[base] = err
-				failed = true
-				break
+	for i, d := range reportSources(dirs) {
+		retired := i%2 == 1
+		fi, err := os.Lstat(d)
+		if err != nil {
+			if !(retired && errors.Is(err, os.ErrNotExist)) {
+				errs[d] = err
 			}
-			for _, e := range entries {
-				if e.IsDir() {
-					continue
-				}
-				for _, c := range classes {
-					if c.re.MatchString(e.Name()) {
-						got = append(got, report{Name: e.Name(), Path: filepath.Join(d, e.Name()), Class: c.class, Source: base})
-						break
-					}
-				}
-			}
+			continue
 		}
-		if !failed {
-			out = append(out, got...)
+		if !fi.IsDir() {
+			errs[d] = fmt.Errorf("%s is not a directory", d)
+			continue
+		}
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			errs[d] = err
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			for _, c := range classes {
+				if c.re.MatchString(e.Name()) {
+					out = append(out, report{Name: e.Name(), Path: filepath.Join(d, e.Name()), Class: c.class, Source: d})
+					break
+				}
+			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -272,9 +284,10 @@ func reportIsCodesign(path string) bool {
 var applePrefixes = []string{"/System/", "/usr/", "/bin/", "/sbin/", "/Library/Apple/"}
 
 // countStuckExecs counts processes that look held at exec: older than minAge, resident at most
-// maxRSSKB, and with a known binary path outside the OS directories. A held exec sits at
+// maxRSSKB, and with a known absolute binary path outside the OS directories. A held exec sits at
 // _dyld_start with a footprint of about 112 KB; the RSS threshold is not yet calibrated against a
-// real stall. Rows whose name ps prints in parentheses (arguments unavailable) are not counted.
+// real stall. Rows without an absolute path (a bare argv[0], or a name ps prints in parentheses
+// because the arguments are unavailable) are not counted: their location is unknown.
 func countStuckExecs(psOut string, minAge time.Duration, maxRSSKB int) (int, error) {
 	n := 0
 	for _, line := range strings.Split(psOut, "\n") {
@@ -291,7 +304,7 @@ func countStuckExecs(psOut string, minAge time.Duration, maxRSSKB int) (int, err
 			return 0, fmt.Errorf("ps rss %q: %w", f[2], err)
 		}
 		comm := strings.Join(f[4:], " ")
-		if age < minAge || rss > maxRSSKB || strings.HasPrefix(f[3], "Z") || strings.HasPrefix(comm, "(") {
+		if age < minAge || rss > maxRSSKB || strings.HasPrefix(f[3], "Z") || !strings.HasPrefix(comm, "/") {
 			continue
 		}
 		apple := false

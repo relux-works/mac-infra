@@ -12,7 +12,7 @@ The most common trigger is a burst of test binaries that are freshly built, re-s
 | --- | --- | --- |
 | syspolicyd | a new `syspolicyd-*.ips`, `.spin` or `.hang` (also in `Retired`), launchd state other than `running`, or `runs` growing | alert |
 | exec latency | one exec per `--probe-every` of host-watch's own `--probe-exec`, timed against `/usr/bin/true`; at most one probe outstanding | warn > 2 s, alert > 5 s or still running after 15 s |
-| held execs | `ps` rows older than 30 s with RSS ≤ 256 KB whose known binary path is outside the OS directories; rows ps prints in parentheses do not count; the RSS threshold is not yet calibrated against a real stall | alert ≥ 3, critical ≥ 20 or rising for 3 ticks |
+| held execs | `ps` rows older than 30 s with RSS ≤ 256 KB whose absolute binary path is outside the OS directories; bare argv[0] names and rows ps prints in parentheses do not count; the RSS threshold is not yet calibrated against a real stall | alert ≥ 3, critical ≥ 20 or rising for 3 ticks |
 | GUI | new `WindowServer` crash or hang reports | alert, at most once per 5 min per class, held reports go out with the next alert |
 | host tools | new crash reports of the binaries named by `--tool-report-prefixes`; a code-signing kill is labelled `(CODESIGNING)` | alert |
 | resources | `kern.memorystatus_vm_pressure_level`, `vm.swapusage`, free space on `--data-volume`, and whether the `--fseventsd-watchdog-label` LaunchAgent is disabled or not loaded | alert only |
@@ -50,7 +50,7 @@ Point the LaunchAgent at `$dir/host-watch-<sum>` and record the sha.
 
 ### Run
 
-Every input is an explicit flag; there are no defaults. `--once` runs one tick and `--dry-run` records alerts without notifying, posting or writing the flag.
+Every input is an explicit flag; there are no defaults. `--once` observes only: one tick without the exec probe or any a2a post. `--dry-run` keeps its state in memory and never writes the state directory, the flag or a2a, so it can neither hide nor clear a live incident.
 
 ```sh
 "$HOME/Library/Application Support/host-watch/bin/host-watch-SUM" \

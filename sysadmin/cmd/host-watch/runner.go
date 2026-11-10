@@ -75,7 +75,9 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 	}()
 	select {
 	case res := <-done:
-		if res.err != nil {
+		// ErrWaitDelay after a successful exit means only output collection timed out because a
+		// descendant kept the pipes; the child itself succeeded.
+		if res.err != nil && !(errors.Is(res.err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success()) {
 			return string(res.out), fmt.Errorf("%s: %w", filepath.Base(bin), res.err)
 		}
 		return string(res.out), nil
