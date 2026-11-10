@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -28,7 +27,7 @@ const (
 // system is every observation and side channel host-watch uses; tests replace it.
 type system struct {
 	syspolicy   func(ctx context.Context) (serviceState, error)
-	reports     func() ([]report, error)
+	reports     func() ([]report, map[string]error)
 	ps          func(ctx context.Context) (string, error)
 	pressure    func(ctx context.Context) (int, error)
 	swap        func(ctx context.Context) (used, total float64, err error)
@@ -37,44 +36,34 @@ type system struct {
 	execProbe   func(ctx context.Context) (probe, control time.Duration, err error)
 	notify      func(ctx context.Context, text string) error
 	post        func(ctx context.Context, text string) error
+	flagPresent func(path string) bool
 	writeFlag   func(path string, f degradedFlag) error
 	removeFlag  func(path string) error
 }
 
 func liveSystem(o options, self string) system {
-	run := func(ctx context.Context, bin string, args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, bin, args...)
-		cmd.WaitDelay = 2 * time.Second
-		out, err := cmd.CombinedOutput()
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("%s: %w", filepath.Base(bin), ctx.Err())
-		}
-		if err != nil {
-			return string(out), fmt.Errorf("%s: %w", filepath.Base(bin), err)
-		}
-		return string(out), nil
-	}
+	r := newRunner()
 	s := system{
 		syspolicy: func(ctx context.Context) (serviceState, error) {
-			out, err := run(ctx, launchctlPath, "print", syspolicyJob)
+			out, err := r.run(ctx, "launchctl-syspolicy", launchctlPath, "print", syspolicyJob)
 			if err != nil {
 				return serviceState{}, err
 			}
 			return parseLaunchctl(out)
 		},
-		reports: func() ([]report, error) { return listReports(o.reportsDirs, o.toolPrefixes) },
+		reports: func() ([]report, map[string]error) { return listReports(o.reportsDirs, o.toolPrefixes) },
 		ps: func(ctx context.Context) (string, error) {
-			return run(ctx, psPath, "-axo", "pid=,etime=,rss=,state=,comm=")
+			return r.run(ctx, "ps", psPath, "-axo", "pid=,etime=,rss=,state=,comm=")
 		},
 		pressure: func(ctx context.Context) (int, error) {
-			out, err := run(ctx, sysctlPath, "-n", "kern.memorystatus_vm_pressure_level")
+			out, err := r.run(ctx, "sysctl-pressure", sysctlPath, "-n", "kern.memorystatus_vm_pressure_level")
 			if err != nil {
 				return 0, err
 			}
 			return strconv.Atoi(strings.TrimSpace(out))
 		},
 		swap: func(ctx context.Context) (float64, float64, error) {
-			out, err := run(ctx, sysctlPath, "-n", "vm.swapusage")
+			out, err := r.run(ctx, "sysctl-swap", sysctlPath, "-n", "vm.swapusage")
 			if err != nil {
 				return 0, 0, err
 			}
@@ -91,45 +80,50 @@ func liveSystem(o options, self string) system {
 			return 100 * float64(st.Bavail) / float64(st.Blocks), nil
 		},
 		fsevents: func(ctx context.Context) (string, error) {
-			out, err := run(ctx, launchctlPath, "print-disabled", fmt.Sprintf("gui/%d", os.Getuid()))
+			out, err := r.run(ctx, "launchctl-disabled", launchctlPath, "print-disabled", fmt.Sprintf("gui/%d", os.Getuid()))
 			if err != nil {
 				return "", err
 			}
 			if strings.Contains(out, fmt.Sprintf("%q => disabled", o.fseventsLabel)) || strings.Contains(out, fmt.Sprintf("%q => true", o.fseventsLabel)) {
 				return "fseventsd watchdog LaunchAgent is disabled", nil
 			}
-			if _, err := run(ctx, launchctlPath, "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), o.fseventsLabel)); err != nil {
+			if _, err := r.run(ctx, "launchctl-fsevents", launchctlPath, "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), o.fseventsLabel)); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errChildHeld) {
+					return "", err
+				}
 				return "fseventsd watchdog LaunchAgent is not loaded", nil
 			}
 			return "", nil
 		},
 		execProbe: func(ctx context.Context) (time.Duration, time.Duration, error) {
 			t0 := time.Now()
-			if _, err := run(ctx, truePath); err != nil {
-				return 0, 0, fmt.Errorf("control: %w", err)
+			if _, err := r.run(ctx, "probe-control", truePath); err != nil {
+				return 0, time.Since(t0), fmt.Errorf("control: %w", err)
 			}
 			control := time.Since(t0)
 			t1 := time.Now()
-			_, err := run(ctx, self, "--probe-exec")
+			_, err := r.run(ctx, "probe-exec", self, "--probe-exec")
 			return time.Since(t1), control, err
 		},
 		notify: func(ctx context.Context, text string) error {
 			script := fmt.Sprintf("display notification %q with title %q", text, "host-watch")
-			_, err := run(ctx, osascriptPath, "-e", script)
+			_, err := r.run(ctx, "osascript", osascriptPath, "-e", script)
 			return err
 		},
 		post: func(ctx context.Context, text string) error {
-			_, err := run(ctx, o.a2a, "--as", o.as, "post", o.room, "--kind", "notice", "--to", o.to, text)
+			_, err := r.run(ctx, "a2a-post", o.a2a, "--as", o.as, "post", o.room, "--kind", "notice", "--to", o.to, text)
 			return err
 		},
-		writeFlag:  writeDegradedFlag,
-		removeFlag: removeDegradedFlag,
+		flagPresent: func(path string) bool { _, err := os.Lstat(path); return err == nil },
+		writeFlag:   writeDegradedFlag,
+		removeFlag:  removeDegradedFlag,
 	}
 	if !o.notify {
 		s.notify = nil
 	}
 	if o.dryRun {
 		s.notify, s.post = nil, nil
+		s.flagPresent = func(string) bool { return false }
 		s.writeFlag = func(string, degradedFlag) error { return nil }
 		s.removeFlag = func(string) error { return nil }
 	}
@@ -177,7 +171,7 @@ func parseLaunchctl(out string) (serviceState, error) {
 	return s, nil
 }
 
-var swapRe = regexp.MustCompile(`total = ([0-9.]+)M\s+used = ([0-9.]+)M`)
+var swapRe = regexp.MustCompile(`total = ([0-9]+(?:\.[0-9]+)?)M\s+used = ([0-9]+(?:\.[0-9]+)?)M`)
 
 // parseSwap reads `sysctl -n vm.swapusage` and returns used and total MiB.
 func parseSwap(out string) (float64, float64, error) {
@@ -185,14 +179,23 @@ func parseSwap(out string) (float64, float64, error) {
 	if m == nil {
 		return 0, 0, fmt.Errorf("vm.swapusage: unexpected %q", strings.TrimSpace(out))
 	}
-	total, _ := strconv.ParseFloat(m[1], 64)
-	used, _ := strconv.ParseFloat(m[2], 64)
+	total, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("vm.swapusage total: %w", err)
+	}
+	used, err := strconv.ParseFloat(m[2], 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("vm.swapusage used: %w", err)
+	}
+	if used > total {
+		return 0, 0, fmt.Errorf("vm.swapusage: used %.0fM above total %.0fM", used, total)
+	}
 	return used, total, nil
 }
 
-// report is one diagnostic report file and its class.
+// report is one diagnostic report file, its class and the configured directory it came from.
 type report struct {
-	Name, Path, Class string
+	Name, Path, Class, Source string
 }
 
 type reportClass struct {
@@ -202,47 +205,58 @@ type reportClass struct {
 
 var toolPrefixRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// reportClassesFor builds the report classes; toolPrefixes name the host tools whose crash reports alert.
+const reportExt = `\.(ips|spin|hang)$`
+
+// reportClassesFor builds the report classes; toolPrefixes name the host tools whose reports alert.
 func reportClassesFor(toolPrefixes []string) []reportClass {
 	quoted := make([]string, len(toolPrefixes))
 	for i, p := range toolPrefixes {
 		quoted[i] = regexp.QuoteMeta(p)
 	}
 	return []reportClass{
-		{"syspolicyd", regexp.MustCompile(`^syspolicyd-.*\.ips$`)},
-		{"gui", regexp.MustCompile(`^WindowServer[-_].*\.(ips|spin|hang)$`)},
-		{"tool", regexp.MustCompile(`^(` + strings.Join(quoted, "|") + `)-.*\.ips$`)},
+		{"syspolicyd", regexp.MustCompile(`^syspolicyd[-_].*` + reportExt)},
+		{"gui", regexp.MustCompile(`^WindowServer[-_].*` + reportExt)},
+		{"tool", regexp.MustCompile(`^(` + strings.Join(quoted, "|") + `)[-_].*` + reportExt)},
 	}
 }
 
-// listReports returns the classified reports in each dir and its Retired subdirectory, sorted by name.
-func listReports(dirs, toolPrefixes []string) ([]report, error) {
-	reportClasses := reportClassesFor(toolPrefixes)
+// listReports scans each configured directory and its Retired subdirectory. A directory that
+// cannot be read is reported in the error map; the results of every other directory are kept.
+func listReports(dirs, toolPrefixes []string) ([]report, map[string]error) {
+	classes := reportClassesFor(toolPrefixes)
 	var out []report
+	errs := map[string]error{}
 	for _, base := range dirs {
+		var got []report
+		failed := false
 		for _, d := range []string{base, filepath.Join(base, "Retired")} {
 			entries, err := os.ReadDir(d)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) && d != base {
 					continue
 				}
-				return nil, err
+				errs[base] = err
+				failed = true
+				break
 			}
 			for _, e := range entries {
 				if e.IsDir() {
 					continue
 				}
-				for _, c := range reportClasses {
+				for _, c := range classes {
 					if c.re.MatchString(e.Name()) {
-						out = append(out, report{Name: e.Name(), Path: filepath.Join(d, e.Name()), Class: c.class})
+						got = append(got, report{Name: e.Name(), Path: filepath.Join(d, e.Name()), Class: c.class, Source: base})
 						break
 					}
 				}
 			}
 		}
+		if !failed {
+			out = append(out, got...)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return out, errs
 }
 
 // reportIsCodesign tells whether a crash report records a code-signing termination.
@@ -258,7 +272,9 @@ func reportIsCodesign(path string) bool {
 var applePrefixes = []string{"/System/", "/usr/", "/bin/", "/sbin/", "/Library/Apple/"}
 
 // countStuckExecs counts processes that look held at exec: older than minAge, resident at most
-// maxRSSKB, and not an OS binary. A held exec sits at _dyld_start with about 112 KB resident.
+// maxRSSKB, and with a known binary path outside the OS directories. A held exec sits at
+// _dyld_start with a footprint of about 112 KB; the RSS threshold is not yet calibrated against a
+// real stall. Rows whose name ps prints in parentheses (arguments unavailable) are not counted.
 func countStuckExecs(psOut string, minAge time.Duration, maxRSSKB int) (int, error) {
 	n := 0
 	for _, line := range strings.Split(psOut, "\n") {
@@ -275,7 +291,7 @@ func countStuckExecs(psOut string, minAge time.Duration, maxRSSKB int) (int, err
 			return 0, fmt.Errorf("ps rss %q: %w", f[2], err)
 		}
 		comm := strings.Join(f[4:], " ")
-		if age < minAge || rss > maxRSSKB || strings.HasPrefix(f[3], "Z") {
+		if age < minAge || rss > maxRSSKB || strings.HasPrefix(f[3], "Z") || strings.HasPrefix(comm, "(") {
 			continue
 		}
 		apple := false

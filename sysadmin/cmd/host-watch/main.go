@@ -125,5 +125,30 @@ func (o options) validate() error {
 			return errors.New("paths must be absolute: " + p)
 		}
 	}
+	canonical, err := canonicalFlagPath()
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(o.flagPath) != canonical {
+		return fmt.Errorf("--degraded-flag must be the contract path %s; consumers read only that path", canonical)
+	}
+	return o.validateBounds()
+}
+
+// validateBounds enforces the agreed ranges of the timing flags.
+func (o options) validateBounds() error {
+	for _, b := range []struct {
+		name      string
+		d, lo, hi time.Duration
+	}{
+		{"interval", o.interval, time.Second, time.Minute},
+		{"probe-every", o.probeEvery, o.interval, 10 * time.Minute},
+		{"post-timeout", o.postTimeout, time.Second, time.Minute},
+		{"clear-after", o.clearAfter, 10 * time.Minute, 24 * time.Hour},
+	} {
+		if b.d < b.lo || b.d > b.hi {
+			return fmt.Errorf("--%s %s outside [%s, %s]", b.name, b.d, b.lo, b.hi)
+		}
+	}
 	return nil
 }

@@ -10,10 +10,10 @@ The most common trigger is a burst of test binaries that are freshly built, re-s
 
 | Check | Signal | Level |
 | --- | --- | --- |
-| syspolicyd | a new `syspolicyd-*.ips` (also in `Retired`), launchd state other than `running`, or `runs` growing | alert |
+| syspolicyd | a new `syspolicyd-*.ips`, `.spin` or `.hang` (also in `Retired`), launchd state other than `running`, or `runs` growing | alert |
 | exec latency | one exec per `--probe-every` of host-watch's own `--probe-exec`, timed against `/usr/bin/true`; at most one probe outstanding | warn > 2 s, alert > 5 s or still running after 15 s |
-| held execs | `ps` rows older than 30 s with RSS ≤ 256 KB whose binary is outside the OS directories | alert ≥ 3, critical ≥ 20 or rising for 3 ticks |
-| GUI | new `WindowServer` crash or hang reports | alert |
+| held execs | `ps` rows older than 30 s with RSS ≤ 256 KB whose known binary path is outside the OS directories; rows ps prints in parentheses do not count; the RSS threshold is not yet calibrated against a real stall | alert ≥ 3, critical ≥ 20 or rising for 3 ticks |
+| GUI | new `WindowServer` crash or hang reports | alert, at most once per 5 min per class, held reports go out with the next alert |
 | host tools | new crash reports of the binaries named by `--tool-report-prefixes`; a code-signing kill is labelled `(CODESIGNING)` | alert |
 | resources | `kern.memorystatus_vm_pressure_level`, `vm.swapusage`, free space on `--data-volume`, and whether the `--fseventsd-watchdog-label` LaunchAgent is disabled or not loaded | alert only |
 
@@ -64,4 +64,23 @@ Every input is an explicit flag; there are no defaults. `--once` runs one tick a
   --interval 15s --probe-every 60s --post-timeout 60s --clear-after 10m --notify
 ```
 
-Install it as a user LaunchAgent, `works.relux.sysadmin.host-watch`, with `RunAtLoad`, `KeepAlive`, `ProcessType Background` and the arguments above. Give it `A2A_CONFIG_DIR` for the posting identity.
+Install it as a user LaunchAgent, `works.relux.sysadmin.host-watch`, with `RunAtLoad`, `KeepAlive`, `ProcessType Background` and the arguments above. Give it `A2A_CONFIG_DIR` for the posting identity. Timing flags are bounded: `--interval` 1 s–60 s, `--probe-every` from `--interval` to 10 min, `--post-timeout` 1 s–60 s, `--clear-after` 10 min–24 h. `--degraded-flag` must be the contract path.
+
+### Rollback
+
+To go back to the previous verified copy:
+
+```sh
+launchctl bootout gui/$(id -u)/works.relux.sysadmin.host-watch
+# point ProgramArguments[0] back to the previous host-watch-<sum> copy, then
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/works.relux.sysadmin.host-watch.plist
+```
+
+To disable the first installation completely:
+
+```sh
+launchctl bootout gui/$(id -u)/works.relux.sysadmin.host-watch
+rm ~/Library/LaunchAgents/works.relux.sysadmin.host-watch.plist
+```
+
+If the exec-degraded flag exists at that moment, check the host first with `/bin/launchctl print system/com.apple.security.syspolicy`. Only the owner removes the flag, and only once syspolicyd is running and a non-Apple binary starts promptly, because once host-watch is stopped nothing republishes it. Heavy lanes stay held while the flag exists.
