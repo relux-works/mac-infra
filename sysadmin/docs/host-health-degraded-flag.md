@@ -4,7 +4,7 @@
 
 ## Location
 
-The path is passed to host-watch explicitly with `--degraded-flag`. The LaunchAgent in `README.md` uses `~/Library/Application Support/host-health/exec-degraded`, and consumers read that path. The file is readable by the same user (mode 0644, written atomically with a temp file and a rename).
+The path is passed to host-watch explicitly with `--degraded-flag`. The LaunchAgent in `sysadmin/README.md` uses `~/Library/Application Support/host-health/exec-degraded`, and consumers read that path. The file is readable by the same user (mode 0644, written atomically with a temp file and a rename).
 
 ## Format
 

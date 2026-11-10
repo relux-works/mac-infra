@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-// degradedFlag is the exec-degraded flag file contract (docs/host-health-degraded-flag.md).
+// degradedFlag is the exec-degraded flag file contract (sysadmin/docs/host-health-degraded-flag.md).
 // Present means: do not start a new heavy lane. Absent means: proceed. Running work is untouched.
 type degradedFlag struct {
 	Reason       string `json:"reason"`

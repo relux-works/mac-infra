@@ -5,7 +5,7 @@
 // in. host-watch therefore observes with Apple binaries and in-process calls only, alerts the owner
 // first through a macOS notification (/usr/bin/osascript), and sends a2a notices only while execs of
 // non-Apple code work, with at most one a2a post outstanding. Its single automatic action is the
-// exec-degraded flag (docs/host-health-degraded-flag.md). It never kills, restarts or changes foreign
+// exec-degraded flag (sysadmin/docs/host-health-degraded-flag.md). It never kills, restarts or changes foreign
 // processes, launchd jobs or protection settings; children it starts and times out are its own.
 //
 // It is run by a user LaunchAgent. Every input is an explicit flag; there are no implicit defaults.

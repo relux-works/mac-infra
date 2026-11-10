@@ -21,7 +21,7 @@ How it works:
 - It observes with Apple binaries (`/bin/launchctl`, `/bin/ps`, `/usr/sbin/sysctl`) and in-process calls only, so it keeps working while the gate is shut.
 - Every alert is written to `events.jsonl` and shown at once as a macOS notification.
 - It is also sent to a2a as one notice at a time. a2a is a non-Apple binary, so while execs are degraded notices are queued and sent once the host is healthy again.
-- Its only automatic action is the exec-degraded flag, described in [host-health-degraded-flag.md](host-health-degraded-flag.md). It never kills, restarts or reconfigures other processes, launchd jobs or protection settings.
+- Its only automatic action is the exec-degraded flag, described in [docs/host-health-degraded-flag.md](docs/host-health-degraded-flag.md). It never kills, restarts or reconfigures other processes, launchd jobs or protection settings.
 - It writes a heartbeat file (RFC 3339) every tick.
 
 If syspolicyd is stuck, the owner can run the recovery command:
@@ -35,15 +35,25 @@ sudo /bin/launchctl kickstart -k system/com.apple.security.syspolicy
 ```sh
 cd sysadmin
 go vet ./... && go test -race ./...
-go build -trimpath -o ~/.local/bin/host-watch ./cmd/host-watch
+go build -trimpath -o ../.temp/host-watch ./cmd/host-watch
 ```
+
+Install a copy at a stable path outside any checkout, named by its sha256, never a symlink into a working tree. A working-tree build that launchd starts can be refused by the exec policy while the host is under load, and the exec probe runs the installed binary itself:
+
+```sh
+sum=$(shasum -a 256 ../.temp/host-watch | cut -c1-16)
+dir="$HOME/Library/Application Support/host-watch/bin"
+mkdir -p "$dir" && cp ../.temp/host-watch "$dir/host-watch-$sum"
+```
+
+Point the LaunchAgent at `$dir/host-watch-<sum>` and record the sha.
 
 ### Run
 
 Every input is an explicit flag; there are no defaults. `--once` runs one tick and `--dry-run` records alerts without notifying, posting or writing the flag.
 
 ```sh
-host-watch \
+"$HOME/Library/Application Support/host-watch/bin/host-watch-SUM" \
   --reports-dirs /Library/Logs/DiagnosticReports,$HOME/Library/Logs/DiagnosticReports \
   --tool-report-prefixes mac-firewall,mac-infra-core,host-watch \
   --state-dir "$HOME/Library/Application Support/host-watch" \
