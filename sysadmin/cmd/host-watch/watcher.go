@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,9 @@ const (
 	swapAlertRatio = 0.9
 	observeTimeout = 10 * time.Second
 	notifyTimeout  = 10 * time.Second
+	reportThrottle = 5 * time.Minute
+	postMaxEntries = 20
+	postMaxBytes   = 3000
 )
 
 const (
@@ -40,6 +44,7 @@ const (
 )
 
 type alert struct {
+	Seq  int64  `json:"seq"`
 	At   string `json:"at"`
 	Key  string `json:"key"`
 	Text string `json:"text"`
@@ -47,21 +52,24 @@ type alert struct {
 
 // state persists across ticks and restarts.
 type state struct {
-	Seeded        bool              `json:"seeded"`
-	Seen          map[string]bool   `json:"seen"`
-	Levels        map[string]string `json:"levels"`
-	Service       *serviceState     `json:"service,omitempty"`
-	Pending       []alert           `json:"pending,omitempty"`
-	DegradedSince string            `json:"degraded_since,omitempty"`
-	HealthySince  string            `json:"healthy_since,omitempty"`
-	StuckRising   int               `json:"stuck_rising"`
-	LastStuck     int               `json:"last_stuck"`
+	Seen          map[string]bool     `json:"seen"`
+	SeededSources map[string]bool     `json:"seeded_sources"`
+	Levels        map[string]string   `json:"levels"`
+	Service       *serviceState       `json:"service,omitempty"`
+	Pending       []alert             `json:"pending,omitempty"`
+	NextSeq       int64               `json:"next_seq"`
+	DegradedSince string              `json:"degraded_since,omitempty"`
+	HealthySince  string              `json:"healthy_since,omitempty"`
+	StuckRising   int                 `json:"stuck_rising"`
+	LastStuck     int                 `json:"last_stuck"`
+	ClassAlerted  map[string]string   `json:"class_alerted,omitempty"`
+	HeldReports   map[string][]string `json:"held_reports,omitempty"`
 }
 
 type probeResult struct {
 	probe, control time.Duration
 	err            error
-	finished       time.Time
+	launchedAt     time.Time // tick time at launch
 }
 
 type watcher struct {
@@ -69,14 +77,13 @@ type watcher struct {
 	sys system
 	pid int
 
-	mu          sync.Mutex
-	probeBusy   bool
-	probeStart  time.Time
-	lastProbeAt time.Time
-	lastProbe   *probeResult
-	postBusy    bool
-	posted      int // count of pending alerts delivered by the outstanding post, applied on next tick
-	wg          sync.WaitGroup
+	mu            sync.Mutex
+	probeBusy     bool
+	probeLaunchAt time.Time
+	lastProbe     *probeResult
+	postBusy      bool
+	acked         int64 // highest alert sequence confirmed delivered
+	wg            sync.WaitGroup
 }
 
 func newWatcher(o options, sys system) *watcher {
@@ -86,24 +93,42 @@ func newWatcher(o options, sys system) *watcher {
 func (w *watcher) statePath() string     { return filepath.Join(w.o.stateDir, "state.json") }
 func (w *watcher) eventsPath() string    { return filepath.Join(w.o.stateDir, "events.jsonl") }
 func (w *watcher) heartbeatPath() string { return filepath.Join(w.o.stateDir, "heartbeat") }
+func (w *watcher) ackPath() string       { return filepath.Join(w.o.stateDir, "acked") }
 
 func (w *watcher) load() (state, error) {
-	s := state{Seen: map[string]bool{}, Levels: map[string]string{}}
+	s := state{}
 	raw, err := os.ReadFile(w.statePath())
-	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return s, err
 	}
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return s, fmt.Errorf("state %s: %w", w.statePath(), err)
+	if err == nil {
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return s, fmt.Errorf("state %s: %w", w.statePath(), err)
+		}
 	}
 	if s.Seen == nil {
 		s.Seen = map[string]bool{}
 	}
+	if s.SeededSources == nil {
+		s.SeededSources = map[string]bool{}
+	}
 	if s.Levels == nil {
 		s.Levels = map[string]string{}
+	}
+	if s.ClassAlerted == nil {
+		s.ClassAlerted = map[string]string{}
+	}
+	if s.HeldReports == nil {
+		s.HeldReports = map[string][]string{}
+	}
+	if raw, err := os.ReadFile(w.ackPath()); err == nil {
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil {
+			w.mu.Lock()
+			if n > w.acked {
+				w.acked = n
+			}
+			w.mu.Unlock()
+		}
 	}
 	return s, nil
 }
@@ -113,11 +138,7 @@ func (w *watcher) save(s state) error {
 	if err != nil {
 		return err
 	}
-	tmp := w.statePath() + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, w.statePath())
+	return atomicWrite(w.statePath(), raw, 0o600)
 }
 
 func (w *watcher) record(a alert) error {
@@ -126,12 +147,15 @@ func (w *watcher) record(a alert) error {
 		return err
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
 	line, _ := json.Marshal(a)
 	_, err = f.Write(append(line, '\n'))
 	return err
 }
 
-// level transitions: an alert is raised when a check changes level, including the return to ok.
+// setLevel raises an alert when a check changes level, including the return to ok.
 func setLevel(s *state, out *[]alert, stamp, key, level, text string) {
 	prev, had := s.Levels[key]
 	if !had {
@@ -151,36 +175,30 @@ func setLevel(s *state, out *[]alert, stamp, key, level, text string) {
 // tick runs one observation round. It never blocks on a non-Apple exec: the exec probe and the
 // a2a post run in the background with at most one of each outstanding.
 func (w *watcher) tick(now time.Time) error {
-	if err := os.MkdirAll(w.o.stateDir, 0o700); err != nil {
+	if err := ensurePrivateDir(w.o.stateDir); err != nil {
 		return err
 	}
-	if err := os.WriteFile(w.heartbeatPath(), []byte(now.Format(time.RFC3339)+"\n"), 0o644); err != nil {
+	if err := atomicWrite(w.heartbeatPath(), []byte(now.Format(time.RFC3339)+"\n"), 0o600); err != nil {
 		return err
 	}
 	s, err := w.load()
 	if err != nil {
 		return err
 	}
+	w.dropAcked(&s)
 	stamp := now.Format("15:04:05Z")
 	var alerts []alert
 	execBad := false
+	healthy := true // positive evidence that non-Apple execs work; any missing evidence clears it
 
-	// Deliveries confirmed by a finished background post.
-	w.mu.Lock()
-	if w.posted > 0 && w.posted <= len(s.Pending) {
-		s.Pending = s.Pending[w.posted:]
-	}
-	w.posted = 0
-	w.mu.Unlock()
-
-	// 1) syspolicyd service and crash reports.
+	// 1) syspolicyd service.
 	ctx, cancel := context.WithTimeout(context.Background(), observeTimeout)
 	svc, perr := w.sys.syspolicy(ctx)
 	cancel()
 	switch {
 	case perr != nil:
 		setLevel(&s, &alerts, stamp, "syspolicyd.state", lvUnknown, perr.Error())
-		execBad = true
+		healthy = false
 	case svc.State != "running":
 		setLevel(&s, &alerts, stamp, "syspolicyd.state", lvAlert, fmt.Sprintf("state=%s runs=%d", svc.State, svc.Runs))
 		execBad = true
@@ -196,60 +214,33 @@ func (w *watcher) tick(now time.Time) error {
 		s.Service = &sv
 	}
 
-	reports, rerr := w.sys.reports()
-	if rerr != nil {
-		setLevel(&s, &alerts, stamp, "reports.list", lvUnknown, rerr.Error())
-	} else {
-		setLevel(&s, &alerts, stamp, "reports.list", lvOK, "")
-		fresh := map[string][]string{}
-		for _, r := range reports {
-			if s.Seen[r.Name] {
-				continue
-			}
-			s.Seen[r.Name] = true
-			if !s.Seeded {
-				continue
-			}
-			label := r.Name
-			if r.Class == "tool" && reportIsCodesign(r.Path) {
-				label += " (CODESIGNING)"
-			}
-			fresh[r.Class] = append(fresh[r.Class], label)
-		}
-		texts := map[string]string{"syspolicyd": "new syspolicyd crash report(s); owner recovery: sudo /bin/launchctl kickstart -k " + syspolicyJob, "gui": "new WindowServer hang/crash report(s), GUI at risk", "tool": "new crash report(s) of our host tools"}
-		classes := make([]string, 0, len(fresh))
-		for c := range fresh {
-			classes = append(classes, c)
-		}
-		sort.Strings(classes)
-		for _, c := range classes {
-			alerts = append(alerts, alert{At: stamp, Key: "reports." + c, Text: fmt.Sprintf("ALERT %s: %s", texts[c], strings.Join(fresh[c], ", "))})
-			if c == "syspolicyd" {
-				execBad = true
-			}
-		}
-	}
-	s.Seeded = true
-
-	// 2) exec latency.
-	w.mu.Lock()
-	if w.probeBusy && now.Sub(w.probeStart) > probeTimeout {
-		w.mu.Unlock()
-		setLevel(&s, &alerts, stamp, "exec.probe", lvAlert, fmt.Sprintf("probe of a non-Apple exec still not finished after %s", now.Sub(w.probeStart).Round(time.Second)))
+	// 2) crash reports, seeded per source on its first successful scan, throttled per class.
+	if w.reportChecks(&s, &alerts, now, stamp) {
 		execBad = true
-	} else {
-		last := w.lastProbe
-		w.mu.Unlock()
-		if last != nil {
-			lv, text := judgeProbe(*last)
-			setLevel(&s, &alerts, stamp, "exec.probe", lv, text)
-			if lv == lvAlert {
-				execBad = true
-			}
+	}
+
+	// 3) exec latency.
+	w.mu.Lock()
+	busy, launched, last := w.probeBusy, w.probeLaunchAt, w.lastProbe
+	w.mu.Unlock()
+	switch {
+	case busy && now.Sub(launched) > probeTimeout:
+		setLevel(&s, &alerts, stamp, "exec.probe", lvAlert, fmt.Sprintf("probe of a non-Apple exec still not finished after %s", now.Sub(launched).Round(time.Second)))
+		execBad, healthy = true, false
+	case last == nil || now.Sub(last.launchedAt) > 2*w.o.probeEvery+probeTimeout:
+		healthy = false // no fresh probe from this process yet
+	default:
+		lv, text := judgeProbe(*last)
+		setLevel(&s, &alerts, stamp, "exec.probe", lv, text)
+		if lv == lvAlert {
+			execBad = true
+		}
+		if lv != lvOK {
+			healthy = false
 		}
 	}
 
-	// 3) processes held at exec.
+	// 4) processes held at exec.
 	ctx, cancel = context.WithTimeout(context.Background(), observeTimeout)
 	psOut, err := w.sys.ps(ctx)
 	cancel()
@@ -272,38 +263,98 @@ func (w *watcher) tick(now time.Time) error {
 			}
 			setLevel(&s, &alerts, stamp, "exec.stuck", lv, fmt.Sprintf("%d processes look held at exec (rising %d ticks); GUI at risk when critical", n, s.StuckRising))
 			if lv != lvOK {
-				execBad = true
+				execBad, healthy = true, false
 			}
 		}
 	}
 	if err != nil {
 		setLevel(&s, &alerts, stamp, "exec.stuck", lvUnknown, err.Error())
+		healthy = false
 	}
 
 	// Resource checks, alert-only.
 	w.resourceChecks(&s, &alerts, stamp)
 
 	// The degraded flag: the single automatic action.
-	w.updateDegraded(&s, &alerts, now, stamp, execBad)
+	w.updateDegraded(&s, &alerts, now, stamp, execBad, healthy)
 
-	for _, a := range alerts {
-		if err := w.record(a); err != nil {
+	for i := range alerts {
+		s.NextSeq++
+		alerts[i].Seq = s.NextSeq
+		if err := w.record(alerts[i]); err != nil {
 			return err
 		}
 		if w.sys.notify != nil {
 			nctx, ncancel := context.WithTimeout(context.Background(), notifyTimeout)
-			_ = w.sys.notify(nctx, a.Text)
+			_ = w.sys.notify(nctx, alerts[i].Text)
 			ncancel()
 		}
-		s.Pending = append(s.Pending, a)
+		s.Pending = append(s.Pending, alerts[i])
 	}
 
-	w.maybeStartProbe(now)
 	if err := w.save(s); err != nil {
 		return err
 	}
-	w.maybeStartPost(s)
+	w.maybeStartProbe(now)
+	postAllowed := healthy && (s.DegradedSince == "" || s.HealthySince != "")
+	if postAllowed {
+		w.maybeStartPost(s)
+	}
 	return nil
+}
+
+// reportChecks scans the report directories and returns true when a new syspolicyd report appeared.
+func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp string) bool {
+	reports, errs := w.sys.reports()
+	sources := append([]string(nil), w.o.reportsDirs...)
+	sort.Strings(sources)
+	for _, src := range sources {
+		key := "reports.source." + src
+		if e, bad := errs[src]; bad {
+			setLevel(s, alerts, stamp, key, lvUnknown, e.Error())
+		} else {
+			setLevel(s, alerts, stamp, key, lvOK, "")
+		}
+	}
+	fresh := map[string][]string{}
+	for _, r := range reports {
+		if s.Seen[r.Name] {
+			continue
+		}
+		s.Seen[r.Name] = true
+		if !s.SeededSources[r.Source] {
+			continue // first successful scan of this source: history, not news
+		}
+		label := r.Name
+		if r.Class == "tool" && reportIsCodesign(r.Path) {
+			label += " (CODESIGNING)"
+		}
+		fresh[r.Class] = append(fresh[r.Class], label)
+	}
+	for _, src := range sources {
+		if _, bad := errs[src]; !bad {
+			s.SeededSources[src] = true
+		}
+	}
+	texts := map[string]string{
+		"syspolicyd": "new syspolicyd crash report(s); owner recovery: sudo /bin/launchctl kickstart -k " + syspolicyJob,
+		"gui":        "new WindowServer hang/crash report(s), GUI at risk",
+		"tool":       "new crash report(s) of configured host tools",
+	}
+	syspolicyNew := len(fresh["syspolicyd"]) > 0
+	for _, c := range []string{"syspolicyd", "gui", "tool"} {
+		s.HeldReports[c] = append(s.HeldReports[c], fresh[c]...)
+		if len(s.HeldReports[c]) == 0 {
+			continue
+		}
+		if last, err := time.Parse(time.RFC3339, s.ClassAlerted[c]); err == nil && now.Sub(last) < reportThrottle {
+			continue // throttled: held reports go out with the next alert of this class
+		}
+		*alerts = append(*alerts, alert{At: stamp, Key: "reports." + c, Text: fmt.Sprintf("ALERT %s: %s", texts[c], strings.Join(s.HeldReports[c], ", "))})
+		s.ClassAlerted[c] = now.Format(time.RFC3339)
+		s.HeldReports[c] = nil
+	}
+	return syspolicyNew
 }
 
 func judgeProbe(r probeResult) (string, string) {
@@ -365,73 +416,93 @@ func (w *watcher) resourceChecks(s *state, alerts *[]alert, stamp string) {
 	}
 }
 
-func (w *watcher) updateDegraded(s *state, alerts *[]alert, now time.Time, stamp string, execBad bool) {
-	if execBad {
-		s.HealthySince = ""
-		if s.DegradedSince == "" {
-			s.DegradedSince = now.Format(time.RFC3339)
-			reason := []string{}
-			for k, v := range s.Levels {
-				if v != lvOK && (strings.HasPrefix(k, "syspolicyd") || strings.HasPrefix(k, "exec")) {
-					reason = append(reason, k+"="+v)
-				}
-			}
-			sort.Strings(reason)
-			if len(reason) == 0 {
-				reason = []string{"syspolicyd crash or restart"}
-			}
-			if err := w.sys.writeFlag(w.o.flagPath, degradedFlag{Reason: strings.Join(reason, ", "), Since: s.DegradedSince, HostWatchPID: w.pid}); err != nil {
-				*alerts = append(*alerts, alert{At: stamp, Key: "degraded.flag", Text: "UNKNOWN degraded flag write failed: " + err.Error()})
-			} else {
-				*alerts = append(*alerts, alert{At: stamp, Key: "degraded.flag", Text: "exec-degraded flag SET: do not start new heavy lanes (" + strings.Join(reason, ", ") + ")"})
-			}
-		}
-		return
+// updateDegraded keeps the flag published for the whole incident (re-publishing it whenever it is
+// missing) and removes it only after clearAfter of continuous positive health evidence.
+func (w *watcher) updateDegraded(s *state, alerts *[]alert, now time.Time, stamp string, execBad, healthy bool) {
+	if execBad && s.DegradedSince == "" {
+		s.DegradedSince = now.Format(time.RFC3339)
+		*alerts = append(*alerts, alert{At: stamp, Key: "degraded", Text: "exec-degraded: do not start new heavy lanes (" + degradedReason(s) + ")"})
 	}
 	if s.DegradedSince == "" {
 		return
 	}
-	if s.HealthySince == "" {
+	if execBad || !healthy {
+		s.HealthySince = ""
+	} else if s.HealthySince == "" {
 		s.HealthySince = now.Format(time.RFC3339)
+	} else if since, err := time.Parse(time.RFC3339, s.HealthySince); err == nil && now.Sub(since) >= w.o.clearAfter {
+		if err := w.sys.removeFlag(w.o.flagPath); err != nil {
+			setLevel(s, alerts, stamp, "degraded.flag", lvUnknown, "flag removal failed: "+err.Error())
+			return
+		}
+		setLevel(s, alerts, stamp, "degraded.flag", lvOK, "")
+		*alerts = append(*alerts, alert{At: stamp, Key: "degraded", Text: fmt.Sprintf("exec-degraded CLEARED after %s of continuous health (degraded since %s)", w.o.clearAfter, s.DegradedSince)})
+		s.DegradedSince, s.HealthySince = "", ""
 		return
 	}
-	since, err := time.Parse(time.RFC3339, s.HealthySince)
-	if err != nil || now.Sub(since) < w.o.clearAfter {
-		return
+	if !w.sys.flagPresent(w.o.flagPath) {
+		if err := w.sys.writeFlag(w.o.flagPath, degradedFlag{Reason: degradedReason(s), Since: s.DegradedSince, HostWatchPID: w.pid}); err != nil {
+			setLevel(s, alerts, stamp, "degraded.flag", lvUnknown, "flag write failed, retrying every tick: "+err.Error())
+			return
+		}
 	}
-	if err := w.sys.removeFlag(w.o.flagPath); err != nil {
-		*alerts = append(*alerts, alert{At: stamp, Key: "degraded.flag", Text: "UNKNOWN degraded flag removal failed: " + err.Error()})
-		return
+	setLevel(s, alerts, stamp, "degraded.flag", lvOK, "")
+}
+
+func degradedReason(s *state) string {
+	var reason []string
+	for k, v := range s.Levels {
+		if v != lvOK && (strings.HasPrefix(k, "syspolicyd") || strings.HasPrefix(k, "exec")) {
+			reason = append(reason, k+"="+v)
+		}
 	}
-	*alerts = append(*alerts, alert{At: stamp, Key: "degraded.flag", Text: fmt.Sprintf("exec-degraded flag CLEARED after %s healthy (degraded since %s)", w.o.clearAfter, s.DegradedSince)})
-	s.DegradedSince, s.HealthySince = "", ""
+	sort.Strings(reason)
+	if len(reason) == 0 {
+		return "syspolicyd crash or restart"
+	}
+	return strings.Join(reason, ", ")
+}
+
+// dropAcked removes pending alerts already confirmed delivered.
+func (w *watcher) dropAcked(s *state) {
+	w.mu.Lock()
+	acked := w.acked
+	w.mu.Unlock()
+	keep := s.Pending[:0]
+	for _, a := range s.Pending {
+		if a.Seq > acked {
+			keep = append(keep, a)
+		}
+	}
+	s.Pending = keep
 }
 
 // maybeStartProbe starts one exec-latency probe when due and none is outstanding.
 func (w *watcher) maybeStartProbe(now time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.probeBusy || (!w.lastProbeAt.IsZero() && now.Sub(w.lastProbeAt) < w.o.probeEvery) {
+	if w.probeBusy || (!w.probeLaunchAt.IsZero() && now.Sub(w.probeLaunchAt) < w.o.probeEvery) {
 		return
 	}
-	w.probeBusy, w.probeStart, w.lastProbeAt = true, now, now
-	run := func() {
+	w.probeBusy, w.probeLaunchAt = true, now
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 		p, c, err := w.sys.execProbe(ctx)
 		cancel()
 		w.mu.Lock()
-		w.lastProbe = &probeResult{probe: p, control: c, err: err, finished: time.Now()}
+		w.lastProbe = &probeResult{probe: p, control: c, err: err, launchedAt: now}
 		w.probeBusy = false
 		w.mu.Unlock()
-	}
-	w.wg.Add(1)
-	go func() { defer w.wg.Done(); run() }()
+	}()
 }
 
-// maybeStartPost sends pending alerts to a2a in one post, only while execs are not degraded and
-// no other post is outstanding. a2a is a non-Apple binary: it hangs exactly while the gate is shut.
+// maybeStartPost sends the oldest unacknowledged alerts as one bounded post. Acknowledgement,
+// durable advancement and the choice of the next batch happen under one lock, so a delivered
+// alert is never selected again.
 func (w *watcher) maybeStartPost(s state) {
-	if w.sys.post == nil || len(s.Pending) == 0 || s.DegradedSince != "" && s.HealthySince == "" {
+	if w.sys.post == nil {
 		return
 	}
 	w.mu.Lock()
@@ -439,14 +510,35 @@ func (w *watcher) maybeStartPost(s state) {
 		w.mu.Unlock()
 		return
 	}
+	var batch []alert
+	size := 0
+	for _, a := range s.Pending {
+		if a.Seq <= w.acked {
+			continue
+		}
+		line := fmt.Sprintf("[host-watch %s] %s", a.At, a.Text)
+		if len(line) > postMaxBytes {
+			line = line[:postMaxBytes]
+		}
+		if len(batch) > 0 && (len(batch) >= postMaxEntries || size+len(line)+1 > postMaxBytes) {
+			break
+		}
+		a.Text = line
+		batch = append(batch, a)
+		size += len(line) + 1
+	}
+	if len(batch) == 0 {
+		w.mu.Unlock()
+		return
+	}
 	w.postBusy = true
 	w.mu.Unlock()
-	batch := append([]alert(nil), s.Pending...)
-	var b strings.Builder
-	for _, a := range batch {
-		fmt.Fprintf(&b, "[host-watch %s] %s\n", a.At, a.Text)
+	lines := make([]string, len(batch))
+	for i, a := range batch {
+		lines[i] = a.Text
 	}
-	text := strings.TrimSuffix(b.String(), "\n")
+	text := strings.Join(lines, "\n")
+	last := batch[len(batch)-1].Seq
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
@@ -454,28 +546,28 @@ func (w *watcher) maybeStartPost(s state) {
 		err := w.sys.post(ctx, text)
 		cancel()
 		w.mu.Lock()
-		if err == nil {
-			w.posted = len(batch)
-		} else {
+		defer w.mu.Unlock()
+		if err == nil && last > w.acked {
+			w.acked = last
+			if werr := atomicWrite(w.ackPath(), []byte(strconv.FormatInt(last, 10)+"\n"), 0o600); werr != nil {
+				fmt.Fprintln(os.Stderr, "host-watch: ack write failed:", werr)
+			}
+		} else if err != nil {
 			fmt.Fprintln(os.Stderr, "host-watch: post deferred:", err)
 		}
 		w.postBusy = false
-		w.mu.Unlock()
 	}()
 }
 
-// drain waits for background work (used with --once and in tests) and applies a finished post.
+// drain waits, bounded, for background work (used with --once) and records delivered alerts.
 func (w *watcher) drain() {
-	w.wg.Wait()
+	if !boundedWait(&w.wg, w.o.postTimeout+probeTimeout+5*time.Second) {
+		fmt.Fprintln(os.Stderr, "host-watch: background work still running at exit")
+	}
 	s, err := w.load()
 	if err != nil {
 		return
 	}
-	w.mu.Lock()
-	if w.posted > 0 && w.posted <= len(s.Pending) {
-		s.Pending = s.Pending[w.posted:]
-	}
-	w.posted = 0
-	w.mu.Unlock()
+	w.dropAcked(&s)
 	_ = w.save(s)
 }
