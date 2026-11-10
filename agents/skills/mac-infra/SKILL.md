@@ -181,6 +181,16 @@ Use `mac-netnone prep`, then `run`, for JVM/Gradle tests in a dedicated
 network-denied Colima profile. Read the [workflow reference](references/netnone.md)
 for toolchain pinning, offline caches, qualification, load limits and state paths.
 
+## Exec-Gate Stall Watch
+
+When Apple binaries answer but every non-Apple exec hangs, check
+`/bin/launchctl print system/com.apple.security.syspolicy` and new
+`/Library/Logs/DiagnosticReports/syspolicyd-*.ips` first, using `/usr/bin/grep`.
+`host-watch` (`sysadmin/README.md`) watches for this and writes the exec-degraded
+flag; heavy test lanes must not start while it exists. Never weaken Gatekeeper,
+kill foreign processes or restart syspolicyd yourself; the recovery command is
+the owner's.
+
 ## Security Evidence Workflow
 
 For read-only host security checks, private persistence baselines, and drift,
