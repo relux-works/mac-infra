@@ -37,12 +37,12 @@ func TestParseLaunchctl(t *testing.T) {
 func TestCountStuckExecs(t *testing.T) {
 	ps := strings.Join([]string{
 		"24543 12:36 112 S ugrep",                                // counts
-		"20380 1-20:40:09 112 SN /Users/example/.local/bin/tool", // counts (days format)
+		"20380 1-20:40:09 112 SN /opt/example/bin/tool",          // counts (days format)
 		"40791 00:10 112 S ugrep",                                // too young
 		"432 25-06:28:11 900000 Ss /System/Library/WindowServer", // large and OS
 		"99 05:00 100 S /usr/libexec/tiny",                       // OS binary
 		"77 05:00 0 Z /opt/example/zombie",                       // zombie
-		"78 05:00 4000 S /opt/homebrew/bin/codex",                // large
+		"78 05:00 4000 S /opt/example/bin/large",                 // large
 	}, "\n")
 	n, err := countStuckExecs(ps, 30*time.Second, 256)
 	if err != nil || n != 2 {
