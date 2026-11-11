@@ -22,11 +22,10 @@ type runner struct {
 	mu       sync.Mutex
 	inflight map[string]bool
 	start    func(cmd *exec.Cmd) error // replaced in tests to simulate a launch held before execve
-	unlink   func(name string) error   // replaced in tests to simulate an unlink failure
 }
 
 func newRunner() *runner {
-	return &runner{inflight: map[string]bool{}, start: func(cmd *exec.Cmd) error { return cmd.Start() }, unlink: os.Remove}
+	return &runner{inflight: map[string]bool{}, start: func(cmd *exec.Cmd) error { return cmd.Start() }}
 }
 
 // run executes bin with args under key. It returns at the deadline even while the child is still
@@ -47,25 +46,18 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 	}
 	done := make(chan result, 1)
 	cmd := exec.Command(bin, args...)
-	// Output goes to an unlinked temporary file, not a pipe: the child's exit is observed as soon as
-	// it exits, even when a descendant keeps the output open, so a delivered post is never mistaken
-	// for a failure because output collection was still waiting.
-	out, err := os.CreateTemp("", "host-watch-out-*")
+	// Output goes through a pipe this runner owns, not one os/exec copies: Wait returns at the
+	// child's exit even when a descendant keeps the write end, and a bounded reader keeps at most
+	// maxChildOutput bytes in memory and discards the rest, so nothing grows on disk.
+	pr, pw, err := os.Pipe()
 	if err != nil {
 		r.mu.Lock()
 		delete(r.inflight, key)
 		r.mu.Unlock()
 		return "", err
 	}
-	if err := r.unlink(out.Name()); err != nil {
-		// Never start a child whose output could stay behind under a pathname.
-		out.Close()
-		r.mu.Lock()
-		delete(r.inflight, key)
-		r.mu.Unlock()
-		return "", fmt.Errorf("output spool unlink: %w", err)
-	}
-	cmd.Stdout, cmd.Stderr = out, out
+	cmd.Stdout, cmd.Stderr = pw, pw
+	col := newCollector(pr)
 
 	var pmu sync.Mutex
 	var proc *os.Process
@@ -76,8 +68,10 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 			delete(r.inflight, key)
 			r.mu.Unlock()
 		}()
-		if err := r.start(cmd); err != nil {
-			out.Close()
+		err := r.start(cmd)
+		pw.Close() // the parent keeps no write end; EOF comes when every writer is gone
+		if err != nil {
+			pr.Close()
 			done <- result{nil, err}
 			return
 		}
@@ -88,13 +82,13 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 		if kill {
 			_ = proc.Kill()
 		}
-		err := cmd.Wait()
-		collected, rerr := readSpool(out)
-		out.Close()
-		if err == nil && rerr != nil {
-			err = rerr
+		werr := cmd.Wait()
+		collected, complete := col.finish(drainAfterExit)
+		pr.Close()
+		if werr == nil && !complete {
+			werr = errOutputIncomplete
 		}
-		done <- result{collected, err}
+		done <- result{collected, werr}
 	}()
 	select {
 	case res := <-done:
@@ -114,27 +108,64 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 	}
 }
 
-// maxChildOutput bounds what a child may write; more is an incomplete observation, never a sample.
-const maxChildOutput = 1 << 20
+// maxChildOutput bounds what is kept of a child's output; more is an incomplete observation,
+// never a sample. drainAfterExit bounds how long output already written is read after the exit.
+const (
+	maxChildOutput = 1 << 20
+	drainAfterExit = 500 * time.Millisecond
+)
 
-var errOutputIncomplete = errors.New("child output exceeded the bound; observation incomplete")
+var errOutputIncomplete = errors.New("child output exceeded the bound or was not fully read; observation incomplete")
 
-// readSpool reads the spool at an independent offset (pread), so descriptors that descendants
-// share are not moved, and refuses output beyond the bound instead of truncating it.
-func readSpool(f *os.File) ([]byte, error) {
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
+// collector reads a pipe into a bounded buffer and discards everything beyond the bound.
+type collector struct {
+	mu       sync.Mutex
+	buf      []byte
+	overflow bool
+	eof      chan struct{}
+}
+
+func newCollector(r io.Reader) *collector {
+	c := &collector{eof: make(chan struct{})}
+	go func() {
+		defer close(c.eof)
+		chunk := make([]byte, 32*1024)
+		for {
+			n, err := r.Read(chunk)
+			if n > 0 {
+				c.mu.Lock()
+				if room := maxChildOutput - len(c.buf); room > 0 {
+					take := n
+					if take > room {
+						take = room
+						c.overflow = true
+					}
+					c.buf = append(c.buf, chunk[:take]...)
+				} else {
+					c.overflow = true
+				}
+				c.mu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return c
+}
+
+// finish waits up to d for EOF and reports the output and whether it is complete: no overflow and
+// EOF reached (a descendant still holding the pipe leaves it incomplete).
+func (c *collector) finish(d time.Duration) ([]byte, bool) {
+	eof := false
+	select {
+	case <-c.eof:
+		eof = true
+	case <-time.After(d):
 	}
-	if fi.Size() > maxChildOutput {
-		return nil, errOutputIncomplete
-	}
-	buf := make([]byte, fi.Size())
-	n, err := f.ReadAt(buf, 0)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
-	}
-	return buf[:n], nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.buf...), eof && !c.overflow
 }
 
 // busy reports whether a child of this kind is still alive.

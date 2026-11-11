@@ -114,6 +114,9 @@ func liveSystem(o options, self string) system {
 		},
 		post: func(ctx context.Context, text string) error {
 			_, err := r.run(ctx, "a2a-post", o.a2a, "--as", o.as, "post", o.room, "--kind", "notice", "--to", o.to, text)
+			if errors.Is(err, errOutputIncomplete) {
+				return nil // the post outcome is the exit status; its output is not an observation
+			}
 			return err
 		},
 		flagPresent: flagPresentAnchored,

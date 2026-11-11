@@ -79,7 +79,9 @@ func writeDegradedFlag(path string, f degradedFlag) error {
 }
 
 // removeDegradedFlag removes the flag only when it is a regular file; a symlink or any other kind
-// of entry at the flag name is refused and left in place.
+// of entry at the flag name is refused and left in place. The entry is first moved, exclusively, to
+// a private quarantine name and checked there, so an entry swapped in after the first check is
+// never unlinked: it is moved back to the flag name.
 func removeDegradedFlag(path string) error {
 	dirfd, name, err := openFlagDir(path, false)
 	if errors.Is(err, os.ErrNotExist) {
@@ -99,11 +101,27 @@ func removeDegradedFlag(path string) error {
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return fmt.Errorf("flag entry %s is not a regular file; left in place", name)
 	}
-	if err := unix.Unlinkat(dirfd, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-		return err
+	if flagLeafHook != nil {
+		flagLeafHook()
 	}
-	return nil
+	q := fmt.Sprintf(".%s.removing-%d-%d", name, os.Getpid(), time.Now().UnixNano())
+	if err := unix.RenameatxNp(dirfd, name, dirfd, q, unix.RENAME_EXCL); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return fmt.Errorf("flag quarantine: %w", err)
+	}
+	if err := unix.Fstatat(dirfd, q, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil && st.Mode&unix.S_IFMT == unix.S_IFREG {
+		return unix.Unlinkat(dirfd, q, 0)
+	}
+	if err := unix.RenameatxNp(dirfd, q, dirfd, name, unix.RENAME_EXCL); err != nil {
+		return fmt.Errorf("flag entry %s changed during removal and could not be moved back from %s: %w", name, q, err)
+	}
+	return fmt.Errorf("flag entry %s changed during removal; left in place", name)
 }
+
+// flagLeafHook lets tests swap the flag entry between its check and its removal.
+var flagLeafHook func()
 
 // flagPresentAnchored reports whether the flag is present as a regular file, looked up through the
 // anchored directory without following a final symlink. A dangling or any other symlink is not the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -417,53 +418,6 @@ func TestJudgeProbe(t *testing.T) {
 	}
 }
 
-// A delivered batch is never sent again, even when the post completes between the tick reading the
-// acknowledgement and selecting the next batch, and even when the following state save fails.
-func TestPostDeliveredOnce(t *testing.T) {
-	f := newFake()
-	f.postHang = make(chan struct{})
-	w := newTestWatcher(t, f)
-	at := warm(t, w, t0)
-	f.set(func(f *fake) { f.disk = 4 }) // alert-only: does not degrade
-	if err := w.tick(at.Add(15 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	// The post is outstanding. Simulate completion between dropAcked and maybeStartPost by
-	// finishing it and calling maybeStartPost with the pre-completion state.
-	s, _ := w.load()
-	close(f.postHang)
-	w.wg.Wait()
-	f.set(func(f *fake) { f.postHang = nil })
-	w.maybeStartPost(s)
-	w.wg.Wait()
-	if f.attempts != 1 || len(f.posts) != 1 {
-		t.Fatalf("delivered batch selected again: attempts=%d posts=%v", f.attempts, f.posts)
-	}
-	// A failing state save after delivery: the acknowledgement is durable on its own. The save is
-	// made to fail by a directory where state.json belongs.
-	if err := os.Remove(w.statePath()); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(w.statePath(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.tick(at.Add(30 * time.Second)); err == nil {
-		t.Fatal("state save did not fail")
-	}
-	w.wg.Wait()
-	if err := os.Remove(w.statePath()); err != nil {
-		t.Fatal(err)
-	}
-	re := newWatcher(w.o, f.system())
-	step(t, re, at.Add(45*time.Second))
-	step(t, re, at.Add(60*time.Second))
-	// Removing state.json loses the check levels, so a new disk.free alert with a new time is
-	// legitimate; the delivered batch itself must not appear twice.
-	if strings.Count(strings.Join(f.posts, "\n"), "[host-watch 22:00:30Z #1] ALERT disk.free") != 1 {
-		t.Fatalf("redelivered after restart: %v", f.posts)
-	}
-}
-
 // At most one post is outstanding; a failed post keeps its entries; every attempt is counted.
 func TestSinglePostOutstandingAndRetry(t *testing.T) {
 	f := newFake()
@@ -720,40 +674,6 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-// Queue migration never drops a notice: entries from before sequence numbers existed are renumbered
-// and delivered, and an acknowledgement that outlived a lost state file does not swallow new alerts.
-func TestQueueMigrationKeepsNotices(t *testing.T) {
-	f := newFake()
-	w := newTestWatcher(t, f)
-	if err := ensurePrivateDir(w.o.stateDir); err != nil {
-		t.Fatal(err)
-	}
-	legacy := `{"seen":{},"levels":{},"pending":[{"at":"21:00:00Z","key":"reports.syspolicyd","text":"ALERT legacy-notice"}]}`
-	if err := os.WriteFile(w.statePath(), []byte(legacy), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	warm(t, w, t0)
-	step(t, w, t0.Add(30*time.Second))
-	if !strings.Contains(strings.Join(f.posts, "\n"), "legacy-notice") {
-		t.Fatalf("legacy notice dropped: %v", f.posts)
-	}
-	// Lost state file, leftover acknowledgement: the next alert must still be delivered.
-	if err := os.Remove(w.statePath()); err != nil {
-		t.Fatal(err)
-	}
-	if err := atomicWrite(w.ackPath(), []byte("500\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	re := newWatcher(w.o, f.system())
-	at := warm(t, re, t0.Add(time.Minute))
-	f.set(func(f *fake) { f.disk = 4 })
-	step(t, re, at.Add(15*time.Second))
-	step(t, re, at.Add(30*time.Second))
-	if !strings.Contains(strings.Join(f.posts, "\n"), "disk.free") {
-		t.Fatalf("alert after a lost state file swallowed by the old ack: %v", f.posts)
-	}
-}
-
 // The flag path must be exactly the contract path: a dot-dot spelling that cleans to it, and a
 // symlinked host-health directory, are both refused, so the writer and the consumers use one file.
 func TestFlagPathExactAndNoSymlinks(t *testing.T) {
@@ -790,20 +710,6 @@ func TestFlagPathExactAndNoSymlinks(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(elsewhere, "exec-degraded")); err == nil {
 		t.Fatal("flag landed outside the contract path")
-	}
-}
-
-// A child that exits but leaves a descendant holding its output pipes releases its slot within the
-// wait delay instead of keeping it forever.
-func TestRunnerLingeringDescendant(t *testing.T) {
-	r := newRunner()
-	t1 := time.Now()
-	out, _ := r.run(context.Background(), "sh", "/bin/sh", "-c", "/bin/sleep 6 & echo ok")
-	if time.Since(t1) > 4*time.Second {
-		t.Fatalf("run held by a lingering descendant for %s", time.Since(t1))
-	}
-	if !strings.Contains(out, "ok") || r.busy("sh") {
-		t.Fatalf("out=%q busy=%v", out, r.busy("sh"))
 	}
 }
 
@@ -887,51 +793,6 @@ func TestObservationGapResetsWindow(t *testing.T) {
 	step(t, w, t0.Add(16*time.Minute+30*time.Second)) // next tick only after a 10 min gap
 	if f.flag == nil {
 		t.Fatal("a gap was counted as continuous health")
-	}
-}
-
-// A failed acknowledgement write holds new posts and is retried; after a restart the delivered
-// batch is not sent again.
-func TestAckWriteFailureHoldsPosts(t *testing.T) {
-	f := newFake()
-	w := newTestWatcher(t, f)
-	failAck := true
-	w.writeAck = func(p string, d []byte) error {
-		if failAck {
-			return errors.New("ack disk error")
-		}
-		return atomicWrite(p, d, 0o600)
-	}
-	at := warm(t, w, t0)
-	f.set(func(f *fake) { f.disk = 4 })
-	step(t, w, at.Add(15*time.Second)) // delivered, ack write fails
-	f.set(func(f *fake) { f.fsev = "fseventsd watchdog LaunchAgent is disabled" })
-	step(t, w, at.Add(30*time.Second)) // ack still failing: no new post
-	if f.attempts != 1 {
-		t.Fatalf("posted while the ack was not durable: attempts=%d", f.attempts)
-	}
-	failAck = false
-	step(t, w, at.Add(45*time.Second)) // ack retried, then the next batch
-	step(t, w, at.Add(60*time.Second))
-	re := newWatcher(w.o, f.system())
-	step(t, re, at.Add(75*time.Second))
-	step(t, re, at.Add(90*time.Second))
-	all := strings.Join(f.posts, "\n")
-	if strings.Count(all, "disk.free") != 1 || strings.Count(all, "fseventsd.watchdog") != 1 {
-		t.Fatalf("posts: %v", f.posts)
-	}
-}
-
-// A child that exits successfully while a descendant keeps its pipes is a success, so a delivered
-// a2a notice is acknowledged once, not retried.
-func TestRunnerWaitDelaySuccess(t *testing.T) {
-	r := newRunner()
-	out, err := r.run(context.Background(), "a2a-post", "/bin/sh", "-c", "/bin/sleep 6 & echo posted")
-	if err != nil || !strings.Contains(out, "posted") {
-		t.Fatalf("successful child reported as failed: out=%q err=%v", out, err)
-	}
-	if _, err := r.run(context.Background(), "x", "/bin/sh", "-c", "/bin/sleep 6 & exit 3"); err == nil {
-		t.Fatal("failing child with a lingering descendant reported as success")
 	}
 }
 
@@ -1087,26 +948,6 @@ func TestFlagSwapBetweenCheckAndUse(t *testing.T) {
 	}
 }
 
-// After a delivered post whose acknowledgement write fails, a watcher restarted from the saved
-// state before any retry does not send the batch again.
-func TestAckFailureRestartBeforeRetry(t *testing.T) {
-	f := newFake()
-	w := newTestWatcher(t, f)
-	w.writeAck = func(string, []byte) error { return errors.New("ack disk error") }
-	at := warm(t, w, t0)
-	f.set(func(f *fake) { f.disk = 4 })
-	step(t, w, at.Add(15*time.Second)) // posted; ack write fails; no retry tick follows
-	if len(f.posts) != 1 {
-		t.Fatalf("precondition: posts=%v", f.posts)
-	}
-	re := newWatcher(w.o, f.system())
-	step(t, re, at.Add(30*time.Second))
-	step(t, re, at.Add(45*time.Second))
-	if strings.Count(strings.Join(f.posts, "\n"), "ALERT disk.free") != 1 {
-		t.Fatalf("delivered batch sent again after restart: %v", f.posts)
-	}
-}
-
 // A Retired directory that is absent at first and appears later with history does not alert: an
 // absent source is not a scan, so its first real enumeration seeds it.
 func TestAbsentRetiredSeedsOnFirstEnumeration(t *testing.T) {
@@ -1126,19 +967,6 @@ func TestAbsentRetiredSeedsOnFirstEnumeration(t *testing.T) {
 	_, _, scanned := listReports([]string{dir}, []string{"mac-firewall"})
 	if !scanned[dir] || scanned[filepath.Join(dir, "Retired")] {
 		t.Fatalf("scanned=%v: a missing Retired must not count as enumerated", scanned)
-	}
-}
-
-// With the shortest allowed post deadline, a child that succeeds while a descendant keeps its
-// output open is reported as success promptly.
-func TestRunnerShortDeadlineDescendant(t *testing.T) {
-	r := newRunner()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	t1 := time.Now()
-	out, err := r.run(ctx, "a2a-post", "/bin/sh", "-c", "/bin/sleep 6 & echo posted")
-	if err != nil || !strings.Contains(out, "posted") || time.Since(t1) > 900*time.Millisecond {
-		t.Fatalf("out=%q err=%v after %s", out, err, time.Since(t1))
 	}
 }
 
@@ -1228,37 +1056,6 @@ func TestFlagLeafSymlink(t *testing.T) {
 	}
 }
 
-// The ack-failure fallback compacts the latest state under the same lock as the tick, so an alert
-// saved by a tick while the post was in flight survives the compaction.
-func TestFallbackCompactionKeepsNewerTick(t *testing.T) {
-	f := newFake()
-	f.postHang = make(chan struct{})
-	w := newTestWatcher(t, f)
-	w.writeAck = func(string, []byte) error { return errors.New("ack disk error") }
-	at := warm(t, w, t0)
-	f.set(func(f *fake) { f.disk = 4 })
-	if err := w.tick(at.Add(15 * time.Second)); err != nil { // post of disk.free in flight
-		t.Fatal(err)
-	}
-	f.set(func(f *fake) { f.fsev = "fseventsd watchdog LaunchAgent is disabled" })
-	if err := w.tick(at.Add(30 * time.Second)); err != nil { // newer alert saved meanwhile
-		t.Fatal(err)
-	}
-	close(f.postHang)
-	w.wg.Wait() // post succeeds, ack fails, fallback compaction runs
-	s, err := w.load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var keys []string
-	for _, a := range s.Pending {
-		keys = append(keys, a.Key)
-	}
-	if len(keys) != 1 || keys[0] != "fseventsd.watchdog" {
-		t.Fatalf("pending after fallback compaction: %v", keys)
-	}
-}
-
 // Saving filters into new storage: the caller's pending slice is unchanged, so one unsent alert is
 // never seen twice.
 func TestSaveDoesNotRewriteCallerSlice(t *testing.T) {
@@ -1267,8 +1064,7 @@ func TestSaveDoesNotRewriteCallerSlice(t *testing.T) {
 	if err := ensurePrivateDir(w.o.stateDir); err != nil {
 		t.Fatal(err)
 	}
-	w.acked = 1
-	s := state{Pending: []alert{{Seq: 1, Key: "acked"}, {Seq: 2, Key: "unsent"}}}
+	s := state{Acked: 1, Pending: []alert{{Seq: 1, Key: "acked"}, {Seq: 2, Key: "unsent"}}}
 	if err := w.save(s); err != nil {
 		t.Fatal(err)
 	}
@@ -1281,50 +1077,277 @@ func TestSaveDoesNotRewriteCallerSlice(t *testing.T) {
 	}
 }
 
-// When both durable records of a delivery are lost (ack write and queue save), delivery is at least
-// once: the repeat carries the same delivery id, so it is recognizable as a repeat.
-func TestRedeliveryCarriesSameID(t *testing.T) {
-	f := newFake()
-	f.postHang = make(chan struct{})
-	w := newTestWatcher(t, f)
-	w.writeAck = func(string, []byte) error { return errors.New("ack disk error") }
-	at := warm(t, w, t0)
-	f.set(func(f *fake) { f.disk = 4 })
-	if err := w.tick(at.Add(15 * time.Second)); err != nil {
-		t.Fatal(err)
+// deliveries counts, per delivery id, how many successful posts carried it.
+func deliveries(posts []string) map[string]int {
+	out := map[string]int{}
+	for _, p := range posts {
+		for _, line := range strings.Split(p, "\n") {
+			i := strings.Index(line, " #")
+			j := strings.Index(line, "] ")
+			if i > 0 && j > i {
+				out[line[i+2:j]]++
+			}
+		}
 	}
-	stale, err := os.ReadFile(w.statePath()) // the queue as saved before delivery
+	return out
+}
+
+// eventSeqs lists the delivery ids of every alert recorded in events.jsonl.
+func eventSeqs(t *testing.T, w *watcher) []string {
+	raw, err := os.ReadFile(w.eventsPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	close(f.postHang)
-	w.wg.Wait()
-	if err := atomicWrite(w.statePath(), stale, 0o600); err != nil { // both records lost
-		t.Fatal(err)
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var a alert
+		if err := json.Unmarshal([]byte(line), &a); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, fmt.Sprint(a.Seq))
 	}
-	f.set(func(f *fake) { f.postHang = nil })
-	re := newWatcher(w.o, f.system())
-	step(t, re, at.Add(30*time.Second))
-	step(t, re, at.Add(45*time.Second))
-	if len(f.posts) != 2 || !strings.Contains(f.posts[0], "#1]") || !strings.Contains(f.posts[1], "#1]") {
-		t.Fatalf("repeat without the same delivery id: %v", f.posts)
+	return out
+}
+
+// The delivery invariant (at least once, never lost; a repeat carries the same delivery id) holds
+// for a restart at every step from sending to recording: before the send completes, after a
+// successful send that was never recorded, and after the delivery was recorded.
+func TestDeliveryInvariantRestartAtEachStep(t *testing.T) {
+	for _, stepName := range []string{"before-send", "sent-not-recorded", "recorded"} {
+		t.Run(stepName, func(t *testing.T) {
+			f := newFake()
+			if stepName == "before-send" {
+				f.postHang = make(chan struct{})
+				f.postErr = errors.New("process died during the send")
+			}
+			w := newTestWatcher(t, f)
+			at := warm(t, w, t0)
+			f.set(func(f *fake) { f.disk = 4 })
+			if err := w.tick(at.Add(15 * time.Second)); err != nil { // in-flight recorded, send starts
+				t.Fatal(err)
+			}
+			if stepName != "before-send" {
+				w.wg.Wait()
+			}
+			if stepName == "recorded" {
+				step(t, w, at.Add(30*time.Second)) // the result is applied and saved
+			}
+			// Restart: a new process from the saved state, without the old sender.
+			if stepName == "before-send" {
+				f.set(func(f *fake) { f.postHang, f.postErr = nil, nil })
+			}
+			re := newWatcher(w.o, f.system())
+			for i := 3; i <= 6; i++ {
+				step(t, re, at.Add(time.Duration(i)*15*time.Second))
+			}
+			got := deliveries(f.posts)
+			for _, seq := range eventSeqs(t, w) {
+				if got[seq] < 1 {
+					t.Fatalf("alert #%s lost (posts %v)", seq, f.posts)
+				}
+			}
+			if stepName == "recorded" && got["1"] != 1 {
+				t.Fatalf("recorded delivery sent again: %v", got)
+			}
+			if stepName == "sent-not-recorded" && got["1"] != 2 {
+				t.Fatalf("unrecorded delivery: want exactly one repeat with the same id, got %v", got)
+			}
+		})
 	}
 }
 
-// Child output beyond the bound is an incomplete observation, not a truncated sample; an unlink
-// failure of the spool stops the child from starting at all.
-func TestRunnerSpoolBounds(t *testing.T) {
+// A storage failure exactly at the durable record of a delivery never loses the alert: the batch
+// is released and sent again with the same delivery id.
+func TestStorageFailureAtRecord(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	f.set(func(f *fake) { f.disk = 4 })
+	step(t, w, at.Add(15*time.Second)) // delivered; not yet recorded
+	w.beforeSave = func() error { return errors.New("disk error") }
+	if err := w.tick(at.Add(30 * time.Second)); err == nil { // the recording save fails
+		t.Fatal("injected save failure not reported")
+	}
+	w.beforeSave = nil
+	for i := 3; i <= 6; i++ {
+		step(t, w, at.Add(time.Duration(i)*15*time.Second))
+	}
+	got := deliveries(f.posts)
+	if got["1"] < 1 || len(got) != 1 {
+		t.Fatalf("deliveries after a failed record: %v", got)
+	}
+}
+
+// Concurrent ticks are serialized by the queue owner: every recorded alert is delivered at least
+// once, and no delivery id is ever attached to two different alerts.
+func TestConcurrentTicksKeepInvariant(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	var wg sync.WaitGroup
+	for g := 0; g < 2; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				f.set(func(f *fake) { f.disk = float64(4 + 50*((i+g)%2)) }) // flaps: new alerts
+				_ = w.tick(at.Add(time.Duration(1+i) * 15 * time.Second))
+			}
+		}(g)
+	}
+	wg.Wait()
+	w.wg.Wait()
+	f.set(func(f *fake) { f.disk = 50 })
+	for i := 20; i <= 40; i++ {
+		step(t, w, at.Add(time.Duration(i)*15*time.Second))
+	}
+	got := deliveries(f.posts)
+	seqs := eventSeqs(t, w)
+	for _, seq := range seqs {
+		if got[seq] < 1 {
+			t.Fatalf("alert #%s lost under concurrent ticks", seq)
+		}
+	}
+	text := map[string]string{}
+	for _, p := range f.posts {
+		for _, line := range strings.Split(p, "\n") {
+			i, j := strings.Index(line, " #"), strings.Index(line, "] ")
+			if i < 0 || j < i {
+				continue
+			}
+			id, body := line[i+2:j], line[j+2:]
+			if prev, ok := text[id]; ok && prev != body {
+				t.Fatalf("delivery id #%s carries two alerts: %q / %q", id, prev, body)
+			}
+			text[id] = body
+		}
+	}
+}
+
+// A child that exits while a descendant keeps its output open is observed at its exit: the runner
+// returns within the short post deadline, frees the slot, reports the exit status (success or
+// failure) and marks the output incomplete instead of treating it as a full sample.
+func TestRunnerDescendantHoldsOutput(t *testing.T) {
 	r := newRunner()
-	if _, err := r.run(context.Background(), "big", "/bin/dd", "if=/dev/zero", "bs=1048576", "count=2"); !errors.Is(err, errOutputIncomplete) {
-		t.Fatalf("oversized output not refused: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	t1 := time.Now()
+	out, err := r.run(ctx, "a2a-post", "/bin/sh", "-c", "/bin/sleep 6 & echo posted")
+	if !errors.Is(err, errOutputIncomplete) || !strings.Contains(out, "posted") || time.Since(t1) > 900*time.Millisecond {
+		t.Fatalf("out=%q err=%v after %s", out, err, time.Since(t1))
 	}
-	if out, err := r.run(context.Background(), "small", "/bin/echo", "ok"); err != nil || strings.TrimSpace(out) != "ok" {
-		t.Fatalf("positive control: %q %v", out, err)
+	if r.busy("a2a-post") {
+		t.Fatal("slot held by a lingering descendant")
 	}
-	started := false
-	r.start = func(cmd *exec.Cmd) error { started = true; return cmd.Start() }
-	r.unlink = func(string) error { return errors.New("unlink refused") }
-	if _, err := r.run(context.Background(), "u", "/bin/echo", "x"); err == nil || started {
-		t.Fatalf("unlink failure: err=%v started=%v", err, started)
+	if _, err := r.run(context.Background(), "x", "/bin/sh", "-c", "/bin/sleep 6 & exit 3"); err == nil || errors.Is(err, errOutputIncomplete) {
+		t.Fatalf("failing exit not reported as a failure: %v", err)
+	}
+	// A plain child gives complete output.
+	if out, err := r.run(context.Background(), "echo", "/bin/echo", "ok"); err != nil || strings.TrimSpace(out) != "ok" {
+		t.Fatalf("plain child: %q %v", out, err)
+	}
+}
+
+// The a2a post treats incomplete output after a successful exit as delivered, so a delivery is not
+// repeated because of its output; a failing exit stays a failure.
+func TestPostIgnoresIncompleteOutput(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	ok := write("ok-post", "/bin/sleep 6 &\necho posted\nexit 0\n")
+	bad := write("bad-post", "/bin/sleep 6 &\nexit 3\n")
+	for _, c := range []struct {
+		bin     string
+		wantErr bool
+	}{{ok, false}, {bad, true}} {
+		sys := liveSystem(options{a2a: c.bin, as: "x", room: "r", to: "y"}, "/usr/bin/true")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := sys.post(ctx, "notice")
+		cancel()
+		if (err != nil) != c.wantErr {
+			t.Fatalf("%s: err=%v", filepath.Base(c.bin), err)
+		}
+	}
+}
+
+// Output beyond the bound is kept bounded in memory, discarded beyond it, never stored on disk, and
+// reported as an incomplete observation rather than a truncated sample.
+func TestRunnerOutputBound(t *testing.T) {
+	r := newRunner()
+	out, err := r.run(context.Background(), "big", "/bin/dd", "if=/dev/zero", "bs=1048576", "count=4")
+	if !errors.Is(err, errOutputIncomplete) || len(out) > maxChildOutput {
+		t.Fatalf("oversized output: len=%d err=%v", len(out), err)
+	}
+}
+
+// A symlink swapped in at the flag name between the regular-file check and the removal is never
+// unlinked: it is moved back and left in place, and its target is untouched.
+func TestFlagLeafSwapDuringRemoval(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	canonical, _ := canonicalFlagPath()
+	if err := writeDegradedFlag(canonical, degradedFlag{Reason: "r", Since: "s", HostWatchPID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, "target")
+	if err := os.WriteFile(target, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flagLeafHook = func() {
+		_ = os.Remove(canonical)
+		_ = os.Symlink(target, canonical)
+	}
+	err := removeDegradedFlag(canonical)
+	flagLeafHook = nil
+	if err == nil {
+		t.Fatal("removal reported success after the entry was swapped")
+	}
+	fi, lerr := os.Lstat(canonical)
+	if lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("swapped symlink not left in place: %v", lerr)
+	}
+	if raw, _ := os.ReadFile(target); string(raw) != "keep" {
+		t.Fatal("symlink target changed")
+	}
+}
+
+// An event-log failure never loses a notice: with events.jsonl obstructed, the alert is still
+// queued and delivered.
+func TestEventLogFailureKeepsNotice(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	if err := os.Mkdir(w.eventsPath(), 0o700); err != nil { // obstruct the log
+		t.Fatal(err)
+	}
+	f.set(func(f *fake) { f.disk = 4 })
+	step(t, w, at.Add(15*time.Second))
+	step(t, w, at.Add(30*time.Second))
+	if !strings.Contains(strings.Join(f.posts, "\n"), "disk.free") {
+		t.Fatalf("notice lost on an event-log failure: %v", f.posts)
+	}
+}
+
+// Every physical line of a post carries a delivery id, even when an alert text contains line breaks.
+func TestNoticeLinesCarryID(t *testing.T) {
+	f := newFake()
+	f.repErrs = map[string]error{"/user-reports": errors.New("open /x\ny\r\nz: no such file")}
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	step(t, w, at.Add(15*time.Second))
+	if len(f.posts) == 0 {
+		t.Fatal("no post")
+	}
+	for _, p := range f.posts {
+		for _, line := range strings.Split(p, "\n") {
+			if !strings.Contains(line, " #") {
+				t.Fatalf("line without delivery id: %q", line)
+			}
+		}
 	}
 }

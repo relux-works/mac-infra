@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -60,6 +59,8 @@ type state struct {
 	Service       *serviceState       `json:"service,omitempty"`
 	Pending       []alert             `json:"pending,omitempty"`
 	NextSeq       int64               `json:"next_seq"`
+	Acked         int64               `json:"acked"`               // highest delivered sequence
+	InFlight      *span               `json:"in_flight,omitempty"` // batch handed to the sender
 	DegradedSince string              `json:"degraded_since,omitempty"`
 	HealthySince  string              `json:"healthy_since,omitempty"`
 	StuckRising   int                 `json:"stuck_rising"`
@@ -84,23 +85,21 @@ type watcher struct {
 	probeBusy     bool
 	probeLaunchAt time.Time
 	lastProbe     *probeResult
-	postBusy      bool
-	acked         int64      // highest alert sequence confirmed delivered
-	ackDirty      bool       // an acknowledgement write failed; retried before any new post
-	stateMu       sync.Mutex // held from load to save by a tick and by the post fallback
-	mem           *state     // dry-run keeps its state here and never writes the state directory
-	writeAck      func(path string, data []byte) error
+	postBusy      bool            // a sender goroutine is alive; only the tick sets and clears it
+	results       chan postResult // sender to tick: the outcome of the one outstanding batch
+	stateMu       sync.Mutex      // held by the tick from load to save; the tick alone owns the queue
+	beforeSave    func() error    // tests only: inject a storage failure at the durable record
+	mem           *state          // dry-run keeps its state here and never writes the state directory
 	wg            sync.WaitGroup
 }
 
 func newWatcher(o options, sys system) *watcher {
-	return &watcher{o: o, sys: sys, pid: os.Getpid(), writeAck: func(p string, d []byte) error { return atomicWrite(p, d, 0o600) }}
+	return &watcher{o: o, sys: sys, pid: os.Getpid(), results: make(chan postResult, 1)}
 }
 
 func (w *watcher) statePath() string     { return filepath.Join(w.o.stateDir, "state.json") }
 func (w *watcher) eventsPath() string    { return filepath.Join(w.o.stateDir, "events.jsonl") }
 func (w *watcher) heartbeatPath() string { return filepath.Join(w.o.stateDir, "heartbeat") }
-func (w *watcher) ackPath() string       { return filepath.Join(w.o.stateDir, "acked") }
 
 func (w *watcher) load() (state, error) {
 	if w.o.dryRun && w.mem != nil {
@@ -131,31 +130,15 @@ func (w *watcher) load() (state, error) {
 	if s.HeldReports == nil {
 		s.HeldReports = map[string][]string{}
 	}
-	if raw, err := os.ReadFile(w.ackPath()); err == nil {
-		if n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil {
-			w.mu.Lock()
-			if n > w.acked {
-				w.acked = n
-			}
-			w.mu.Unlock()
-		}
-	}
-	migrateQueue(&s, w.ackedSeq())
+	migrateQueue(&s)
 	return s, nil
 }
 
-func (w *watcher) ackedSeq() int64 {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.acked
-}
-
-// migrateQueue never drops a pending notice: sequence numbers continue above both the stored next
-// number and the acknowledgement (which may outlive a lost state file), and entries written before
-// sequence numbers existed (seq 0) are renumbered above that point.
-func migrateQueue(s *state, acked int64) {
-	if s.NextSeq < acked {
-		s.NextSeq = acked
+// migrateQueue never drops a pending notice: sequence numbers continue above the delivered
+// watermark, and entries written before sequence numbers existed (seq 0) are renumbered above it.
+func migrateQueue(s *state) {
+	if s.NextSeq < s.Acked {
+		s.NextSeq = s.Acked
 	}
 	for i := range s.Pending {
 		if s.Pending[i].Seq == 0 {
@@ -166,13 +149,16 @@ func migrateQueue(s *state, acked int64) {
 }
 
 func (w *watcher) save(s state) error {
+	if w.beforeSave != nil {
+		if err := w.beforeSave(); err != nil {
+			return err
+		}
+	}
 	if w.o.dryRun {
 		w.mem = &s // never written: a dry run leaves the live state untouched
 		return nil
 	}
-	// Every save drops entries already delivered, so a stale in-memory copy cannot bring a
-	// delivered batch back, and the state file is a second durable record of delivery.
-	w.dropAcked(&s)
+	dropAcked(&s)
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
@@ -229,7 +215,6 @@ func (w *watcher) tick(now time.Time) error {
 		if err := atomicWrite(w.heartbeatPath(), []byte(now.Format(time.RFC3339)+"\n"), 0o600); err != nil {
 			return err
 		}
-		w.retryAck()
 	}
 	w.stateMu.Lock()
 	locked := true
@@ -242,13 +227,13 @@ func (w *watcher) tick(now time.Time) error {
 	if err != nil {
 		return err
 	}
+	w.applyPostResult(&s)
 	// An unobserved gap (sleep, a stopped process, a hung tick) is never counted as health.
 	gap := false
 	if last, err := time.Parse(time.RFC3339, s.LastTick); err == nil && now.Sub(last) > 2*w.o.interval+observeTimeout {
 		gap = true
 	}
 	s.LastTick = now.Format(time.RFC3339)
-	w.dropAcked(&s)
 	stamp := now.Format("15:04:05Z")
 	var alerts []alert
 	execBad := false
@@ -348,8 +333,9 @@ func (w *watcher) tick(now time.Time) error {
 	for i := range alerts {
 		s.NextSeq++
 		alerts[i].Seq = s.NextSeq
+		// events.jsonl is a local log, not the queue: a log failure never loses the notice.
 		if err := w.record(alerts[i]); err != nil {
-			return err
+			fmt.Fprintln(os.Stderr, "host-watch: event log write failed:", err)
 		}
 		if w.sys.notify != nil {
 			nctx, ncancel := context.WithTimeout(context.Background(), notifyTimeout)
@@ -359,18 +345,21 @@ func (w *watcher) tick(now time.Time) error {
 		s.Pending = append(s.Pending, alerts[i])
 	}
 
-	if err := w.save(s); err != nil {
-		return err
+	postAllowed := !w.o.once && healthy && (s.DegradedSince == "" || s.HealthySince != "")
+	var batch []alert
+	if postAllowed {
+		batch = w.selectBatch(&s) // records the in-flight span in s before the save
 	}
-	w.dropAcked(&s) // post from the same filtered snapshot that was saved
+	if err := w.save(s); err != nil {
+		return err // nothing is sent unless its in-flight record is durable
+	}
 	w.stateMu.Unlock()
 	locked = false
 	if !w.o.once {
 		w.maybeStartProbe(now.Add(time.Since(realStart)))
 	}
-	postAllowed := !w.o.once && healthy && (s.DegradedSince == "" || s.HealthySince != "")
-	if postAllowed {
-		w.maybeStartPost(s)
+	if len(batch) > 0 {
+		w.send(batch)
 	}
 	return nil
 }
@@ -536,13 +525,10 @@ func degradedReason(s *state) string {
 }
 
 // dropAcked removes pending alerts already confirmed delivered.
-func (w *watcher) dropAcked(s *state) {
-	w.mu.Lock()
-	acked := w.acked
-	w.mu.Unlock()
+func dropAcked(s *state) {
 	keep := make([]alert, 0, len(s.Pending)) // new storage: a caller's slice is never rewritten
 	for _, a := range s.Pending {
-		if a.Seq > acked {
+		if a.Seq > s.Acked {
 			keep = append(keep, a)
 		}
 	}
@@ -570,25 +556,60 @@ func (w *watcher) maybeStartProbe(now time.Time) {
 	}()
 }
 
-// maybeStartPost sends the oldest unacknowledged alerts as one bounded post. Acknowledgement,
-// durable advancement and the choice of the next batch happen under one lock, so a delivered
-// alert is never selected again.
-func (w *watcher) maybeStartPost(s state) {
+type span struct {
+	First int64 `json:"first"`
+	Last  int64 `json:"last"`
+}
+
+type postResult struct {
+	span span
+	err  error
+}
+
+// applyPostResult is the only place a delivery is recorded. It runs inside the tick, under
+// stateMu, on the freshly loaded state. A finished send advances the watermark (or, on failure,
+// leaves the batch pending); an in-flight span with no live sender (a restart, or a result lost
+// with a failed save) is released, so the batch is sent again with the same delivery ids: delivery
+// is at least once.
+func (w *watcher) applyPostResult(s *state) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	select {
+	case res := <-w.results:
+		w.postBusy = false
+		if res.err == nil && res.span.Last > s.Acked {
+			s.Acked = res.span.Last
+		} else if res.err != nil {
+			fmt.Fprintln(os.Stderr, "host-watch: post deferred:", res.err)
+		}
+		s.InFlight = nil
+	default:
+		if s.InFlight != nil && !w.postBusy {
+			s.InFlight = nil
+		}
+	}
+	dropAcked(s)
+}
+
+// selectBatch picks the oldest undelivered alerts as one bounded batch and records it as in
+// flight in s. It runs inside the tick under stateMu; nothing is selected while a sender is alive.
+func (w *watcher) selectBatch(s *state) []alert {
 	if w.sys.post == nil {
-		return
+		return nil
 	}
 	w.mu.Lock()
-	if w.postBusy || w.ackDirty {
-		w.mu.Unlock()
-		return
+	busy := w.postBusy
+	w.mu.Unlock()
+	if busy || s.InFlight != nil {
+		return nil
 	}
 	var batch []alert
 	size := 0
 	for _, a := range s.Pending {
-		if a.Seq <= w.acked {
+		if a.Seq <= s.Acked {
 			continue
 		}
-		line := truncateLine(fmt.Sprintf("[host-watch %s #%d] %s", a.At, a.Seq, a.Text), postMaxBytes)
+		line := truncateLine(fmt.Sprintf("[host-watch %s #%d] %s", a.At, a.Seq, oneLine.Replace(a.Text)), postMaxBytes)
 		if len(batch) > 0 && (len(batch) >= postMaxEntries || size+len(line)+1 > postMaxBytes) {
 			break
 		}
@@ -596,71 +617,40 @@ func (w *watcher) maybeStartPost(s state) {
 		batch = append(batch, a)
 		size += len(line) + 1
 	}
-	if len(batch) == 0 {
-		w.mu.Unlock()
-		return
+	if len(batch) > 0 {
+		s.InFlight = &span{First: batch[0].Seq, Last: batch[len(batch)-1].Seq}
 	}
-	w.postBusy = true
-	w.mu.Unlock()
+	return batch
+}
+
+// send hands one immutable batch to a sender goroutine. The sender owns no queue state: it posts
+// and returns {span, result} to the tick.
+func (w *watcher) send(batch []alert) {
 	lines := make([]string, len(batch))
 	for i, a := range batch {
 		lines[i] = a.Text
 	}
 	text := strings.Join(lines, "\n")
-	last := batch[len(batch)-1].Seq
+	sp := span{First: batch[0].Seq, Last: batch[len(batch)-1].Seq}
+	w.mu.Lock()
+	w.postBusy = true
+	w.mu.Unlock()
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), w.o.postTimeout)
 		err := w.sys.post(ctx, text)
 		cancel()
-		defer func() {
-			w.mu.Lock()
-			w.postBusy = false
-			w.mu.Unlock()
-		}()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "host-watch: post deferred:", err)
-			return
-		}
-		w.mu.Lock()
-		if last > w.acked {
-			w.acked = last
-		}
-		w.mu.Unlock()
-		if w.o.dryRun {
-			return // no durable acknowledgement in a dry run
-		}
-		if werr := w.writeAck(w.ackPath(), []byte(strconv.FormatInt(last, 10)+"\n")); werr != nil {
-			w.mu.Lock()
-			w.ackDirty = true
-			w.mu.Unlock()
-			fmt.Fprintln(os.Stderr, "host-watch: ack write failed, holding new posts until it succeeds:", werr)
-			// Second durable record: the queue without the delivered batch, so a restart before
-			// the acknowledgement is rewritten does not resend it.
-			w.stateMu.Lock()
-			if st, lerr := w.load(); lerr == nil {
-				if serr := w.save(st); serr != nil {
-					fmt.Fprintln(os.Stderr, "host-watch: compacted queue save failed:", serr)
-				}
-			}
-			w.stateMu.Unlock()
-		}
+		w.results <- postResult{span: sp, err: err} // buffered 1; one sender at a time
 	}()
 }
 
-// drain waits, bounded, for background work (used with --once) and records delivered alerts.
+// drain waits, bounded, for background work before a one-shot exit. --once starts neither a probe
+// nor a post, so there is normally nothing to wait for.
 func (w *watcher) drain() {
 	if !boundedWait(&w.wg, w.o.postTimeout+probeTimeout+5*time.Second) {
 		fmt.Fprintln(os.Stderr, "host-watch: background work still running at exit")
 	}
-	w.stateMu.Lock()
-	defer w.stateMu.Unlock()
-	s, err := w.load()
-	if err != nil {
-		return
-	}
-	_ = w.save(s)
 }
 
 const truncMark = " …[truncated; full text in events.jsonl]"
@@ -693,17 +683,5 @@ func probeBeforeIncident(degradedSince string, launchedAt time.Time) bool {
 	return !launchedAt.After(since)
 }
 
-// retryAck re-writes an acknowledgement whose earlier write failed; until it succeeds no new post
-// starts, so a restart cannot resend a batch that was already delivered.
-func (w *watcher) retryAck() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.ackDirty {
-		return
-	}
-	if err := w.writeAck(w.ackPath(), []byte(strconv.FormatInt(w.acked, 10)+"\n")); err != nil {
-		fmt.Fprintln(os.Stderr, "host-watch: ack write still failing:", err)
-		return
-	}
-	w.ackDirty = false
-}
+// oneLine keeps every notice on one physical line, so every line of a post carries its delivery id.
+var oneLine = strings.NewReplacer("\r\n", " \u23ce ", "\n", " \u23ce ", "\r", " \u23ce ")
