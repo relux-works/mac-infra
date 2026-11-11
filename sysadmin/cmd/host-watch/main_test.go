@@ -1594,3 +1594,26 @@ func TestGapPrecision(t *testing.T) {
 		}
 	}
 }
+
+// An observation phase that stalls longer than the gap limit (here a report scan blocked 12.25 s
+// against a 12 s limit) is an unobserved stretch: it resets the recovery window even though the
+// tick saves its end afterwards. A normal observation phase keeps the window.
+func TestStalledObservationResetsWindow(t *testing.T) {
+	for _, c := range []struct {
+		obs   time.Duration
+		reset bool
+	}{{500 * time.Millisecond, false}, {12250 * time.Millisecond, true}} {
+		f := newFake()
+		o := testOptions(t)
+		o.interval, o.probeEvery = time.Second, time.Second
+		w, at := recoveringWatcher(t, f, o, t0)
+		before, _ := w.load()
+		w.since = func(time.Time) time.Duration { return c.obs }
+		step(t, w, at.Add(o.interval))
+		w.since = time.Since
+		after, _ := w.load()
+		if (after.HealthySince != before.HealthySince) != c.reset {
+			t.Fatalf("observation %s: window %q -> %q (want reset=%v)", c.obs, before.HealthySince, after.HealthySince, c.reset)
+		}
+	}
+}

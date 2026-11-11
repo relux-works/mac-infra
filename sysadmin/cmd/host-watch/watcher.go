@@ -334,6 +334,12 @@ func (w *watcher) tick(now time.Time) error {
 	w.resourceChecks(&s, &alerts, stamp)
 
 	// The degraded flag: the single automatic action.
+	// An observation phase that itself ran longer than the gap limit (a stalled scan or probe call) is
+	// an unobserved stretch too: it can never count toward recovery. The post comes later and is not
+	// part of this measurement.
+	if w.since(realStart) > 2*w.o.interval+observeTimeout {
+		gap = true
+	}
 	w.updateDegraded(&s, &alerts, now, stamp, execBad, healthy && !gap)
 
 	for i := range alerts {
