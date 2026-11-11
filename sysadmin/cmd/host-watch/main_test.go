@@ -1617,3 +1617,43 @@ func TestStalledObservationResetsWindow(t *testing.T) {
 		}
 	}
 }
+
+// A report scan that misses its deadline is an unhealthy observation: it resets the recovery
+// window, is reported as unknown, and a still-running scan is not stacked by the next tick. A scan
+// that finishes in time keeps the window.
+func TestReportScanDeadline(t *testing.T) {
+	old := scanTimeout
+	scanTimeout = 50 * time.Millisecond
+	defer func() { scanTimeout = old }()
+	for _, blocked := range []bool{false, true} {
+		f := newFake()
+		o := testOptions(t)
+		w, at := recoveringWatcher(t, f, o, t0)
+		before, _ := w.load()
+		release := make(chan struct{})
+		calls := 0
+		sys := f.system()
+		inner := sys.reports
+		sys.reports = func() ([]report, map[string]error, map[string]bool) {
+			f.mu.Lock()
+			calls++
+			f.mu.Unlock()
+			if blocked {
+				<-release
+			}
+			return inner()
+		}
+		w.sys = sys
+		step(t, w, at.Add(o.interval))
+		step(t, w, at.Add(2*o.interval)) // the first scan is still blocked: no second scan
+		after, _ := w.load()
+		reset := after.HealthySince != before.HealthySince
+		if reset != blocked {
+			t.Fatalf("blocked=%v: window %q -> %q", blocked, before.HealthySince, after.HealthySince)
+		}
+		if blocked && (after.Levels["reports.scan"] != lvUnknown || calls != 1) {
+			t.Fatalf("blocked scan: level=%q calls=%d", after.Levels["reports.scan"], calls)
+		}
+		close(release)
+	}
+}

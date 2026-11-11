@@ -89,6 +89,7 @@ type watcher struct {
 
 	mu            sync.Mutex
 	probeBusy     bool
+	scanBusy      bool // a report scan is still running
 	probeLaunchAt time.Time
 	lastProbe     *probeResult
 	stateMu       sync.Mutex                    // held by the tick from load to save; the tick alone owns the queue
@@ -269,7 +270,9 @@ func (w *watcher) tick(now time.Time) error {
 	}
 
 	// 2) crash reports, seeded per source on its first successful scan, throttled per class.
-	if w.reportChecks(&s, &alerts, now, stamp) {
+	if syspolicyNew, ok := w.reportChecks(&s, &alerts, now, stamp); !ok {
+		healthy = false // a report scan that missed its deadline is no evidence of health
+	} else if syspolicyNew {
 		execBad = true
 	}
 
@@ -386,8 +389,13 @@ func (w *watcher) tick(now time.Time) error {
 }
 
 // reportChecks scans the report directories and returns true when a new syspolicyd report appeared.
-func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp string) bool {
-	reports, errs, scanned := w.sys.reports()
+func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp string) (bool, bool) {
+	reports, errs, scanned, ok := w.boundedScan()
+	if !ok {
+		setLevel(s, alerts, stamp, "reports.scan", lvUnknown, fmt.Sprintf("report scan did not finish within %s", scanTimeout))
+		return false, false
+	}
+	setLevel(s, alerts, stamp, "reports.scan", lvOK, "")
 	sources := reportSources(w.o.reportsDirs)
 	sort.Strings(sources)
 	for _, src := range sources {
@@ -436,7 +444,7 @@ func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp s
 		s.ClassAlerted[c] = now.Format(time.RFC3339)
 		s.HeldReports[c] = nil
 	}
-	return syspolicyNew
+	return syspolicyNew, true
 }
 
 func judgeProbe(r probeResult) (string, string) {
@@ -678,3 +686,38 @@ var oneLine = strings.NewReplacer("\r\n", " \u23ce ", "\n", " \u23ce ", "\r", " 
 // readOnly is true for --dry-run and --once: such a run never writes the state directory (state,
 // events, heartbeat), the flag or a2a, so it cannot race a live watcher on the same state.
 func (w *watcher) readOnly() bool { return w.o.dryRun || w.o.once }
+
+// scanTimeout bounds one report scan; a var so tests can shorten it.
+var scanTimeout = observeTimeout
+
+type scanResult struct {
+	reports []report
+	errs    map[string]error
+	scanned map[string]bool
+}
+
+// boundedScan runs the report scan with a deadline and at most one scan outstanding: a scan that
+// is still running from an earlier tick counts as a miss without starting another one.
+func (w *watcher) boundedScan() ([]report, map[string]error, map[string]bool, bool) {
+	w.mu.Lock()
+	if w.scanBusy {
+		w.mu.Unlock()
+		return nil, nil, nil, false
+	}
+	w.scanBusy = true
+	w.mu.Unlock()
+	ch := make(chan scanResult, 1)
+	go func() {
+		r, e, sc := w.sys.reports()
+		w.mu.Lock()
+		w.scanBusy = false
+		w.mu.Unlock()
+		ch <- scanResult{r, e, sc}
+	}()
+	select {
+	case res := <-ch:
+		return res.reports, res.errs, res.scanned, true
+	case <-time.After(scanTimeout):
+		return nil, nil, nil, false
+	}
+}
