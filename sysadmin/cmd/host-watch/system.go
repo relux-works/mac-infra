@@ -113,7 +113,7 @@ func liveSystem(o options, self string) system {
 			return err
 		},
 		post: func(ctx context.Context, text string) error {
-			out, err := r.run(ctx, "a2a-post", o.a2a, a2aPostArgs(o, text)...)
+			out, err := r.runStderr(ctx, "a2a-post", o.a2a, a2aPostArgs(o, text)...)
 			if errors.Is(err, errOutputIncomplete) {
 				return nil // the post outcome is the exit status; its output is not an observation
 			}
@@ -153,18 +153,28 @@ func a2aPostArgs(o options, text string) []string {
 	return []string{"--as", o.as, "post", o.room, "--topic", o.topic, "--kind", "notice", "--to", o.to, text}
 }
 
-// refusalLine is the first non-empty line of a failed post's output, at most 200 characters, so the
-// log says why a post was refused and not only its exit status.
-func refusalLine(out string) string {
-	for _, l := range strings.Split(out, "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			if r := []rune(l); len(r) > 200 {
-				l = string(r[:200])
-			}
-			return l
+// refusalLine picks the cause of a refused post from its stderr, at most 200 characters, so the
+// log says why a post was refused and not only its exit status. a2a prints its error last, after
+// any "a2a: warning" advisories, so the last line that is not an advisory is the cause; when every
+// line is an advisory, the last one is kept.
+func refusalLine(stderr string) string {
+	var last, cause string
+	for _, l := range strings.Split(stderr, "\n") {
+		if l = strings.TrimSpace(l); l == "" {
+			continue
+		}
+		last = l
+		if !strings.HasPrefix(l, "a2a: warning") {
+			cause = l
 		}
 	}
-	return ""
+	if cause == "" {
+		cause = last
+	}
+	if r := []rune(cause); len(r) > 200 {
+		cause = string(r[:200])
+	}
+	return cause
 }
 
 func parseLaunchctl(out string) (serviceState, error) {

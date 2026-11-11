@@ -1362,6 +1362,71 @@ func TestPostArgsMeetA2APostContract(t *testing.T) {
 	}
 }
 
+// A refused post logs the actual cause: an a2a advisory printed before the refusal does not replace
+// it, and nothing the child writes to stdout reaches the error. Positive control: the refusal text
+// itself is present. Limit: stand-in children, not the real a2a binary.
+func TestPostRefusalKeepsCauseNotAdvisoryOrStdout(t *testing.T) {
+	dir := t.TempDir()
+	for name, c := range map[string]struct {
+		body      string
+		want      string
+		forbidden []string
+	}{
+		"advisory then refusal": {
+			body:      "echo 'a2a: warning [LOCAL_RECIPIENT]: --to shorthand resolves on selected server' >&2\necho 'a2a: send refused: forbidden' >&2\nexit 1\n",
+			want:      "a2a: send refused: forbidden",
+			forbidden: []string{"LOCAL_RECIPIENT"},
+		},
+		"stdout before stderr": {
+			body:      "echo STDOUT-SENTINEL\necho 'a2a: send refused: forbidden' >&2\nexit 1\n",
+			want:      "a2a: send refused: forbidden",
+			forbidden: []string{"STDOUT-SENTINEL"},
+		},
+		"stdout only": {
+			body:      "echo STDOUT-SENTINEL\nexit 1\n",
+			want:      "exit status 1",
+			forbidden: []string{"STDOUT-SENTINEL"},
+		},
+	} {
+		bin := filepath.Join(dir, strings.ReplaceAll(name, " ", "-"))
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+c.body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sys := liveSystem(options{a2a: bin, as: "me", room: "!room", topic: "t", to: "@m:x"}, "/usr/bin/true")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := sys.post(ctx, "notice")
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err=%v, want %q", name, err, c.want)
+			continue
+		}
+		for _, f := range c.forbidden {
+			if strings.Contains(err.Error(), f) {
+				t.Errorf("%s: err carries %q: %v", name, f, err)
+			}
+		}
+	}
+}
+
+// refusalLine keeps the last non-advisory line, falls back to the last advisory when that is all
+// there is, ignores blank lines and bounds the result to 200 characters without splitting a rune.
+func TestRefusalLine(t *testing.T) {
+	long := strings.Repeat("ж", 250)
+	for _, c := range []struct{ in, want string }{
+		{"", ""},
+		{"\n  \n", ""},
+		{"a2a: refused\n", "a2a: refused"},
+		{"a2a: warning [X]: a\na2a: refused\n\n", "a2a: refused"},
+		{"a2a: refused\na2a: warning [X]: late\n", "a2a: refused"},
+		{"a2a: warning [X]: only\n", "a2a: warning [X]: only"},
+		{long, strings.Repeat("ж", 200)},
+	} {
+		if got := refusalLine(c.in); got != c.want {
+			t.Errorf("refusalLine(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // Output beyond the bound is kept bounded in memory, discarded beyond it, never stored on disk, and
 // reported as an incomplete observation rather than a truncated sample.
 func TestRunnerOutputBound(t *testing.T) {

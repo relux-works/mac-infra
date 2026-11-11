@@ -28,10 +28,20 @@ func newRunner() *runner {
 	return &runner{inflight: map[string]bool{}, start: func(cmd *exec.Cmd) error { return cmd.Start() }}
 }
 
-// run executes bin with args under key. It returns at the deadline even while the child is still
-// being launched; a timed-out child is killed as soon as it exists, and its slot stays taken until
-// it is gone.
+// run executes bin with args under key and returns its combined stdout and stderr. It returns at
+// the deadline even while the child is still being launched; a timed-out child is killed as soon as
+// it exists, and its slot stays taken until it is gone.
 func (r *runner) run(ctx context.Context, key, bin string, args ...string) (string, error) {
+	return r.exec(ctx, key, false, bin, args)
+}
+
+// runStderr is run with only the child's stderr collected; its stdout goes to the null device, so
+// nothing the child prints there can reach the caller or a log.
+func (r *runner) runStderr(ctx context.Context, key, bin string, args ...string) (string, error) {
+	return r.exec(ctx, key, true, bin, args)
+}
+
+func (r *runner) exec(ctx context.Context, key string, stderrOnly bool, bin string, args []string) (string, error) {
 	r.mu.Lock()
 	if r.inflight[key] {
 		r.mu.Unlock()
@@ -57,6 +67,9 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 		return "", err
 	}
 	cmd.Stdout, cmd.Stderr = pw, pw
+	if stderrOnly {
+		cmd.Stdout = nil // os/exec connects a nil Stdout to the null device
+	}
 	col := newCollector(pr)
 
 	exited := make(chan struct{}) // closed once the child's exit has been observed
