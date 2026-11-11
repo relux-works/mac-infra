@@ -78,10 +78,10 @@ func writeDegradedFlag(path string, f degradedFlag) error {
 	return nil
 }
 
-// removeDegradedFlag removes the flag only when it is a regular file; a symlink or any other kind
-// of entry at the flag name is refused and left in place. The entry is first moved, exclusively, to
-// a private quarantine name and checked there, so an entry swapped in after the first check is
-// never unlinked: it is moved back to the flag name.
+// removeDegradedFlag removes the entry at the flag name with one unlinkat relative to the anchored
+// directory descriptor. unlinkat never follows a symlink: a symlink at the flag name is removed as
+// an entry and its target is never touched; a directory there is refused by the kernel. There is
+// no separate check before the unlink, so there is no check/use gap at the leaf.
 func removeDegradedFlag(path string) error {
 	dirfd, name, err := openFlagDir(path, false)
 	if errors.Is(err, os.ErrNotExist) {
@@ -91,37 +91,11 @@ func removeDegradedFlag(path string) error {
 		return err
 	}
 	defer unix.Close(dirfd)
-	var st unix.Stat_t
-	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return nil
-		}
-		return err
+	if err := unix.Unlinkat(dirfd, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("flag removal: %w", err)
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		return fmt.Errorf("flag entry %s is not a regular file; left in place", name)
-	}
-	if flagLeafHook != nil {
-		flagLeafHook()
-	}
-	q := fmt.Sprintf(".%s.removing-%d-%d", name, os.Getpid(), time.Now().UnixNano())
-	if err := unix.RenameatxNp(dirfd, name, dirfd, q, unix.RENAME_EXCL); err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return nil
-		}
-		return fmt.Errorf("flag quarantine: %w", err)
-	}
-	if err := unix.Fstatat(dirfd, q, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil && st.Mode&unix.S_IFMT == unix.S_IFREG {
-		return unix.Unlinkat(dirfd, q, 0)
-	}
-	if err := unix.RenameatxNp(dirfd, q, dirfd, name, unix.RENAME_EXCL); err != nil {
-		return fmt.Errorf("flag entry %s changed during removal and could not be moved back from %s: %w", name, q, err)
-	}
-	return fmt.Errorf("flag entry %s changed during removal; left in place", name)
+	return nil
 }
-
-// flagLeafHook lets tests swap the flag entry between its check and its removal.
-var flagLeafHook func()
 
 // flagPresentAnchored reports whether the flag is present as a regular file, looked up through the
 // anchored directory without following a final symlink. A dangling or any other symlink is not the

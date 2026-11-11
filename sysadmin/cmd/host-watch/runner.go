@@ -59,6 +59,7 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 	cmd.Stdout, cmd.Stderr = pw, pw
 	col := newCollector(pr)
 
+	exited := make(chan struct{}) // closed once the child's exit has been observed
 	var pmu sync.Mutex
 	var proc *os.Process
 	abandoned := false
@@ -83,6 +84,7 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 			_ = proc.Kill()
 		}
 		werr := cmd.Wait()
+		close(exited)
 		collected, complete := col.finish(drainAfterExit)
 		pr.Close()
 		if werr == nil && !complete {
@@ -97,6 +99,17 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 		}
 		return string(res.out), nil
 	case <-ctx.Done():
+		select {
+		case <-exited:
+			// The exit is already observed: the deadline cannot turn it into a failure. Only the
+			// bounded output drain remains.
+			res := <-done
+			if res.err != nil {
+				return string(res.out), fmt.Errorf("%s: %w", filepath.Base(bin), res.err)
+			}
+			return string(res.out), nil
+		default:
+		}
 		pmu.Lock()
 		abandoned = true
 		p := proc
@@ -122,6 +135,7 @@ type collector struct {
 	mu       sync.Mutex
 	buf      []byte
 	overflow bool
+	readErr  error // the error that ended reading; complete only when it is io.EOF
 	eof      chan struct{}
 }
 
@@ -147,6 +161,9 @@ func newCollector(r io.Reader) *collector {
 				c.mu.Unlock()
 			}
 			if err != nil {
+				c.mu.Lock()
+				c.readErr = err
+				c.mu.Unlock()
 				return
 			}
 		}
@@ -165,7 +182,7 @@ func (c *collector) finish(d time.Duration) ([]byte, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]byte(nil), c.buf...), eof && !c.overflow
+	return append([]byte(nil), c.buf...), eof && !c.overflow && errors.Is(c.readErr, io.EOF)
 }
 
 // busy reports whether a child of this kind is still alive.

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -418,32 +419,25 @@ func TestJudgeProbe(t *testing.T) {
 	}
 }
 
-// At most one post is outstanding; a failed post keeps its entries; every attempt is counted.
-func TestSinglePostOutstandingAndRetry(t *testing.T) {
+// A failed post keeps its entries pending and they are retried; every attempt is counted, and each
+// alert is delivered once after the post recovers.
+func TestFailedPostRetried(t *testing.T) {
 	f := newFake()
-	f.postHang = make(chan struct{})
 	w := newTestWatcher(t, f)
 	at := warm(t, w, t0)
-	f.set(func(f *fake) { f.disk = 4 })
-	if err := w.tick(at.Add(15 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
+	f.set(func(f *fake) { f.disk = 4; f.postErr = errors.New("a2a failed") })
+	step(t, w, at.Add(15*time.Second))
 	f.set(func(f *fake) { f.fsev = "fseventsd watchdog LaunchAgent is disabled" })
-	if err := w.tick(at.Add(30 * time.Second)); err != nil { // the first post still hangs
-		t.Fatal(err)
+	step(t, w, at.Add(30*time.Second))
+	if f.attempts != 2 || len(f.posts) != 0 {
+		t.Fatalf("attempts=%d posts=%v", f.attempts, f.posts)
 	}
-	f.set(func(f *fake) { f.postErr = errors.New("a2a failed") })
-	close(f.postHang)
-	w.wg.Wait()
-	if f.attempts != 1 {
-		t.Fatalf("second post started while one was outstanding: %d", f.attempts)
-	}
-	f.set(func(f *fake) { f.postHang, f.postErr = nil, nil })
+	f.set(func(f *fake) { f.postErr = nil })
 	step(t, w, at.Add(45*time.Second))
 	step(t, w, at.Add(60*time.Second))
-	all := strings.Join(f.posts, "\n")
-	if strings.Count(all, "disk.free") != 1 || strings.Count(all, "fseventsd.watchdog") != 1 || f.attempts != 2 {
-		t.Fatalf("attempts=%d posts=%v", f.attempts, f.posts)
+	got := deliveries(f.posts)
+	if got["1"] != 1 || got["2"] != 1 || f.attempts != 3 {
+		t.Fatalf("attempts=%d deliveries=%v", f.attempts, got)
 	}
 }
 
@@ -1024,7 +1018,8 @@ func TestFlagSameInodeSwap(t *testing.T) {
 }
 
 // A symlink at the flag name (dangling or not) is not the flag: presence matches a consumer's
-// `test -e` for a dangling link, and removal refuses it and leaves it in place.
+// `test -e` for a dangling link. Removal unlinks the entry without following it, so the link goes
+// and its target is never touched.
 func TestFlagLeafSymlink(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1038,16 +1033,29 @@ func TestFlagLeafSymlink(t *testing.T) {
 	if flagPresentAnchored(canonical) {
 		t.Fatal("dangling leaf symlink counted as the flag")
 	}
-	if err := removeDegradedFlag(canonical); err == nil {
-		t.Fatal("removal accepted a leaf symlink")
+	target := filepath.Join(home, "target")
+	if err := os.WriteFile(target, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Lstat(canonical); err != nil {
-		t.Fatal("leaf symlink was removed")
-	}
-	// Positive control: a regular flag file is present and removable.
 	if err := os.Remove(canonical); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(target, canonical); err != nil {
+		t.Fatal(err)
+	}
+	if flagPresentAnchored(canonical) {
+		t.Fatal("leaf symlink to a regular file counted as the flag")
+	}
+	if err := removeDegradedFlag(canonical); err != nil {
+		t.Fatalf("removal of a leaf symlink: %v", err)
+	}
+	if _, err := os.Lstat(canonical); err == nil {
+		t.Fatal("leaf symlink not removed")
+	}
+	if raw, _ := os.ReadFile(target); string(raw) != "keep" {
+		t.Fatal("symlink target touched")
+	}
+	// Positive control: a regular flag file is present and removable.
 	if err := writeDegradedFlag(canonical, degradedFlag{Reason: "r", Since: "s", HostWatchPID: 1}); err != nil || !flagPresentAnchored(canonical) {
 		t.Fatalf("regular flag not present: %v", err)
 	}
@@ -1064,7 +1072,7 @@ func TestSaveDoesNotRewriteCallerSlice(t *testing.T) {
 	if err := ensurePrivateDir(w.o.stateDir); err != nil {
 		t.Fatal(err)
 	}
-	s := state{Acked: 1, Pending: []alert{{Seq: 1, Key: "acked"}, {Seq: 2, Key: "unsent"}}}
+	s := state{Version: stateVersion, Acked: 1, Pending: []alert{{Seq: 1, Key: "acked"}, {Seq: 2, Key: "unsent"}}}
 	if err := w.save(s); err != nil {
 		t.Fatal(err)
 	}
@@ -1123,20 +1131,53 @@ func TestDeliveryInvariantRestartAtEachStep(t *testing.T) {
 			w := newTestWatcher(t, f)
 			at := warm(t, w, t0)
 			f.set(func(f *fake) { f.disk = 4 })
-			if err := w.tick(at.Add(15 * time.Second)); err != nil { // in-flight recorded, send starts
-				t.Fatal(err)
-			}
-			if stepName != "before-send" {
-				w.wg.Wait()
+			if stepName == "before-send" {
+				// The old process hangs inside its post after recording the batch in flight.
+				hung := make(chan struct{})
+				go func() { _ = w.tick(at.Add(15 * time.Second)); close(hung) }()
+				for {
+					f.mu.Lock()
+					a := f.attempts
+					f.mu.Unlock()
+					if a > 0 {
+						break
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				defer func() { close(f.postHang); <-hung }()
+			} else {
+				if stepName == "sent-not-recorded" {
+					// The post succeeds, then the save that records it fails (as if the process died).
+					w.beforeSave = func() error {
+						f.mu.Lock()
+						defer f.mu.Unlock()
+						if f.attempts > 0 {
+							return errors.New("died before recording")
+						}
+						return nil
+					}
+				}
+				err := w.tick(at.Add(15 * time.Second))
+				if (err != nil) != (stepName == "sent-not-recorded") {
+					t.Fatalf("tick: %v", err)
+				}
+				w.beforeSave = nil
 			}
 			if stepName == "recorded" {
 				step(t, w, at.Add(30*time.Second)) // the result is applied and saved
 			}
 			// Restart: a new process from the saved state, without the old sender.
-			if stepName == "before-send" {
-				f.set(func(f *fake) { f.postHang, f.postErr = nil, nil })
-			}
 			re := newWatcher(w.o, f.system())
+			if stepName == "before-send" {
+				sys := f.system()
+				sys.post = func(ctx context.Context, text string) error { // the new process posts normally
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					f.posts = append(f.posts, text)
+					return nil
+				}
+				re = newWatcher(w.o, sys)
+			}
 			for i := 3; i <= 6; i++ {
 				step(t, re, at.Add(time.Duration(i)*15*time.Second))
 			}
@@ -1285,37 +1326,6 @@ func TestRunnerOutputBound(t *testing.T) {
 	}
 }
 
-// A symlink swapped in at the flag name between the regular-file check and the removal is never
-// unlinked: it is moved back and left in place, and its target is untouched.
-func TestFlagLeafSwapDuringRemoval(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	canonical, _ := canonicalFlagPath()
-	if err := writeDegradedFlag(canonical, degradedFlag{Reason: "r", Since: "s", HostWatchPID: 1}); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(home, "target")
-	if err := os.WriteFile(target, []byte("keep"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	flagLeafHook = func() {
-		_ = os.Remove(canonical)
-		_ = os.Symlink(target, canonical)
-	}
-	err := removeDegradedFlag(canonical)
-	flagLeafHook = nil
-	if err == nil {
-		t.Fatal("removal reported success after the entry was swapped")
-	}
-	fi, lerr := os.Lstat(canonical)
-	if lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("swapped symlink not left in place: %v", lerr)
-	}
-	if raw, _ := os.ReadFile(target); string(raw) != "keep" {
-		t.Fatal("symlink target changed")
-	}
-}
-
 // An event-log failure never loses a notice: with events.jsonl obstructed, the alert is still
 // queued and delivered.
 func TestEventLogFailureKeepsNotice(t *testing.T) {
@@ -1349,5 +1359,103 @@ func TestNoticeLinesCarryID(t *testing.T) {
 				t.Fatalf("line without delivery id: %q", line)
 			}
 		}
+	}
+}
+
+// Only the current state format is read: a file without the current version, with another
+// version, or with unknown fields is refused; there is no migration.
+func TestStateFormatStrict(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	step(t, w, t0) // writes a current-format state
+	if _, err := w.load(); err != nil {
+		t.Fatalf("current format refused: %v", err)
+	}
+	for name, body := range map[string]string{
+		"no version":    `{"seen":{},"pending":[{"at":"x","key":"k","text":"t"}]}`,
+		"other version": `{"version":2,"seen":{}}`,
+		"unknown field": `{"version":1,"acked_file":"500"}`,
+	} {
+		if err := atomicWrite(w.statePath(), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.tick(t0.Add(time.Minute)); err == nil {
+			t.Fatalf("%s: state accepted", name)
+		}
+	}
+}
+
+// An event is logged only after the queue holding it is committed: a failed save logs nothing.
+func TestEventLoggedOnlyAfterCommit(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	f.set(func(f *fake) { f.disk = 4 })
+	w.beforeSave = func() error { return errors.New("disk error") }
+	if err := w.tick(at.Add(15 * time.Second)); err == nil {
+		t.Fatal("injected save failure not reported")
+	}
+	w.beforeSave = nil
+	if raw, err := os.ReadFile(w.eventsPath()); err == nil && strings.Contains(string(raw), "disk.free") {
+		t.Fatal("event logged for a queue entry that was never committed")
+	}
+	step(t, w, at.Add(30*time.Second))
+	raw, _ := os.ReadFile(w.eventsPath())
+	if strings.Count(string(raw), `"key":"disk.free"`) != 1 {
+		t.Fatalf("event after commit: %s", raw)
+	}
+}
+
+// A FIFO planted at events.jsonl cannot block the tick: the log open is non-blocking and the
+// notice is still delivered.
+func TestEventLogFIFODoesNotBlock(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	if err := syscall.Mkfifo(w.eventsPath(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.set(func(f *fake) { f.disk = 4 })
+	done := make(chan error, 1)
+	go func() { done <- w.tick(at.Add(15 * time.Second)) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("tick blocked on a FIFO event log")
+	}
+	if !strings.Contains(strings.Join(f.posts, "\n"), "disk.free") {
+		t.Fatalf("notice lost: %v", f.posts)
+	}
+}
+
+// A read error other than EOF ends collection as incomplete output, never as a complete sample.
+func TestCollectorReadErrorIncomplete(t *testing.T) {
+	c := newCollector(errReader{})
+	out, complete := c.finish(time.Second)
+	if complete || len(out) != 2 {
+		t.Fatalf("complete=%v out=%q", complete, out)
+	}
+	c2 := newCollector(strings.NewReader("ok"))
+	if out, complete := c2.finish(time.Second); !complete || string(out) != "ok" {
+		t.Fatalf("positive control: complete=%v out=%q", complete, out)
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read(p []byte) (int, error) { return copy(p, "ab"), errors.New("device error") }
+
+// Once a child's exit is observed, a deadline that fires during the output drain does not turn the
+// exit into a failure: exit 0 stays success with incomplete output.
+func TestExitObservedBeatsDeadline(t *testing.T) {
+	r := newRunner()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, err := r.run(ctx, "a2a-post", "/bin/sh", "-c", "/bin/sleep 6 & exit 0")
+	if errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errOutputIncomplete) {
+		t.Fatalf("observed exit 0 reported as %v", err)
 	}
 }
