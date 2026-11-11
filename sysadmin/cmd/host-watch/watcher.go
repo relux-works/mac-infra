@@ -398,11 +398,10 @@ func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp s
 	} else {
 		setLevel(s, alerts, stamp, "reports.scan", lvUnknown, fmt.Sprintf("a report source did not finish within %s", scanTimeout))
 	}
-	sources := reportSources(w.o.reportsDirs)
-	sort.Strings(sources)
-	for _, src := range sources {
-		key := "reports.source." + src
-		if e, bad := errs[src]; bad {
+	keys := sourceKeys(w.o.reportsDirs)
+	for _, k := range keys {
+		key := "reports.source." + k
+		if e, bad := errs[k]; bad {
 			setLevel(s, alerts, stamp, key, lvUnknown, e.Error())
 		} else {
 			setLevel(s, alerts, stamp, key, lvOK, "")
@@ -410,19 +409,22 @@ func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp s
 	}
 	fresh := map[string][]string{}
 	for _, r := range reports {
-		if s.Seen[r.Name] {
+		// Seen is per configured source: one source (or an alias of it) never marks a name as seen
+		// for another source, so it can never suppress that source's alert.
+		seenKey := r.Key + "/" + r.Name
+		if s.Seen[seenKey] {
 			continue
 		}
-		s.Seen[r.Name] = true
-		if !s.SeededSources[r.Source] {
+		s.Seen[seenKey] = true
+		if !s.SeededSources[r.Key] {
 			continue // first successful scan of this source: history, not news
 		}
 		label := r.Name // classified by file name and source only; report bodies are never read
 		fresh[r.Class] = append(fresh[r.Class], label)
 	}
-	for _, src := range sources {
-		if scanned[src] {
-			s.SeededSources[src] = true
+	for _, k := range keys {
+		if scanned[k] {
+			s.SeededSources[k] = true
 		}
 	}
 	texts := map[string]string{
@@ -690,19 +692,33 @@ func (w *watcher) readOnly() bool { return w.o.dryRun || w.o.once }
 var scanTimeout = observeTimeout
 
 type sourceResult struct {
-	src     string
+	key     string
 	reports []report
 	scanned bool
 	err     error
+}
+
+// sourceKeys names every report source by its configured position, not by its path: source i is
+// "i:<path>". The same directory configured twice, or an alias of it, is simply another source
+// with its own worker, deadline, seen set and first-success seeding. No filesystem comparison.
+func sourceKeys(dirs []string) []string {
+	srcs := reportSources(dirs)
+	keys := make([]string, len(srcs))
+	for i, src := range srcs {
+		keys[i] = fmt.Sprintf("%d:%s", i, src)
+	}
+	return keys
 }
 
 // boundedScan scans every report source separately and concurrently, each with its own deadline
 // and at most one scan outstanding per source. A source that misses its deadline (or is still
 // running from an earlier tick) is reported as an error of that source only; the results of the
 // other sources are returned and still alert. ok is false when any source missed its deadline.
+// Results are ordered by source position, then name.
 func (w *watcher) boundedScan() ([]report, map[string]error, map[string]bool, bool) {
-	sources := reportSources(w.o.reportsDirs)
-	ch := make(chan sourceResult, len(sources))
+	srcs := reportSources(w.o.reportsDirs)
+	keys := sourceKeys(w.o.reportsDirs)
+	ch := make(chan sourceResult, len(srcs))
 	errs := map[string]error{}
 	scanned := map[string]bool{}
 	pending := map[string]bool{}
@@ -710,20 +726,24 @@ func (w *watcher) boundedScan() ([]report, map[string]error, map[string]bool, bo
 	if w.scanBusy == nil {
 		w.scanBusy = map[string]bool{}
 	}
-	for _, src := range sources {
-		if w.scanBusy[src] {
-			errs[src] = fmt.Errorf("scan of %s still running from an earlier tick", src)
+	for i, src := range srcs {
+		key := keys[i]
+		if w.scanBusy[key] {
+			errs[key] = fmt.Errorf("scan of %s still running from an earlier tick", src)
 			continue
 		}
-		w.scanBusy[src] = true
-		pending[src] = true
-		go func(src string) {
-			r, sc, err := w.sys.scanSource(src)
+		w.scanBusy[key] = true
+		pending[key] = true
+		go func(key, src string, retired bool) {
+			r, sc, err := w.sys.scanSource(src, retired)
+			for j := range r {
+				r[j].Key = key
+			}
 			w.mu.Lock()
-			w.scanBusy[src] = false
+			w.scanBusy[key] = false
 			w.mu.Unlock()
-			ch <- sourceResult{src, r, sc, err}
-		}(src)
+			ch <- sourceResult{key, r, sc, err}
+		}(key, src, i%2 == 1)
 	}
 	w.mu.Unlock()
 	ok := len(errs) == 0
@@ -732,21 +752,30 @@ func (w *watcher) boundedScan() ([]report, map[string]error, map[string]bool, bo
 	for len(pending) > 0 {
 		select {
 		case res := <-ch:
-			delete(pending, res.src)
+			delete(pending, res.key)
 			if res.err != nil {
-				errs[res.src] = res.err
+				errs[res.key] = res.err
 				continue
 			}
-			scanned[res.src] = res.scanned
+			scanned[res.key] = res.scanned
 			out = append(out, res.reports...)
 		case <-deadline:
-			for src := range pending {
-				errs[src] = fmt.Errorf("scan of %s did not finish within %s", src, scanTimeout)
+			for key := range pending {
+				errs[key] = fmt.Errorf("scan of %s did not finish within %s", key, scanTimeout)
 			}
 			pending = nil
 			ok = false
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	pos := map[string]int{}
+	for i, k := range keys {
+		pos[k] = i
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if pos[out[i].Key] != pos[out[j].Key] {
+			return pos[out[i].Key] < pos[out[j].Key]
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out, errs, scanned, ok
 }

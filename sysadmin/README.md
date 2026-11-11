@@ -66,7 +66,7 @@ Every input is an explicit flag; there are no defaults. `--once` is read-only: o
   --interval 15s --probe-every 60s --post-timeout 20s --clear-after 10m --notify
 ```
 
-Install it as a user LaunchAgent, `works.relux.sysadmin.host-watch`, with `RunAtLoad`, `KeepAlive`, `ProcessType Background` and the arguments above. Give it `A2A_CONFIG_DIR` for the posting identity. `--reports-dirs` must not overlap: the same directory twice (after resolving spellings and symlinks), or one directory that is another's `Retired`, is refused with exit 2, because each directory already scans its own `Retired`. Timing flags are bounded: `--interval` 1 s–60 s, `--probe-every` from `--interval` to 10 min, `--post-timeout` 1 s–60 s, `--clear-after` 10 min–24 h. `--degraded-flag` must be the contract path.
+Install it as a user LaunchAgent, `works.relux.sysadmin.host-watch`, with `RunAtLoad`, `KeepAlive`, `ProcessType Background` and the arguments above. Give it `A2A_CONFIG_DIR` for the posting identity. Validation is syntactic and never touches the filesystem. Report sources are identified by their position in `--reports-dirs` (each directory and its `Retired`), not by path: the same directory listed twice, or an alias of it, is simply another source with its own scan, deadline and history, and can at most produce a duplicate notice for the same report (delivery is at least once). Timing flags are bounded: `--interval` 1 s–60 s, `--probe-every` from `--interval` to 10 min, `--post-timeout` 1 s–60 s, `--clear-after` 10 min–24 h. `--degraded-flag` must be the contract path.
 
 ### Rollback
 

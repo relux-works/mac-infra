@@ -27,7 +27,7 @@ const (
 // system is every observation and side channel host-watch uses; tests replace it.
 type system struct {
 	syspolicy   func(ctx context.Context) (serviceState, error)
-	scanSource  func(src string) (reports []report, scanned bool, err error) // one report source
+	scanSource  func(src string, retired bool) (reports []report, scanned bool, err error) // one report source
 	ps          func(ctx context.Context) (string, error)
 	pressure    func(ctx context.Context) (int, error)
 	swap        func(ctx context.Context) (used, total float64, err error)
@@ -51,8 +51,8 @@ func liveSystem(o options, self string) system {
 			}
 			return parseLaunchctl(out)
 		},
-		scanSource: func(src string) ([]report, bool, error) {
-			return scanReportSource(src, isRetiredSource(o.reportsDirs, src), reportClassesFor(o.toolPrefixes))
+		scanSource: func(src string, retired bool) ([]report, bool, error) {
+			return scanReportSource(src, retired, reportClassesFor(o.toolPrefixes))
 		},
 		ps: func(ctx context.Context) (string, error) {
 			return r.run(ctx, "ps", psPath, "-axo", "pid=,etime=,rss=,state=,comm=")
@@ -201,6 +201,7 @@ func parseSwap(out string) (float64, float64, error) {
 // report is one diagnostic report file, its class and the configured directory it came from.
 type report struct {
 	Name, Path, Class, Source string
+	Key                       string // the configured source position and path, see sourceKeys
 }
 
 type reportClass struct {
@@ -233,16 +234,6 @@ func reportSources(dirs []string) []string {
 		out = append(out, base, filepath.Join(base, "Retired"))
 	}
 	return out
-}
-
-// isRetiredSource tells whether src is the Retired subdirectory of a configured directory.
-func isRetiredSource(dirs []string, src string) bool {
-	for _, d := range dirs {
-		if filepath.Join(d, "Retired") == src {
-			return true
-		}
-	}
-	return false
 }
 
 // scanReportSource scans one source. It reports whether the source was actually enumerated: a

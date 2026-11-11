@@ -125,9 +125,6 @@ func (o options) validate() error {
 			return errors.New("paths must be absolute: " + p)
 		}
 	}
-	if err := checkDistinctSources(o.reportsDirs); err != nil {
-		return err
-	}
 	canonical, err := canonicalFlagPath()
 	if err != nil {
 		return err
@@ -154,33 +151,6 @@ func (o options) validateBounds() error {
 	} {
 		if b.d < b.lo || b.d > b.hi {
 			return fmt.Errorf("--%s %s outside [%s, %s]", b.name, b.d, b.lo, b.hi)
-		}
-	}
-	return nil
-}
-
-// canonDir resolves a configured directory for comparison: Clean, then EvalSymlinks when the path
-// exists (a missing directory is compared by its cleaned spelling).
-func canonDir(p string) string {
-	c := filepath.Clean(p)
-	if r, err := filepath.EvalSymlinks(c); err == nil {
-		return r
-	}
-	return c
-}
-
-// checkDistinctSources refuses overlapping report directories: the same directory twice, or one
-// directory that is another's Retired (each directory already scans its own Retired). Every report
-// source is then scanned exactly once.
-func checkDistinctSources(dirs []string) error {
-	owner := map[string]string{} // canonical source -> configured spelling that produces it
-	for _, d := range dirs {
-		base := canonDir(d)
-		for _, src := range []string{base, canonDir(filepath.Join(d, "Retired"))} {
-			if prev, dup := owner[src]; dup {
-				return fmt.Errorf("--reports-dirs overlap: %s and %s both scan %s", prev, d, src)
-			}
-			owner[src] = d
 		}
 	}
 	return nil

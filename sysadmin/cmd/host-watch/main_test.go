@@ -112,7 +112,7 @@ type fake struct {
 func (f *fake) system() system {
 	return system{
 		syspolicy: func(context.Context) (serviceState, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.svc, f.svcErr },
-		scanSource: func(src string) ([]report, bool, error) {
+		scanSource: func(src string, retired bool) ([]report, bool, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			if e := f.repErrs[src]; e != nil {
@@ -1636,7 +1636,7 @@ func TestReportScanDeadline(t *testing.T) {
 		calls := 0
 		sys := f.system()
 		inner := sys.scanSource
-		sys.scanSource = func(src string) ([]report, bool, error) {
+		sys.scanSource = func(src string, retired bool) ([]report, bool, error) {
 			if src == "/user-reports" {
 				f.mu.Lock()
 				calls++
@@ -1645,7 +1645,7 @@ func TestReportScanDeadline(t *testing.T) {
 					<-release
 				}
 			}
-			return inner(src)
+			return inner(src, retired)
 		}
 		w.sys = sys
 		step(t, w, at.Add(o.interval))
@@ -1675,11 +1675,11 @@ func TestStalledSourceKeepsOtherAlerts(t *testing.T) {
 	defer close(release)
 	sys := f.system()
 	inner := sys.scanSource
-	sys.scanSource = func(src string) ([]report, bool, error) {
+	sys.scanSource = func(src string, retired bool) ([]report, bool, error) {
 		if src == "/user-reports" {
 			<-release
 		}
-		return inner(src)
+		return inner(src, retired)
 	}
 	w.sys = sys
 	f.set(func(f *fake) {
@@ -1690,7 +1690,7 @@ func TestStalledSourceKeepsOtherAlerts(t *testing.T) {
 		t.Fatalf("healthy source's report hidden by a stalled source: notes=%v flag=%v", f.notes, f.flag)
 	}
 	s, _ := w.load()
-	if s.Levels["reports.source./user-reports"] != lvUnknown || s.Levels["reports.source./sys-reports"] != lvOK {
+	if s.Levels["reports.source.2:/user-reports"] != lvUnknown || s.Levels["reports.source.0:/sys-reports"] != lvOK {
 		t.Fatalf("per-source levels: %v", s.Levels)
 	}
 }
@@ -1740,55 +1740,87 @@ func TestToolReportAlertsByNameOnly(t *testing.T) {
 	}
 }
 
-// Overlapping report directories are refused at validation: the same directory twice (also via a
-// symlink alias or another spelling), and a directory that is another's Retired. Two distinct
-// directories are accepted and yield unique sources. The control shows that validation without the
-// overlap check accepts every refused form.
-func TestReportDirsMustNotOverlap(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	canonical, _ := canonicalFlagPath()
-	a := filepath.Join(home, "a")
-	b := filepath.Join(home, "b")
-	for _, d := range []string{filepath.Join(a, "Retired"), b} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
+// The same directory configured twice is just two sources: both are scanned every tick, the new
+// report alerts and degrades, the notice is delivered, and recovery completes.
+func TestSameDirTwiceDeliversAndRecovers(t *testing.T) {
+	f := newFake()
+	o := testOptions(t)
+	o.reportsDirs = []string{"/sys-reports", "/sys-reports"}
+	w := newWatcher(o, f.system())
+	at := warm(t, w, t0)
+	f.set(func(f *fake) {
+		f.reports = []report{{Name: "syspolicyd-2026-11-11-030000.ips", Class: "syspolicyd", Source: "/sys-reports"}}
+	})
+	step(t, w, at.Add(15*time.Second))
+	if f.flag == nil {
+		t.Fatal("new report in a twice-configured dir did not degrade")
 	}
-	alias := filepath.Join(home, "alias-a")
-	if err := os.Symlink(a, alias); err != nil {
+	for i := 2; i <= 50; i++ {
+		step(t, w, at.Add(time.Duration(i)*15*time.Second))
+	}
+	if f.flag != nil {
+		t.Fatal("recovery never completed with a twice-configured dir")
+	}
+	if !strings.Contains(strings.Join(f.posts, "\n"), "syspolicyd-2026-11-11-030000.ips") {
+		t.Fatalf("notice not delivered: %v", f.posts)
+	}
+}
+
+// An alias that appears after seeding is its own source: its first enumeration seeds only itself,
+// and the original source still alerts on a new syspolicyd report seen through both.
+func TestAliasAfterSeedingDoesNotSuppress(t *testing.T) {
+	f := newFake()
+	f.absent = map[string]bool{"/alias": true}
+	o := testOptions(t)
+	o.reportsDirs = []string{"/alias", "/sys-reports"} // the alias is processed first
+	w := newWatcher(o, f.system())
+	at := warm(t, w, t0)
+	name := "syspolicyd-2026-11-11-030500.ips"
+	f.set(func(f *fake) {
+		f.absent = nil
+		f.reports = []report{
+			{Name: name, Class: "syspolicyd", Source: "/alias"},
+			{Name: name, Class: "syspolicyd", Source: "/sys-reports"},
+		}
+	})
+	step(t, w, at.Add(15*time.Second))
+	if !strings.Contains(strings.Join(f.notes, "\n"), name) || f.flag == nil {
+		t.Fatalf("a new alias suppressed the original source's alert: notes=%v flag=%v", f.notes, f.flag)
+	}
+}
+
+// Validation is syntactic: duplicate and aliased directories are accepted without any filesystem
+// lookup. A source whose lookup stalls does not delay the tick or its heartbeat beyond the scan
+// deadline.
+func TestStalledLookupDoesNotDelayStartup(t *testing.T) {
+	canonical, _ := canonicalFlagPath()
+	o := options{reportsDirs: []string{"/r", "/r", "/r/Retired"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
+	if err := o.validate(); err != nil {
+		t.Fatalf("syntactic validation refused duplicates: %v", err)
+	}
+	old := scanTimeout
+	scanTimeout = 50 * time.Millisecond
+	defer func() { scanTimeout = old }()
+	f := newFake()
+	release := make(chan struct{})
+	defer close(release)
+	sys := f.system()
+	inner := sys.scanSource
+	sys.scanSource = func(src string, retired bool) ([]report, bool, error) {
+		if src == "/user-reports" {
+			<-release
+		}
+		return inner(src, retired)
+	}
+	w := newWatcher(testOptions(t), sys)
+	t1 := time.Now()
+	if err := w.tick(t0); err != nil {
 		t.Fatal(err)
 	}
-	base := options{toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
-	refused := map[string][]string{
-		"same dir twice":       {a, a},
-		"other spelling":       {a, a + "/./"},
-		"symlink alias":        {a, alias},
-		"dir is other Retired": {a, filepath.Join(a, "Retired")},
-		"Retired first":        {filepath.Join(a, "Retired"), a},
+	if time.Since(t1) > 2*time.Second {
+		t.Fatalf("a stalled source delayed the first tick by %s", time.Since(t1))
 	}
-	for name, dirs := range refused {
-		o := base
-		o.reportsDirs = dirs
-		if err := o.validate(); err == nil || !strings.Contains(err.Error(), "overlap") {
-			t.Errorf("%s: accepted (%v)", name, err)
-		}
-		// Control: the checks other than the overlap check accept this form.
-		if err := checkDistinctSources([]string{dirs[0]}); err != nil {
-			t.Errorf("%s: control single dir refused: %v", name, err)
-		}
-	}
-	ok := base
-	ok.reportsDirs = []string{a, b}
-	if err := ok.validate(); err != nil {
-		t.Fatalf("two distinct dirs refused: %v", err)
-	}
-	seen := map[string]bool{}
-	for _, src := range reportSources(ok.reportsDirs) {
-		c := canonDir(src)
-		if seen[c] {
-			t.Fatalf("reportSources yields %s twice", c)
-		}
-		seen[c] = true
+	if hb, err := os.ReadFile(w.heartbeatPath()); err != nil || !strings.HasPrefix(string(hb), t0.Format(time.RFC3339)) {
+		t.Fatalf("heartbeat not written: %q %v", hb, err)
 	}
 }
