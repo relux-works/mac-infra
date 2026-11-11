@@ -27,7 +27,7 @@ const (
 // system is every observation and side channel host-watch uses; tests replace it.
 type system struct {
 	syspolicy   func(ctx context.Context) (serviceState, error)
-	reports     func() ([]report, map[string]error, map[string]bool)
+	scanSource  func(src string) (reports []report, scanned bool, err error) // one report source
 	ps          func(ctx context.Context) (string, error)
 	pressure    func(ctx context.Context) (int, error)
 	swap        func(ctx context.Context) (used, total float64, err error)
@@ -51,8 +51,8 @@ func liveSystem(o options, self string) system {
 			}
 			return parseLaunchctl(out)
 		},
-		reports: func() ([]report, map[string]error, map[string]bool) {
-			return listReports(o.reportsDirs, o.toolPrefixes)
+		scanSource: func(src string) ([]report, bool, error) {
+			return scanReportSource(src, isRetiredSource(o.reportsDirs, src), reportClassesFor(o.toolPrefixes))
 		},
 		ps: func(ctx context.Context) (string, error) {
 			return r.run(ctx, "ps", psPath, "-axo", "pid=,etime=,rss=,state=,comm=")
@@ -235,46 +235,64 @@ func reportSources(dirs []string) []string {
 	return out
 }
 
-// listReports scans every source. A source that cannot be read, or a Retired path that is not a
-// directory, is reported in the error map; the results of every other source are kept. A missing
-// Retired directory is neither an error nor a scan: scanned lists only sources actually enumerated,
-// so history is seeded on the first real enumeration. Configured directories may be symlinks
-// (aliases); scanning is read-only.
+// isRetiredSource tells whether src is the Retired subdirectory of a configured directory.
+func isRetiredSource(dirs []string, src string) bool {
+	for _, d := range dirs {
+		if filepath.Join(d, "Retired") == src {
+			return true
+		}
+	}
+	return false
+}
+
+// scanReportSource scans one source. It reports whether the source was actually enumerated: a
+// missing Retired directory is neither an error nor a scan. Only regular files are reports, and
+// configured directories may be symlinks (aliases); scanning is read-only and never opens a report.
+func scanReportSource(d string, retired bool, classes []reportClass) ([]report, bool, error) {
+	fi, err := os.Stat(d)
+	if err != nil {
+		if retired && errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if !fi.IsDir() {
+		return nil, false, fmt.Errorf("%s is not a directory", d)
+	}
+	entries, err := os.ReadDir(d)
+	if err != nil {
+		return nil, false, err
+	}
+	var out []report
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue // only regular files are reports: no directories, FIFOs, devices or symlinks
+		}
+		for _, c := range classes {
+			if c.re.MatchString(e.Name()) {
+				out = append(out, report{Name: e.Name(), Path: filepath.Join(d, e.Name()), Class: c.class, Source: d})
+				break
+			}
+		}
+	}
+	return out, true, nil
+}
+
+// listReports scans every source one after the other (used by tests and one-off checks); the
+// watcher scans sources separately, each with its own deadline.
 func listReports(dirs, toolPrefixes []string) ([]report, map[string]error, map[string]bool) {
 	classes := reportClassesFor(toolPrefixes)
 	var out []report
 	errs := map[string]error{}
 	scanned := map[string]bool{}
 	for i, d := range reportSources(dirs) {
-		retired := i%2 == 1
-		fi, err := os.Stat(d)
-		if err != nil {
-			if !(retired && errors.Is(err, os.ErrNotExist)) {
-				errs[d] = err
-			}
-			continue
-		}
-		if !fi.IsDir() {
-			errs[d] = fmt.Errorf("%s is not a directory", d)
-			continue
-		}
-		entries, err := os.ReadDir(d)
+		r, sc, err := scanReportSource(d, i%2 == 1, classes)
 		if err != nil {
 			errs[d] = err
 			continue
 		}
-		scanned[d] = true
-		for _, e := range entries {
-			if !e.Type().IsRegular() {
-				continue // only regular files are reports: no directories, FIFOs, devices or symlinks
-			}
-			for _, c := range classes {
-				if c.re.MatchString(e.Name()) {
-					out = append(out, report{Name: e.Name(), Path: filepath.Join(d, e.Name()), Class: c.class, Source: d})
-					break
-				}
-			}
-		}
+		scanned[d] = sc
+		out = append(out, r...)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, errs, scanned

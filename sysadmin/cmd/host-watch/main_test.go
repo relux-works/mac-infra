@@ -112,20 +112,22 @@ type fake struct {
 func (f *fake) system() system {
 	return system{
 		syspolicy: func(context.Context) (serviceState, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.svc, f.svcErr },
-		reports: func() ([]report, map[string]error, map[string]bool) {
+		scanSource: func(src string) ([]report, bool, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			errs := map[string]error{}
-			for k, v := range f.repErrs {
-				errs[k] = v
+			if e := f.repErrs[src]; e != nil {
+				return nil, false, e
 			}
-			scanned := map[string]bool{}
-			for _, src := range reportSources([]string{"/sys-reports", "/user-reports"}) {
-				if errs[src] == nil && !f.absent[src] {
-					scanned[src] = true
+			if f.absent[src] {
+				return nil, false, nil
+			}
+			var out []report
+			for _, r := range f.reports {
+				if r.Source == src {
+					out = append(out, r)
 				}
 			}
-			return append([]report(nil), f.reports...), errs, scanned
+			return out, true, nil
 		},
 		ps:          func(context.Context) (string, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.ps, f.psErr },
 		pressure:    func(context.Context) (int, error) { return f.pressure, nil },
@@ -1618,9 +1620,9 @@ func TestStalledObservationResetsWindow(t *testing.T) {
 	}
 }
 
-// A report scan that misses its deadline is an unhealthy observation: it resets the recovery
-// window, is reported as unknown, and a still-running scan is not stacked by the next tick. A scan
-// that finishes in time keeps the window.
+// A report source that misses its deadline is an unhealthy observation of that source: it resets
+// the recovery window, the scan is reported as unknown, and a still-running scan of that source is
+// not stacked by the next tick. Sources that finish in time keep the window.
 func TestReportScanDeadline(t *testing.T) {
 	old := scanTimeout
 	scanTimeout = 50 * time.Millisecond
@@ -1633,19 +1635,21 @@ func TestReportScanDeadline(t *testing.T) {
 		release := make(chan struct{})
 		calls := 0
 		sys := f.system()
-		inner := sys.reports
-		sys.reports = func() ([]report, map[string]error, map[string]bool) {
-			f.mu.Lock()
-			calls++
-			f.mu.Unlock()
-			if blocked {
-				<-release
+		inner := sys.scanSource
+		sys.scanSource = func(src string) ([]report, bool, error) {
+			if src == "/user-reports" {
+				f.mu.Lock()
+				calls++
+				f.mu.Unlock()
+				if blocked {
+					<-release
+				}
 			}
-			return inner()
+			return inner(src)
 		}
 		w.sys = sys
 		step(t, w, at.Add(o.interval))
-		step(t, w, at.Add(2*o.interval)) // the first scan is still blocked: no second scan
+		step(t, w, at.Add(2*o.interval)) // the first scan is still blocked: no second scan of it
 		after, _ := w.load()
 		reset := after.HealthySince != before.HealthySince
 		if reset != blocked {
@@ -1655,6 +1659,39 @@ func TestReportScanDeadline(t *testing.T) {
 			t.Fatalf("blocked scan: level=%q calls=%d", after.Levels["reports.scan"], calls)
 		}
 		close(release)
+	}
+}
+
+// One stalled source never hides another source's crash report: with the user directory stalled,
+// a new syspolicyd report in the healthy system directory still alerts and degrades.
+func TestStalledSourceKeepsOtherAlerts(t *testing.T) {
+	old := scanTimeout
+	scanTimeout = 50 * time.Millisecond
+	defer func() { scanTimeout = old }()
+	f := newFake()
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	release := make(chan struct{})
+	defer close(release)
+	sys := f.system()
+	inner := sys.scanSource
+	sys.scanSource = func(src string) ([]report, bool, error) {
+		if src == "/user-reports" {
+			<-release
+		}
+		return inner(src)
+	}
+	w.sys = sys
+	f.set(func(f *fake) {
+		f.reports = []report{{Name: "syspolicyd-2026-11-11-021500.ips", Class: "syspolicyd", Source: "/sys-reports"}}
+	})
+	step(t, w, at.Add(15*time.Second))
+	if !strings.Contains(strings.Join(f.notes, "\n"), "syspolicyd-2026-11-11-021500.ips") || f.flag == nil {
+		t.Fatalf("healthy source's report hidden by a stalled source: notes=%v flag=%v", f.notes, f.flag)
+	}
+	s, _ := w.load()
+	if s.Levels["reports.source./user-reports"] != lvUnknown || s.Levels["reports.source./sys-reports"] != lvOK {
+		t.Fatalf("per-source levels: %v", s.Levels)
 	}
 }
 
