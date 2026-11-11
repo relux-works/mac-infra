@@ -495,6 +495,41 @@ func TestReportSourcesIndependent(t *testing.T) {
 	}
 }
 
+// A report that macOS moves from a configured directory into its Retired subdirectory is the same
+// report: it raises no alert and no exec-degraded flag. Control: a report with a new name that
+// appears in Retired still alerts, and the same name under another configured root (an alias) is
+// still that root's news. Limit: fake sources, not a real macOS retirement.
+func TestRetiredMoveIsNotANewReport(t *testing.T) {
+	f := newFake()
+	f.reports = []report{{Name: "syspolicyd-old.ips", Class: "syspolicyd", Source: "/sys-reports"}}
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	f.set(func(f *fake) {
+		f.reports = []report{{Name: "syspolicyd-old.ips", Class: "syspolicyd", Source: "/sys-reports/Retired"}}
+	})
+	at = at.Add(15 * time.Second)
+	step(t, w, at)
+	if got := strings.Join(f.notes, "\n"); strings.Contains(got, "syspolicyd-old.ips") {
+		t.Fatalf("a move into Retired alerted: %v", f.notes)
+	}
+	if _, err := os.Stat(w.o.flagPath); !os.IsNotExist(err) {
+		t.Fatalf("a move into Retired raised the flag: %v", err)
+	}
+	f.set(func(f *fake) {
+		f.reports = append(f.reports,
+			report{Name: "syspolicyd-new.ips", Class: "syspolicyd", Source: "/sys-reports/Retired"},
+			report{Name: "syspolicyd-old.ips", Class: "syspolicyd", Source: "/user-reports"})
+	})
+	step(t, w, at.Add(15*time.Second))
+	got := strings.Join(f.notes, "\n")
+	if !strings.Contains(got, "syspolicyd-new.ips") {
+		t.Fatalf("a new report in Retired was suppressed: %v", f.notes)
+	}
+	if !strings.Contains(got, "syspolicyd-old.ips") {
+		t.Fatalf("another root's report was suppressed by this root's history: %v", f.notes)
+	}
+}
+
 // Reports of one class alert at most once per throttle window; reports held meanwhile go out with
 // the next alert, none lost or duplicated.
 func TestReportThrottle(t *testing.T) {

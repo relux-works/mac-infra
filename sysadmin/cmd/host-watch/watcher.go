@@ -408,11 +408,15 @@ func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp s
 		}
 	}
 	fresh := map[string][]string{}
+	roots := rootSourceKeys(keys)
 	for _, r := range reports {
-		// Seen is per configured source: one source (or an alias of it) never marks a name as seen
-		// for another source, so it can never suppress that source's alert.
+		// A report is identified by its configured root (one --reports-dirs entry together with its
+		// Retired subdirectory) and its file name: macOS moves old reports into Retired, and the move
+		// is not a new report. Roots stay independent: one configured directory (or an alias of it)
+		// never marks a name as seen for another, so it can never suppress that root's alert.
 		seenKey := r.Key + "/" + r.Name
-		if s.Seen[seenKey] {
+		if seenInRoot(s.Seen, roots[r.Key], r.Name) {
+			s.Seen[seenKey] = true
 			continue
 		}
 		s.Seen[seenKey] = true
@@ -701,6 +705,31 @@ type sourceResult struct {
 // sourceKeys names every report source by its configured position, not by its path: source i is
 // "i:<path>". The same directory configured twice, or an alias of it, is simply another source
 // with its own worker, deadline, seen set and first-success seeding. No filesystem comparison.
+// rootSourceKeys maps every source key to the keys of both sources of its configured root: the
+// directory and its Retired subdirectory, in the order reportSources lists them.
+func rootSourceKeys(keys []string) map[string][]string {
+	roots := make(map[string][]string, len(keys))
+	for i, k := range keys {
+		base := i - i%2
+		if base+1 < len(keys) {
+			roots[k] = []string{keys[base], keys[base+1]}
+		} else {
+			roots[k] = []string{k}
+		}
+	}
+	return roots
+}
+
+// seenInRoot reports whether name was already seen in any source of one root.
+func seenInRoot(seen map[string]bool, rootKeys []string, name string) bool {
+	for _, k := range rootKeys {
+		if seen[k+"/"+name] {
+			return true
+		}
+	}
+	return false
+}
+
 func sourceKeys(dirs []string) []string {
 	srcs := reportSources(dirs)
 	keys := make([]string, len(srcs))
