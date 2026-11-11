@@ -8,7 +8,7 @@ There is exactly one path, with no override:
 
 `$HOME/Library/Application Support/host-health/exec-degraded`
 
-host-watch refuses to start when `--degraded-flag` is anything but this exact string (no other spelling that resolves to it) or when an existing component under the home directory is a symlink. Consumers check only this path. The file is mode 0644, readable by the same user, and is published atomically through an exclusive temporary file and a rename.
+host-watch refuses to start when `--degraded-flag` is anything but this exact string (no other spelling that resolves to it). That check is syntactic; a symlinked component is refused at publication time, when the path is opened. Consumers check only this path. The file is mode 0644, readable by the same user, and is published atomically through an exclusive temporary file and a rename.
 
 ## Format
 

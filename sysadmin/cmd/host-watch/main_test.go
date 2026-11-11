@@ -698,8 +698,10 @@ func TestFlagPathExactAndNoSymlinks(t *testing.T) {
 	if err := os.Symlink(elsewhere, filepath.Join(home, "Library", "Application Support", "host-health")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ok.validate(); err == nil {
-		t.Fatal("symlinked host-health directory accepted")
+	// Validation is syntactic and never looks at the filesystem, so it accepts this; the runtime
+	// publication is what refuses the symlinked component.
+	if err := ok.validate(); err != nil {
+		t.Fatalf("validation looked at the filesystem: %v", err)
 	}
 	if err := writeDegradedFlag(canonical, degradedFlag{Reason: "r", Since: "s", HostWatchPID: 1}); err == nil {
 		t.Fatal("flag written through a symlinked directory")
@@ -800,9 +802,6 @@ func TestFlagSymlinkAfterStartup(t *testing.T) {
 	canonical, err := canonicalFlagPath()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if err := checkNoSymlinks(canonical); err != nil {
-		t.Fatalf("clean home refused: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(home, "Library"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1822,5 +1821,28 @@ func TestStalledLookupDoesNotDelayStartup(t *testing.T) {
 	}
 	if hb, err := os.ReadFile(w.heartbeatPath()); err != nil || !strings.HasPrefix(string(hb), t0.Format(time.RFC3339)) {
 		t.Fatalf("heartbeat not written: %q %v", hb, err)
+	}
+}
+
+// Every configured path must be absolute and already clean, so joining "Retired" cannot change
+// which directory is meant: ".", "..", "//", a trailing "/" and relative paths are refused for
+// report dirs and the other paths; a clean absolute path is accepted.
+func TestPathsMustBeClean(t *testing.T) {
+	canonical, _ := canonicalFlagPath()
+	base := options{reportsDirs: []string{"/r/reports"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
+	if err := base.validate(); err != nil {
+		t.Fatalf("clean absolute path refused: %v", err)
+	}
+	for _, bad := range []string{"/r/./reports", "/r/link/../reports", "//r/reports", "/r//reports", "/r/reports/", "r/reports"} {
+		o := base
+		o.reportsDirs = []string{bad}
+		if err := o.validate(); err == nil {
+			t.Errorf("report dir %q accepted", bad)
+		}
+		o = base
+		o.stateDir = bad
+		if err := o.validate(); err == nil {
+			t.Errorf("state dir %q accepted", bad)
+		}
 	}
 }

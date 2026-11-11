@@ -121,8 +121,11 @@ func (o options) validate() error {
 	}
 	paths := append([]string{o.stateDir, o.flagPath, o.a2a, o.dataVolume}, o.reportsDirs...)
 	for _, p := range paths {
-		if !filepath.IsAbs(p) {
-			return errors.New("paths must be absolute: " + p)
+		// Purely syntactic, no filesystem call: an absolute, already-clean spelling (no ".", "..",
+		// "//" or trailing "/"), so joining "Retired" or any name can never change which
+		// directory is meant before the kernel resolves symlinks.
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
+			return errors.New("paths must be absolute and clean (no \".\", \"..\", \"//\" or trailing \"/\"): " + p)
 		}
 	}
 	canonical, err := canonicalFlagPath()
@@ -131,9 +134,6 @@ func (o options) validate() error {
 	}
 	if o.flagPath != canonical {
 		return fmt.Errorf("--degraded-flag must be exactly the contract path %s; consumers read only that path", canonical)
-	}
-	if err := checkNoSymlinks(canonical); err != nil {
-		return err
 	}
 	return o.validateBounds()
 }
