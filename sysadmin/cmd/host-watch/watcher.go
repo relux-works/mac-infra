@@ -390,7 +390,11 @@ func (w *watcher) tick(now time.Time) error {
 
 // reportChecks scans the report directories and returns true when a new syspolicyd report appeared.
 func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp string) (bool, bool) {
-	reports, errs, scanned, ok := w.boundedScan()
+	seen := make(map[string]bool, len(s.Seen)) // a copy: the scan goroutine may outlive this tick
+	for k, v := range s.Seen {
+		seen[k] = v
+	}
+	reports, errs, scanned, ok := w.boundedScan(seen)
 	if !ok {
 		setLevel(s, alerts, stamp, "reports.scan", lvUnknown, fmt.Sprintf("report scan did not finish within %s", scanTimeout))
 		return false, false
@@ -416,7 +420,7 @@ func (w *watcher) reportChecks(s *state, alerts *[]alert, now time.Time, stamp s
 			continue // first successful scan of this source: history, not news
 		}
 		label := r.Name
-		if r.Class == "tool" && reportIsCodesign(r.Path) {
+		if r.Codesign {
 			label += " (CODESIGNING)"
 		}
 		fresh[r.Class] = append(fresh[r.Class], label)
@@ -698,7 +702,7 @@ type scanResult struct {
 
 // boundedScan runs the report scan with a deadline and at most one scan outstanding: a scan that
 // is still running from an earlier tick counts as a miss without starting another one.
-func (w *watcher) boundedScan() ([]report, map[string]error, map[string]bool, bool) {
+func (w *watcher) boundedScan(seen map[string]bool) ([]report, map[string]error, map[string]bool, bool) {
 	w.mu.Lock()
 	if w.scanBusy {
 		w.mu.Unlock()
@@ -709,6 +713,12 @@ func (w *watcher) boundedScan() ([]report, map[string]error, map[string]bool, bo
 	ch := make(chan scanResult, 1)
 	go func() {
 		r, e, sc := w.sys.reports()
+		// Report bodies are read inside the same deadline: only new host-tool reports are opened.
+		for i := range r {
+			if r[i].Class == "tool" && !seen[r[i].Name] {
+				r[i].Codesign = reportIsCodesign(r[i].Path)
+			}
+		}
 		w.mu.Lock()
 		w.scanBusy = false
 		w.mu.Unlock()

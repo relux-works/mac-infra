@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -201,6 +202,7 @@ func parseSwap(out string) (float64, float64, error) {
 // report is one diagnostic report file, its class and the configured directory it came from.
 type report struct {
 	Name, Path, Class, Source string
+	Codesign                  bool // set by the bounded scan for new host-tool reports
 }
 
 type reportClass struct {
@@ -265,8 +267,8 @@ func listReports(dirs, toolPrefixes []string) ([]report, map[string]error, map[s
 		}
 		scanned[d] = true
 		for _, e := range entries {
-			if e.IsDir() {
-				continue
+			if !e.Type().IsRegular() {
+				continue // only regular files are reports: no directories, FIFOs, devices or symlinks
 			}
 			for _, c := range classes {
 				if c.re.MatchString(e.Name()) {
@@ -280,9 +282,24 @@ func listReports(dirs, toolPrefixes []string) ([]report, map[string]error, map[s
 	return out, errs, scanned
 }
 
-// reportIsCodesign tells whether a crash report records a code-signing termination.
+// maxReportBody bounds how much of a report is read to classify it.
+const maxReportBody = 4 << 20
+
+// reportIsCodesign tells whether a crash report records a code-signing termination. It opens the
+// path without following a symlink and without blocking (a FIFO swapped in after enumeration
+// cannot hang the read), requires a regular file, and reads at most maxReportBody bytes.
 func reportIsCodesign(path string) bool {
-	raw, err := os.ReadFile(path)
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxReportBody))
 	if err != nil {
 		return false
 	}

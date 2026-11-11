@@ -1657,3 +1657,34 @@ func TestReportScanDeadline(t *testing.T) {
 		close(release)
 	}
 }
+
+// A FIFO named like a report is neither enumerated nor able to hang a body read; a regular report
+// with a code-signing termination is still recognized.
+func TestReportFIFOCannotHang(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "mac-firewall-2026-11-11-000000.ips")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	regular := filepath.Join(dir, "mac-firewall-2026-11-11-000001.ips")
+	if err := os.WriteFile(regular, []byte(`{"termination":{"namespace":"CODESIGNING"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := listReports([]string{dir}, []string{"mac-firewall"})
+	if len(got) != 1 || got[0].Path != regular {
+		t.Fatalf("enumerated: %+v", got)
+	}
+	done := make(chan bool, 1)
+	go func() { done <- reportIsCodesign(fifo) }()
+	select {
+	case cs := <-done:
+		if cs {
+			t.Fatal("FIFO classified as a code-signing report")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("body read blocked on a FIFO")
+	}
+	if !reportIsCodesign(regular) {
+		t.Fatal("regular code-signing report not recognized")
+	}
+}
