@@ -60,7 +60,7 @@ Every input is an explicit flag; there are no defaults. `--once` is read-only: o
   --tool-report-prefixes mac-firewall,mac-infra-core,host-watch \
   --state-dir "$HOME/Library/Application Support/host-watch" \
   --degraded-flag "$HOME/Library/Application Support/host-health/exec-degraded" \
-  --a2a "$HOME/.local/bin/a2a" --as AGENT --room ROOM --to RECIPIENTS \
+  --a2a "$HOME/.local/bin/a2a" --as AGENT --room ROOM --topic TOPIC --to RECIPIENTS \
   --data-volume /System/Volumes/Data \
   --fseventsd-watchdog-label works.relux.mac-infra-fseventsd-watchdog \
   --interval 15s --probe-every 60s --post-timeout 20s --clear-after 10m --notify

@@ -113,9 +113,12 @@ func liveSystem(o options, self string) system {
 			return err
 		},
 		post: func(ctx context.Context, text string) error {
-			_, err := r.run(ctx, "a2a-post", o.a2a, "--as", o.as, "post", o.room, "--kind", "notice", "--to", o.to, text)
+			out, err := r.run(ctx, "a2a-post", o.a2a, a2aPostArgs(o, text)...)
 			if errors.Is(err, errOutputIncomplete) {
 				return nil // the post outcome is the exit status; its output is not an observation
+			}
+			if line := refusalLine(out); err != nil && line != "" {
+				return fmt.Errorf("%w: %s", err, line)
 			}
 			return err
 		},
@@ -144,6 +147,26 @@ type serviceState struct {
 
 // parseLaunchctl reads the top-level state, runs and pid of a `launchctl print` service dump.
 // Only top-level keys (one leading tab) count; nested endpoint states are ignored.
+// a2aPostArgs is the argv of one notice. a2a post refuses a message without --topic (or a reply
+// target) as a usage error, so every notice names its topic.
+func a2aPostArgs(o options, text string) []string {
+	return []string{"--as", o.as, "post", o.room, "--topic", o.topic, "--kind", "notice", "--to", o.to, text}
+}
+
+// refusalLine is the first non-empty line of a failed post's output, at most 200 characters, so the
+// log says why a post was refused and not only its exit status.
+func refusalLine(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			if r := []rune(l); len(r) > 200 {
+				l = string(r[:200])
+			}
+			return l
+		}
+	}
+	return ""
+}
+
 func parseLaunchctl(out string) (serviceState, error) {
 	var s serviceState
 	seenState := false

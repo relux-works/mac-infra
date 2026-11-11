@@ -650,7 +650,7 @@ func TestValidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
+	ok := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", topic: "host-watch", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
 	if err := ok.validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -661,6 +661,7 @@ func TestValidate(t *testing.T) {
 		"clear-after below 10m":  func(o *options) { o.clearAfter = time.Second },
 		"probe faster than tick": func(o *options) { o.probeEvery = time.Second },
 		"bad tool prefix":        func(o *options) { o.toolPrefixes = []string{"a|b"} },
+		"missing topic":          func(o *options) { o.topic = "" },
 	} {
 		o := ok
 		mut(&o)
@@ -679,7 +680,7 @@ func TestFlagPathExactAndNoSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
+	ok := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", topic: "host-watch", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
 	if err := ok.validate(); err != nil {
 		t.Fatalf("canonical path refused: %v", err)
 	}
@@ -1314,13 +1315,50 @@ func TestPostIgnoresIncompleteOutput(t *testing.T) {
 		bin     string
 		wantErr bool
 	}{{ok, false}, {bad, true}} {
-		sys := liveSystem(options{a2a: c.bin, as: "x", room: "r", to: "y"}, "/usr/bin/true")
+		sys := liveSystem(options{a2a: c.bin, as: "x", room: "r", topic: "t", to: "y"}, "/usr/bin/true")
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		err := sys.post(ctx, "notice")
 		cancel()
 		if (err != nil) != c.wantErr {
 			t.Fatalf("%s: err=%v", filepath.Base(c.bin), err)
 		}
+	}
+}
+
+// The post argv meets the a2a post contract: a stand-in that refuses like a2a (usage, exit 2) unless
+// the room is the first argument after post and a non-empty --topic follows it accepts the notice
+// and receives the exact text last. Without a topic the same stand-in refuses, and the refusal line
+// reaches the error. Limit: the stand-in models only the topic rule, not the whole a2a parser.
+func TestPostArgsMeetA2APostContract(t *testing.T) {
+	dir := t.TempDir()
+	argv := filepath.Join(dir, "argv")
+	bin := filepath.Join(dir, "a2a")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argv + "\n" +
+		"[ \"$3\" = post ] && [ \"$4\" = '!room' ] && [ \"$5\" = --topic ] && [ -n \"$6\" ] && exit 0\n" +
+		"echo 'a2a: usage: --topic is required unless --re selects a reply target' >&2\nexit 2\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	post := func(topic string) error {
+		sys := liveSystem(options{a2a: bin, as: "me", room: "!room", topic: topic, to: "@m:x"}, "/usr/bin/true")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return sys.post(ctx, "WARN exec.probe: slow")
+	}
+	if err := post("host-watch"); err != nil {
+		t.Fatalf("post with topic refused: %v", err)
+	}
+	got, err := os.ReadFile(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--as\nme\npost\n!room\n--topic\nhost-watch\n--kind\nnotice\n--to\n@m:x\nWARN exec.probe: slow\n"
+	if string(got) != want {
+		t.Fatalf("argv:\n%s\nwant:\n%s", got, want)
+	}
+	err = post("")
+	if err == nil || !strings.Contains(err.Error(), "--topic is required") {
+		t.Fatalf("post without topic: %v", err)
 	}
 }
 
@@ -1793,7 +1831,7 @@ func TestAliasAfterSeedingDoesNotSuppress(t *testing.T) {
 // deadline.
 func TestStalledLookupDoesNotDelayStartup(t *testing.T) {
 	canonical, _ := canonicalFlagPath()
-	o := options{reportsDirs: []string{"/r", "/r", "/r/Retired"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
+	o := options{reportsDirs: []string{"/r", "/r", "/r/Retired"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", topic: "host-watch", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
 	if err := o.validate(); err != nil {
 		t.Fatalf("syntactic validation refused duplicates: %v", err)
 	}
@@ -1829,7 +1867,7 @@ func TestStalledLookupDoesNotDelayStartup(t *testing.T) {
 // report dirs and the other paths; a clean absolute path is accepted.
 func TestPathsMustBeClean(t *testing.T) {
 	canonical, _ := canonicalFlagPath()
-	base := options{reportsDirs: []string{"/r/reports"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
+	base := options{reportsDirs: []string{"/r/reports"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", topic: "host-watch", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
 	if err := base.validate(); err != nil {
 		t.Fatalf("clean absolute path refused: %v", err)
 	}

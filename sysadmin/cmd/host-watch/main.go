@@ -24,7 +24,7 @@ import (
 type options struct {
 	reportsDirs                                   []string
 	toolPrefixes                                  []string
-	stateDir, flagPath, a2a, as, room, to         string
+	stateDir, flagPath, a2a, as, room, topic, to  string
 	dataVolume, fseventsLabel                     string
 	interval, postTimeout, probeEvery, clearAfter time.Duration
 	notify, once, dryRun                          bool
@@ -44,6 +44,7 @@ func main() {
 	flag.StringVar(&o.a2a, "a2a", "", "required: absolute path of the a2a binary")
 	flag.StringVar(&o.as, "as", "", "required: a2a identity to post as")
 	flag.StringVar(&o.room, "room", "", "required: a2a room")
+	flag.StringVar(&o.topic, "topic", "", "required: a2a topic slug or root event id the notices are posted in")
 	flag.StringVar(&o.to, "to", "", "required: comma-separated addressees")
 	flag.StringVar(&o.dataVolume, "data-volume", "", "required: data volume mount point for the free-space check")
 	flag.StringVar(&o.fseventsLabel, "fseventsd-watchdog-label", "", "required: user LaunchAgent label of the fseventsd watchdog")
@@ -98,7 +99,7 @@ func (o options) validate() error {
 	if len(o.toolPrefixes) == 0 {
 		missing = append(missing, "--tool-report-prefixes")
 	}
-	for _, kv := range [][2]string{{"state-dir", o.stateDir}, {"degraded-flag", o.flagPath}, {"a2a", o.a2a}, {"as", o.as}, {"room", o.room}, {"to", o.to}, {"data-volume", o.dataVolume}, {"fseventsd-watchdog-label", o.fseventsLabel}} {
+	for _, kv := range [][2]string{{"state-dir", o.stateDir}, {"degraded-flag", o.flagPath}, {"a2a", o.a2a}, {"as", o.as}, {"room", o.room}, {"topic", o.topic}, {"to", o.to}, {"data-volume", o.dataVolume}, {"fseventsd-watchdog-label", o.fseventsLabel}} {
 		if kv[1] == "" {
 			missing = append(missing, "--"+kv[0])
 		}
