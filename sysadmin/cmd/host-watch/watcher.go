@@ -71,7 +71,7 @@ type state struct {
 	HealthySince  string              `json:"healthy_since,omitempty"`
 	StuckRising   int                 `json:"stuck_rising"`
 	LastStuck     int                 `json:"last_stuck"`
-	LastTick      string              `json:"last_tick,omitempty"`
+	LastTick      string              `json:"last_tick,omitempty"` // end of the last saved tick, RFC 3339 with nanoseconds
 	ClassAlerted  map[string]string   `json:"class_alerted,omitempty"`
 	HeldReports   map[string][]string `json:"held_reports,omitempty"`
 }
@@ -91,14 +91,15 @@ type watcher struct {
 	probeBusy     bool
 	probeLaunchAt time.Time
 	lastProbe     *probeResult
-	stateMu       sync.Mutex   // held by the tick from load to save; the tick alone owns the queue
-	beforeSave    func() error // tests only: inject a storage failure at the durable record
-	mem           *state       // dry-run keeps its state here and never writes the state directory
+	stateMu       sync.Mutex                    // held by the tick from load to save; the tick alone owns the queue
+	beforeSave    func() error                  // tests only: inject a storage failure at the durable record
+	since         func(time.Time) time.Duration // elapsed real time within a tick; tests model long ticks
+	mem           *state                        // dry-run keeps its state here and never writes the state directory
 	wg            sync.WaitGroup
 }
 
 func newWatcher(o options, sys system) *watcher {
-	return &watcher{o: o, sys: sys, pid: os.Getpid()}
+	return &watcher{o: o, sys: sys, pid: os.Getpid(), since: time.Since}
 }
 
 func (w *watcher) statePath() string     { return filepath.Join(w.o.stateDir, "state.json") }
@@ -234,10 +235,11 @@ func (w *watcher) tick(now time.Time) error {
 	s.InFlight = nil
 	// An unobserved gap (sleep, a stopped process, a hung tick) is never counted as health.
 	gap := false
-	if last, err := time.Parse(time.RFC3339, s.LastTick); err == nil && now.Sub(last) > 2*w.o.interval+observeTimeout {
+	// The gap runs from the END of the previous tick to the start of this one: time spent observing
+	// and posting is observed time, never an outage. Full precision on both sides.
+	if last, err := time.Parse(time.RFC3339Nano, s.LastTick); err == nil && now.Sub(last) > 2*w.o.interval+observeTimeout {
 		gap = true
 	}
-	s.LastTick = now.Format(time.RFC3339)
 	stamp := now.Format("15:04:05Z")
 	var alerts []alert
 	execBad := false
@@ -350,6 +352,7 @@ func (w *watcher) tick(now time.Time) error {
 	if postAllowed {
 		batch = w.selectBatch(&s) // records the in-flight span in s before the save
 	}
+	s.LastTick = now.Add(w.since(realStart)).Format(time.RFC3339Nano)
 	if err := w.save(s); err != nil {
 		return err // nothing is logged or sent unless the queue and in-flight record are durable
 	}
@@ -362,6 +365,7 @@ func (w *watcher) tick(now time.Time) error {
 	}
 	if len(batch) > 0 {
 		w.postBatch(&s, batch)
+		s.LastTick = now.Add(w.since(realStart)).Format(time.RFC3339Nano)
 		if err := w.save(s); err != nil {
 			// The in-flight record stays durable; the next tick releases it and sends again.
 			return err
@@ -370,7 +374,7 @@ func (w *watcher) tick(now time.Time) error {
 	w.stateMu.Unlock()
 	locked = false
 	if !w.o.once {
-		w.maybeStartProbe(now.Add(time.Since(realStart)))
+		w.maybeStartProbe(now.Add(w.since(realStart)))
 	}
 	return nil
 }

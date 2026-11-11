@@ -140,11 +140,6 @@ func (o options) validate() error {
 
 // validateBounds enforces the agreed ranges of the timing flags.
 func (o options) validateBounds() error {
-	// A tick holds the queue while it posts: its post plus the output drain must end before the next
-	// tick would count as an unobserved gap, or a timed-out post would reset recovery windows.
-	if o.interval+o.postTimeout+drainAfterExit >= 2*o.interval+observeTimeout {
-		return fmt.Errorf("--post-timeout %s too long for --interval %s: interval + post timeout + %s drain must stay below the %s gap limit", o.postTimeout, o.interval, drainAfterExit, 2*o.interval+observeTimeout)
-	}
 	for _, b := range []struct {
 		name      string
 		d, lo, hi time.Duration

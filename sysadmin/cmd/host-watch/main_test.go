@@ -656,7 +656,6 @@ func TestValidate(t *testing.T) {
 		"relative a2a":           func(o *options) { o.a2a = "a2a" },
 		"other flag path":        func(o *options) { o.flagPath = "/tmp/elsewhere/exec-degraded" },
 		"post timeout above 60s": func(o *options) { o.postTimeout = 61 * time.Second },
-		"post past the gap":      func(o *options) { o.postTimeout = time.Minute },
 		"clear-after below 10m":  func(o *options) { o.clearAfter = time.Second },
 		"probe faster than tick": func(o *options) { o.probeEvery = time.Second },
 		"bad tool prefix":        func(o *options) { o.toolPrefixes = []string{"a|b"} },
@@ -1532,5 +1531,66 @@ func TestStateTrailingContentRefused(t *testing.T) {
 	after, _ := os.ReadFile(w.statePath())
 	if string(after) != string(bad) {
 		t.Fatal("refused state file was overwritten")
+	}
+}
+
+// recoveringWatcher returns a watcher that is degraded and has an open health window as of the
+// returned time.
+func recoveringWatcher(t *testing.T, f *fake, o options, start time.Time) (*watcher, time.Time) {
+	t.Helper()
+	w := newWatcher(o, f.system())
+	step(t, w, start)
+	step(t, w, start.Add(o.interval))
+	f.set(func(f *fake) { f.svc = serviceState{State: "spawn scheduled", Runs: 2} })
+	at := start.Add(2 * o.interval)
+	step(t, w, at)
+	f.set(func(f *fake) { f.svc = serviceState{State: "running", Runs: 3} })
+	at = at.Add(o.probeEvery) // a probe launched after the incident
+	step(t, w, at)
+	at = at.Add(o.interval)
+	step(t, w, at)
+	s, _ := w.load()
+	if s.DegradedSince == "" || s.HealthySince == "" {
+		t.Fatalf("precondition: degraded=%q healthy=%q", s.DegradedSince, s.HealthySince)
+	}
+	return w, at
+}
+
+// A long tick (observation plus a post that runs to its timeout) is observed time, not an outage:
+// with a 1 s interval and a 10.4 s post timeout, a 12.408 s start-to-start gap keeps the window.
+func TestLongTickIsNotAGap(t *testing.T) {
+	f := newFake()
+	o := testOptions(t)
+	o.interval, o.probeEvery, o.postTimeout = time.Second, time.Second, 10400*time.Millisecond
+	w, at := recoveringWatcher(t, f, o, t0)
+	before, _ := w.load()
+	w.since = func(time.Time) time.Duration { return 11408 * time.Millisecond } // 1 s observing + 10.4 s post
+	step(t, w, at.Add(o.interval))
+	w.since = time.Since
+	step(t, w, at.Add(o.interval+12408*time.Millisecond))
+	after, _ := w.load()
+	if after.HealthySince != before.HealthySince {
+		t.Fatalf("a long tick reset the health window: %q -> %q", before.HealthySince, after.HealthySince)
+	}
+}
+
+// The gap is measured with full precision: a 39.4 s gap after a tick ending 900 ms into a second
+// stays under the 40 s limit; a 40.5 s gap is an outage and resets the window.
+func TestGapPrecision(t *testing.T) {
+	for _, c := range []struct {
+		gap   time.Duration
+		reset bool
+	}{{39400 * time.Millisecond, false}, {40500 * time.Millisecond, true}} {
+		f := newFake()
+		o := testOptions(t)
+		w, at := recoveringWatcher(t, f, o, t0)
+		end := at.Add(15*time.Second + 900*time.Millisecond)
+		step(t, w, end)
+		before, _ := w.load()
+		step(t, w, end.Add(c.gap))
+		after, _ := w.load()
+		if (after.HealthySince != before.HealthySince) != c.reset {
+			t.Fatalf("gap %s: window %q -> %q (want reset=%v)", c.gap, before.HealthySince, after.HealthySince, c.reset)
+		}
 	}
 }

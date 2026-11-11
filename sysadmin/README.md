@@ -66,7 +66,7 @@ Every input is an explicit flag; there are no defaults. `--once` is read-only: o
   --interval 15s --probe-every 60s --post-timeout 20s --clear-after 10m --notify
 ```
 
-Install it as a user LaunchAgent, `works.relux.sysadmin.host-watch`, with `RunAtLoad`, `KeepAlive`, `ProcessType Background` and the arguments above. Give it `A2A_CONFIG_DIR` for the posting identity. Timing flags are bounded: `--interval` 1 s–60 s, `--probe-every` from `--interval` to 10 min, `--post-timeout` 1 s–60 s and short enough that interval + post timeout + the 0.5 s output drain stays below the 2 × interval + 10 s gap limit (at 15 s intervals: under 24.5 s), `--clear-after` 10 min–24 h. `--degraded-flag` must be the contract path.
+Install it as a user LaunchAgent, `works.relux.sysadmin.host-watch`, with `RunAtLoad`, `KeepAlive`, `ProcessType Background` and the arguments above. Give it `A2A_CONFIG_DIR` for the posting identity. Timing flags are bounded: `--interval` 1 s–60 s, `--probe-every` from `--interval` to 10 min, `--post-timeout` 1 s–60 s, `--clear-after` 10 min–24 h. `--degraded-flag` must be the contract path.
 
 ### Rollback
 
