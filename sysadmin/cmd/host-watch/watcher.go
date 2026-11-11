@@ -85,10 +85,10 @@ type watcher struct {
 	probeLaunchAt time.Time
 	lastProbe     *probeResult
 	postBusy      bool
-	acked         int64 // highest alert sequence confirmed delivered
-	ackDirty      bool  // an acknowledgement write failed; retried before any new post
-	saveMu        sync.Mutex
-	mem           *state // dry-run keeps its state here and never writes the state directory
+	acked         int64      // highest alert sequence confirmed delivered
+	ackDirty      bool       // an acknowledgement write failed; retried before any new post
+	stateMu       sync.Mutex // held from load to save by a tick and by the post fallback
+	mem           *state     // dry-run keeps its state here and never writes the state directory
 	writeAck      func(path string, data []byte) error
 	wg            sync.WaitGroup
 }
@@ -170,8 +170,6 @@ func (w *watcher) save(s state) error {
 		w.mem = &s // never written: a dry run leaves the live state untouched
 		return nil
 	}
-	w.saveMu.Lock()
-	defer w.saveMu.Unlock()
 	// Every save drops entries already delivered, so a stale in-memory copy cannot bring a
 	// delivered batch back, and the state file is a second durable record of delivery.
 	w.dropAcked(&s)
@@ -233,6 +231,13 @@ func (w *watcher) tick(now time.Time) error {
 		}
 		w.retryAck()
 	}
+	w.stateMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			w.stateMu.Unlock()
+		}
+	}()
 	s, err := w.load()
 	if err != nil {
 		return err
@@ -357,6 +362,9 @@ func (w *watcher) tick(now time.Time) error {
 	if err := w.save(s); err != nil {
 		return err
 	}
+	w.dropAcked(&s) // post from the same filtered snapshot that was saved
+	w.stateMu.Unlock()
+	locked = false
 	if !w.o.once {
 		w.maybeStartProbe(now.Add(time.Since(realStart)))
 	}
@@ -532,7 +540,7 @@ func (w *watcher) dropAcked(s *state) {
 	w.mu.Lock()
 	acked := w.acked
 	w.mu.Unlock()
-	keep := s.Pending[:0]
+	keep := make([]alert, 0, len(s.Pending)) // new storage: a caller's slice is never rewritten
 	for _, a := range s.Pending {
 		if a.Seq > acked {
 			keep = append(keep, a)
@@ -580,7 +588,7 @@ func (w *watcher) maybeStartPost(s state) {
 		if a.Seq <= w.acked {
 			continue
 		}
-		line := truncateLine(fmt.Sprintf("[host-watch %s] %s", a.At, a.Text), postMaxBytes)
+		line := truncateLine(fmt.Sprintf("[host-watch %s #%d] %s", a.At, a.Seq, a.Text), postMaxBytes)
 		if len(batch) > 0 && (len(batch) >= postMaxEntries || size+len(line)+1 > postMaxBytes) {
 			break
 		}
@@ -630,11 +638,13 @@ func (w *watcher) maybeStartPost(s state) {
 			fmt.Fprintln(os.Stderr, "host-watch: ack write failed, holding new posts until it succeeds:", werr)
 			// Second durable record: the queue without the delivered batch, so a restart before
 			// the acknowledgement is rewritten does not resend it.
+			w.stateMu.Lock()
 			if st, lerr := w.load(); lerr == nil {
 				if serr := w.save(st); serr != nil {
 					fmt.Fprintln(os.Stderr, "host-watch: compacted queue save failed:", serr)
 				}
 			}
+			w.stateMu.Unlock()
 		}
 	}()
 }
@@ -644,11 +654,12 @@ func (w *watcher) drain() {
 	if !boundedWait(&w.wg, w.o.postTimeout+probeTimeout+5*time.Second) {
 		fmt.Fprintln(os.Stderr, "host-watch: background work still running at exit")
 	}
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
 	s, err := w.load()
 	if err != nil {
 		return
 	}
-	w.dropAcked(&s)
 	_ = w.save(s)
 }
 

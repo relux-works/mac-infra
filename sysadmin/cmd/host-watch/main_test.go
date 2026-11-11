@@ -459,7 +459,7 @@ func TestPostDeliveredOnce(t *testing.T) {
 	step(t, re, at.Add(60*time.Second))
 	// Removing state.json loses the check levels, so a new disk.free alert with a new time is
 	// legitimate; the delivered batch itself must not appear twice.
-	if strings.Count(strings.Join(f.posts, "\n"), "[host-watch 22:00:30Z] ALERT disk.free") != 1 {
+	if strings.Count(strings.Join(f.posts, "\n"), "[host-watch 22:00:30Z #1] ALERT disk.free") != 1 {
 		t.Fatalf("redelivered after restart: %v", f.posts)
 	}
 }
@@ -1155,5 +1155,176 @@ func TestReportDirAlias(t *testing.T) {
 	got, errs, scanned := listReports([]string{alias}, []string{"mac-firewall"})
 	if len(got) != 1 || errs[alias] != nil || !scanned[alias] {
 		t.Fatalf("alias: got=%v errs=%v scanned=%v", got, errs, scanned)
+	}
+}
+
+// A component swapped for a relative symlink back to the same directory is refused at open time:
+// O_NOFOLLOW sees the link itself, so neither publication nor removal goes through it.
+func TestFlagSameInodeSwap(t *testing.T) {
+	for _, op := range []string{"write", "remove"} {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		canonical, _ := canonicalFlagPath()
+		as := filepath.Join(home, "Library", "Application Support")
+		if err := os.MkdirAll(filepath.Join(as, "host-health"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(as, "host-health", "exec-degraded")
+		if err := os.WriteFile(marker, []byte("marker"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		flagDirHook = func(comp string) {
+			if comp == "Application Support" {
+				_ = os.Rename(as, as+".moved")
+				_ = os.Symlink("Application Support.moved", as)
+			}
+		}
+		var err error
+		if op == "write" {
+			err = writeDegradedFlag(canonical, degradedFlag{Reason: "r", Since: "s", HostWatchPID: 1})
+		} else {
+			err = removeDegradedFlag(canonical)
+		}
+		flagDirHook = nil
+		if err == nil {
+			t.Fatalf("%s went through a same-inode symlink swap", op)
+		}
+		if raw, _ := os.ReadFile(filepath.Join(as+".moved", "host-health", "exec-degraded")); string(raw) != "marker" {
+			t.Fatalf("%s changed the marker behind the swap", op)
+		}
+	}
+}
+
+// A symlink at the flag name (dangling or not) is not the flag: presence matches a consumer's
+// `test -e` for a dangling link, and removal refuses it and leaves it in place.
+func TestFlagLeafSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	canonical, _ := canonicalFlagPath()
+	if err := os.MkdirAll(filepath.Dir(canonical), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("nowhere", canonical); err != nil {
+		t.Fatal(err)
+	}
+	if flagPresentAnchored(canonical) {
+		t.Fatal("dangling leaf symlink counted as the flag")
+	}
+	if err := removeDegradedFlag(canonical); err == nil {
+		t.Fatal("removal accepted a leaf symlink")
+	}
+	if _, err := os.Lstat(canonical); err != nil {
+		t.Fatal("leaf symlink was removed")
+	}
+	// Positive control: a regular flag file is present and removable.
+	if err := os.Remove(canonical); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDegradedFlag(canonical, degradedFlag{Reason: "r", Since: "s", HostWatchPID: 1}); err != nil || !flagPresentAnchored(canonical) {
+		t.Fatalf("regular flag not present: %v", err)
+	}
+	if err := removeDegradedFlag(canonical); err != nil || flagPresentAnchored(canonical) {
+		t.Fatalf("regular flag not removed: %v", err)
+	}
+}
+
+// The ack-failure fallback compacts the latest state under the same lock as the tick, so an alert
+// saved by a tick while the post was in flight survives the compaction.
+func TestFallbackCompactionKeepsNewerTick(t *testing.T) {
+	f := newFake()
+	f.postHang = make(chan struct{})
+	w := newTestWatcher(t, f)
+	w.writeAck = func(string, []byte) error { return errors.New("ack disk error") }
+	at := warm(t, w, t0)
+	f.set(func(f *fake) { f.disk = 4 })
+	if err := w.tick(at.Add(15 * time.Second)); err != nil { // post of disk.free in flight
+		t.Fatal(err)
+	}
+	f.set(func(f *fake) { f.fsev = "fseventsd watchdog LaunchAgent is disabled" })
+	if err := w.tick(at.Add(30 * time.Second)); err != nil { // newer alert saved meanwhile
+		t.Fatal(err)
+	}
+	close(f.postHang)
+	w.wg.Wait() // post succeeds, ack fails, fallback compaction runs
+	s, err := w.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, a := range s.Pending {
+		keys = append(keys, a.Key)
+	}
+	if len(keys) != 1 || keys[0] != "fseventsd.watchdog" {
+		t.Fatalf("pending after fallback compaction: %v", keys)
+	}
+}
+
+// Saving filters into new storage: the caller's pending slice is unchanged, so one unsent alert is
+// never seen twice.
+func TestSaveDoesNotRewriteCallerSlice(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	if err := ensurePrivateDir(w.o.stateDir); err != nil {
+		t.Fatal(err)
+	}
+	w.acked = 1
+	s := state{Pending: []alert{{Seq: 1, Key: "acked"}, {Seq: 2, Key: "unsent"}}}
+	if err := w.save(s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Pending[0].Key != "acked" || s.Pending[1].Key != "unsent" {
+		t.Fatalf("caller slice rewritten: %+v", s.Pending)
+	}
+	saved, _ := w.load()
+	if len(saved.Pending) != 1 || saved.Pending[0].Key != "unsent" {
+		t.Fatalf("saved pending: %+v", saved.Pending)
+	}
+}
+
+// When both durable records of a delivery are lost (ack write and queue save), delivery is at least
+// once: the repeat carries the same delivery id, so it is recognizable as a repeat.
+func TestRedeliveryCarriesSameID(t *testing.T) {
+	f := newFake()
+	f.postHang = make(chan struct{})
+	w := newTestWatcher(t, f)
+	w.writeAck = func(string, []byte) error { return errors.New("ack disk error") }
+	at := warm(t, w, t0)
+	f.set(func(f *fake) { f.disk = 4 })
+	if err := w.tick(at.Add(15 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := os.ReadFile(w.statePath()) // the queue as saved before delivery
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(f.postHang)
+	w.wg.Wait()
+	if err := atomicWrite(w.statePath(), stale, 0o600); err != nil { // both records lost
+		t.Fatal(err)
+	}
+	f.set(func(f *fake) { f.postHang = nil })
+	re := newWatcher(w.o, f.system())
+	step(t, re, at.Add(30*time.Second))
+	step(t, re, at.Add(45*time.Second))
+	if len(f.posts) != 2 || !strings.Contains(f.posts[0], "#1]") || !strings.Contains(f.posts[1], "#1]") {
+		t.Fatalf("repeat without the same delivery id: %v", f.posts)
+	}
+}
+
+// Child output beyond the bound is an incomplete observation, not a truncated sample; an unlink
+// failure of the spool stops the child from starting at all.
+func TestRunnerSpoolBounds(t *testing.T) {
+	r := newRunner()
+	if _, err := r.run(context.Background(), "big", "/bin/dd", "if=/dev/zero", "bs=1048576", "count=2"); !errors.Is(err, errOutputIncomplete) {
+		t.Fatalf("oversized output not refused: %v", err)
+	}
+	if out, err := r.run(context.Background(), "small", "/bin/echo", "ok"); err != nil || strings.TrimSpace(out) != "ok" {
+		t.Fatalf("positive control: %q %v", out, err)
+	}
+	started := false
+	r.start = func(cmd *exec.Cmd) error { started = true; return cmd.Start() }
+	r.unlink = func(string) error { return errors.New("unlink refused") }
+	if _, err := r.run(context.Background(), "u", "/bin/echo", "x"); err == nil || started {
+		t.Fatalf("unlink failure: err=%v started=%v", err, started)
 	}
 }

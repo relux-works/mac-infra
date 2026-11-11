@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // degradedFlag is the exec-degraded flag file contract (sysadmin/docs/host-health-degraded-flag.md).
@@ -29,32 +31,33 @@ func canonicalFlagPath() (string, error) {
 }
 
 func writeDegradedFlag(path string, f degradedFlag) error {
-	dir, name, err := openFlagDir(path, true)
+	dirfd, name, err := openFlagDir(path, true)
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer unix.Close(dirfd)
 	raw, err := json.Marshal(f)
 	if err != nil {
 		return err
 	}
-	// Exclusive temporary file and rename, both through the anchored directory handle.
+	// Exclusive temporary file and rename, both relative to the anchored directory descriptor.
 	var tmp string
-	var fh *os.File
+	var tfd int
 	for i := 0; ; i++ {
 		tmp = fmt.Sprintf(".%s.tmp-%d-%d", name, os.Getpid(), time.Now().UnixNano()+int64(i))
-		fh, err = dir.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil || !errors.Is(err, os.ErrExist) || i > 5 {
+		tfd, err = unix.Openat(dirfd, tmp, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o644)
+		if err == nil || !errors.Is(err, unix.EEXIST) || i > 5 {
 			break
 		}
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("flag temp file: %w", err)
 	}
+	fh := os.NewFile(uintptr(tfd), tmp)
 	ok := false
 	defer func() {
 		if !ok {
-			_ = dir.Remove(tmp)
+			_ = unix.Unlinkat(dirfd, tmp, 0)
 		}
 	}()
 	if _, err := fh.Write(append(raw, '\n')); err != nil {
@@ -68,97 +71,107 @@ func writeDegradedFlag(path string, f degradedFlag) error {
 	if err := fh.Close(); err != nil {
 		return err
 	}
-	if err := dir.Rename(tmp, name); err != nil {
-		return err
+	if err := unix.Renameat(dirfd, tmp, dirfd, name); err != nil {
+		return fmt.Errorf("flag rename: %w", err)
 	}
 	ok = true
 	return nil
 }
 
+// removeDegradedFlag removes the flag only when it is a regular file; a symlink or any other kind
+// of entry at the flag name is refused and left in place.
 func removeDegradedFlag(path string) error {
-	dir, name, err := openFlagDir(path, false)
+	dirfd, name, err := openFlagDir(path, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
-	if err := dir.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+	defer unix.Close(dirfd)
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return fmt.Errorf("flag entry %s is not a regular file; left in place", name)
+	}
+	if err := unix.Unlinkat(dirfd, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
 		return err
 	}
 	return nil
 }
 
-// flagPresentAnchored reports whether the flag file exists, looked up through the anchored path.
+// flagPresentAnchored reports whether the flag is present as a regular file, looked up through the
+// anchored directory without following a final symlink. A dangling or any other symlink is not the
+// flag, which matches what a consumer's `test -e` sees for a dangling link.
 func flagPresentAnchored(path string) bool {
-	dir, name, err := openFlagDir(path, false)
+	dirfd, name, err := openFlagDir(path, false)
 	if err != nil {
 		return false
 	}
-	defer dir.Close()
-	_, err = dir.Lstat(name)
-	return err == nil
+	defer unix.Close(dirfd)
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false
+	}
+	return st.Mode&unix.S_IFMT == unix.S_IFREG
 }
 
-// flagDirHook lets tests interleave a change between the check and the open of a component.
+// flagDirHook lets tests interleave a change just before a component is opened.
 var flagDirHook func(component string)
 
-// openFlagDir opens the directory of the flag through handles anchored at the home directory: each
-// component below home is checked with Lstat to be a real directory, opened as a new root, and the
-// opened directory must be the same file that was checked. Every later lookup and mutation goes
-// through the returned handle, so a component replaced by a symlink after the check is never
-// followed. With create, missing components are created inside the anchored parent.
-func openFlagDir(path string, create bool) (*os.Root, string, error) {
+// openFlagDir opens the directory of the flag component by component, starting at the home
+// directory: every component below home is opened relative to its parent descriptor with
+// O_NOFOLLOW and O_DIRECTORY, so a symlink at any component is refused at the moment of opening,
+// whatever it points to. With create, a missing component is created relative to its parent
+// descriptor. The caller performs every later operation relative to the returned descriptor.
+func openFlagDir(path string, create bool) (int, string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, "", err
+		return -1, "", err
 	}
 	rel, err := filepath.Rel(home, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
-		return nil, "", fmt.Errorf("flag path %s is outside the home directory", path)
+		return -1, "", fmt.Errorf("flag path %s is outside the home directory", path)
 	}
 	parts := splitPath(rel)
 	if len(parts) < 1 {
-		return nil, "", fmt.Errorf("flag path %s has no file name", path)
+		return -1, "", fmt.Errorf("flag path %s has no file name", path)
 	}
-	r, err := os.OpenRoot(home)
+	fd, err := unix.Open(home, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, "", err
+		return -1, "", fmt.Errorf("open home: %w", err)
 	}
+	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 	for _, comp := range parts[:len(parts)-1] {
-		fi, err := r.Lstat(comp)
-		if errors.Is(err, os.ErrNotExist) && create {
-			if err := r.Mkdir(comp, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-				r.Close()
-				return nil, "", err
-			}
-			fi, err = r.Lstat(comp)
-		}
-		if err != nil {
-			r.Close()
-			return nil, "", err
-		}
-		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-			r.Close()
-			return nil, "", fmt.Errorf("flag path component %s is a symlink or not a directory", comp)
-		}
 		if flagDirHook != nil {
 			flagDirHook(comp)
 		}
-		next, err := r.OpenRoot(comp)
-		r.Close()
+		next, err := unix.Openat(fd, comp, dirFlags, 0)
+		if errors.Is(err, unix.ENOENT) && create {
+			if merr := unix.Mkdirat(fd, comp, 0o755); merr != nil && !errors.Is(merr, unix.EEXIST) {
+				unix.Close(fd)
+				return -1, "", fmt.Errorf("create %s: %w", comp, merr)
+			}
+			next, err = unix.Openat(fd, comp, dirFlags, 0)
+		}
+		unix.Close(fd)
+		if errors.Is(err, unix.ENOENT) {
+			return -1, "", fmt.Errorf("%s: %w", comp, os.ErrNotExist)
+		}
+		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
+			return -1, "", fmt.Errorf("flag path component %s is a symlink or not a directory", comp)
+		}
 		if err != nil {
-			return nil, "", err
+			return -1, "", fmt.Errorf("open %s: %w", comp, err)
 		}
-		opened, err := next.Stat(".")
-		if err != nil || !os.SameFile(fi, opened) {
-			next.Close()
-			return nil, "", fmt.Errorf("flag path component %s changed between check and open", comp)
-		}
-		r = next
+		fd = next
 	}
-	return r, parts[len(parts)-1], nil
+	return fd, parts[len(parts)-1], nil
 }
 
 // atomicWrite publishes data at path through an exclusive temporary file in the same directory,

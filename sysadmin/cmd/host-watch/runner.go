@@ -22,10 +22,11 @@ type runner struct {
 	mu       sync.Mutex
 	inflight map[string]bool
 	start    func(cmd *exec.Cmd) error // replaced in tests to simulate a launch held before execve
+	unlink   func(name string) error   // replaced in tests to simulate an unlink failure
 }
 
 func newRunner() *runner {
-	return &runner{inflight: map[string]bool{}, start: func(cmd *exec.Cmd) error { return cmd.Start() }}
+	return &runner{inflight: map[string]bool{}, start: func(cmd *exec.Cmd) error { return cmd.Start() }, unlink: os.Remove}
 }
 
 // run executes bin with args under key. It returns at the deadline even while the child is still
@@ -56,7 +57,14 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 		r.mu.Unlock()
 		return "", err
 	}
-	_ = os.Remove(out.Name())
+	if err := r.unlink(out.Name()); err != nil {
+		// Never start a child whose output could stay behind under a pathname.
+		out.Close()
+		r.mu.Lock()
+		delete(r.inflight, key)
+		r.mu.Unlock()
+		return "", fmt.Errorf("output spool unlink: %w", err)
+	}
 	cmd.Stdout, cmd.Stderr = out, out
 
 	var pmu sync.Mutex
@@ -81,11 +89,11 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 			_ = proc.Kill()
 		}
 		err := cmd.Wait()
-		var collected []byte
-		if _, serr := out.Seek(0, 0); serr == nil {
-			collected, _ = io.ReadAll(io.LimitReader(out, 1<<20))
-		}
+		collected, rerr := readSpool(out)
 		out.Close()
+		if err == nil && rerr != nil {
+			err = rerr
+		}
 		done <- result{collected, err}
 	}()
 	select {
@@ -104,6 +112,29 @@ func (r *runner) run(ctx context.Context, key, bin string, args ...string) (stri
 		}
 		return "", fmt.Errorf("%s: %w", filepath.Base(bin), ctx.Err())
 	}
+}
+
+// maxChildOutput bounds what a child may write; more is an incomplete observation, never a sample.
+const maxChildOutput = 1 << 20
+
+var errOutputIncomplete = errors.New("child output exceeded the bound; observation incomplete")
+
+// readSpool reads the spool at an independent offset (pread), so descriptors that descendants
+// share are not moved, and refuses output beyond the bound instead of truncating it.
+func readSpool(f *os.File) ([]byte, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if fi.Size() > maxChildOutput {
+		return nil, errOutputIncomplete
+	}
+	buf := make([]byte, fi.Size())
+	n, err := f.ReadAt(buf, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return buf[:n], nil
 }
 
 // busy reports whether a child of this kind is still alive.
