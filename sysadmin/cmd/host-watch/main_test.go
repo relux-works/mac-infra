@@ -1739,3 +1739,56 @@ func TestToolReportAlertsByNameOnly(t *testing.T) {
 		t.Fatalf("tool report not alerted by name: %v", f.notes)
 	}
 }
+
+// Overlapping report directories are refused at validation: the same directory twice (also via a
+// symlink alias or another spelling), and a directory that is another's Retired. Two distinct
+// directories are accepted and yield unique sources. The control shows that validation without the
+// overlap check accepts every refused form.
+func TestReportDirsMustNotOverlap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	canonical, _ := canonicalFlagPath()
+	a := filepath.Join(home, "a")
+	b := filepath.Join(home, "b")
+	for _, d := range []string{filepath.Join(a, "Retired"), b} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(home, "alias-a")
+	if err := os.Symlink(a, alias); err != nil {
+		t.Fatal(err)
+	}
+	base := options{toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
+	refused := map[string][]string{
+		"same dir twice":       {a, a},
+		"other spelling":       {a, a + "/./"},
+		"symlink alias":        {a, alias},
+		"dir is other Retired": {a, filepath.Join(a, "Retired")},
+		"Retired first":        {filepath.Join(a, "Retired"), a},
+	}
+	for name, dirs := range refused {
+		o := base
+		o.reportsDirs = dirs
+		if err := o.validate(); err == nil || !strings.Contains(err.Error(), "overlap") {
+			t.Errorf("%s: accepted (%v)", name, err)
+		}
+		// Control: the checks other than the overlap check accept this form.
+		if err := checkDistinctSources([]string{dirs[0]}); err != nil {
+			t.Errorf("%s: control single dir refused: %v", name, err)
+		}
+	}
+	ok := base
+	ok.reportsDirs = []string{a, b}
+	if err := ok.validate(); err != nil {
+		t.Fatalf("two distinct dirs refused: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, src := range reportSources(ok.reportsDirs) {
+		c := canonDir(src)
+		if seen[c] {
+			t.Fatalf("reportSources yields %s twice", c)
+		}
+		seen[c] = true
+	}
+}
