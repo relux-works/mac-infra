@@ -648,7 +648,7 @@ func TestValidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: time.Minute, clearAfter: 10 * time.Minute}
+	ok := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
 	if err := ok.validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -656,6 +656,7 @@ func TestValidate(t *testing.T) {
 		"relative a2a":           func(o *options) { o.a2a = "a2a" },
 		"other flag path":        func(o *options) { o.flagPath = "/tmp/elsewhere/exec-degraded" },
 		"post timeout above 60s": func(o *options) { o.postTimeout = 61 * time.Second },
+		"post past the gap":      func(o *options) { o.postTimeout = time.Minute },
 		"clear-after below 10m":  func(o *options) { o.clearAfter = time.Second },
 		"probe faster than tick": func(o *options) { o.probeEvery = time.Second },
 		"bad tool prefix":        func(o *options) { o.toolPrefixes = []string{"a|b"} },
@@ -677,7 +678,7 @@ func TestFlagPathExactAndNoSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: time.Minute, clearAfter: 10 * time.Minute}
+	ok := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", to: "y", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
 	if err := ok.validate(); err != nil {
 		t.Fatalf("canonical path refused: %v", err)
 	}
@@ -1197,25 +1198,32 @@ func TestDeliveryInvariantRestartAtEachStep(t *testing.T) {
 	}
 }
 
-// A storage failure exactly at the durable record of a delivery never loses the alert: the batch
-// is released and sent again with the same delivery id.
+// A live watcher whose save fails right after a successful post (a durable record that could not
+// be written) sends the batch again; the repeat is allowed and carries the same delivery id.
 func TestStorageFailureAtRecord(t *testing.T) {
 	f := newFake()
 	w := newTestWatcher(t, f)
 	at := warm(t, w, t0)
 	f.set(func(f *fake) { f.disk = 4 })
-	step(t, w, at.Add(15*time.Second)) // delivered; not yet recorded
-	w.beforeSave = func() error { return errors.New("disk error") }
-	if err := w.tick(at.Add(30 * time.Second)); err == nil { // the recording save fails
+	failed := false
+	w.beforeSave = func() error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.attempts > 0 && !failed {
+			failed = true
+			return errors.New("disk error at the record")
+		}
+		return nil
+	}
+	if err := w.tick(at.Add(15 * time.Second)); err == nil {
 		t.Fatal("injected save failure not reported")
 	}
-	w.beforeSave = nil
-	for i := 3; i <= 6; i++ {
+	for i := 2; i <= 5; i++ {
 		step(t, w, at.Add(time.Duration(i)*15*time.Second))
 	}
 	got := deliveries(f.posts)
-	if got["1"] < 1 || len(got) != 1 {
-		t.Fatalf("deliveries after a failed record: %v", got)
+	if got["1"] != 2 || len(got) != 1 {
+		t.Fatalf("deliveries after a failed record: %v (want the same #1 twice)", got)
 	}
 }
 
@@ -1457,5 +1465,72 @@ func TestExitObservedBeatsDeadline(t *testing.T) {
 	_, err := r.run(ctx, "a2a-post", "/bin/sh", "-c", "/bin/sleep 6 & exit 0")
 	if errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errOutputIncomplete) {
 		t.Fatalf("observed exit 0 reported as %v", err)
+	}
+}
+
+// --once is read-only: run against a live watcher's state directory, it leaves the queue, the event
+// log, the heartbeat and the flag exactly as they were, even when it observes new alerts.
+func TestOnceIsReadOnly(t *testing.T) {
+	f := newFake()
+	o := testOptions(t)
+	live := newWatcher(o, f.system())
+	at := warm(t, live, t0)
+	f.set(func(f *fake) {
+		f.disk = 4
+		f.svc = serviceState{State: "spawn scheduled", Runs: 2}
+		f.postErr = errors.New("held")
+	})
+	step(t, live, at.Add(15*time.Second)) // pending notice, flag published
+	files := []string{live.statePath(), live.eventsPath(), live.heartbeatPath()}
+	before := map[string]string{}
+	for _, p := range files {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[p] = string(raw)
+	}
+	flagBefore := f.flag
+	oo := o
+	oo.once = true
+	osys := f.system()
+	osys.writeFlag = func(string, degradedFlag) error { t.Fatal("--once wrote the flag"); return nil }
+	osys.removeFlag = func(string) error { t.Fatal("--once removed the flag"); return nil }
+	osys.post = func(context.Context, string) error { t.Fatal("--once posted"); return nil }
+	once := newWatcher(oo, osys)
+	f.set(func(f *fake) { f.fsev = "fseventsd watchdog LaunchAgent is disabled" }) // a new alert
+	if err := once.tick(at.Add(20 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range files {
+		raw, _ := os.ReadFile(p)
+		if string(raw) != before[p] {
+			t.Fatalf("--once changed %s", filepath.Base(p))
+		}
+	}
+	if f.flag != flagBefore {
+		t.Fatal("--once changed the flag")
+	}
+}
+
+// Strict loading refuses trailing content after the state object instead of overwriting it.
+func TestStateTrailingContentRefused(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	step(t, w, t0)
+	raw, err := os.ReadFile(w.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := append(append([]byte(nil), raw...), []byte("\n{\"version\":1}\n")...)
+	if err := atomicWrite(w.statePath(), bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.tick(t0.Add(time.Minute)); err == nil {
+		t.Fatal("state with trailing content accepted")
+	}
+	after, _ := os.ReadFile(w.statePath())
+	if string(after) != string(bad) {
+		t.Fatal("refused state file was overwritten")
 	}
 }

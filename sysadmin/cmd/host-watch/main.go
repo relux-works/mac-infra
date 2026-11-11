@@ -52,7 +52,7 @@ func main() {
 	flag.DurationVar(&o.postTimeout, "post-timeout", 0, "required: hard timeout of one a2a post, e.g. 60s")
 	flag.DurationVar(&o.clearAfter, "clear-after", 0, "required: healthy time before the degraded flag is removed, e.g. 10m")
 	flag.BoolVar(&o.notify, "notify", false, "show macOS notifications (Apple-only channel)")
-	flag.BoolVar(&o.once, "once", false, "observe only: run one tick without the exec probe or any a2a post, and exit")
+	flag.BoolVar(&o.once, "once", false, "observe only: run one read-only tick (no state, event log, heartbeat, flag, notification or a2a post) and exit")
 	flag.BoolVar(&o.dryRun, "dry-run", false, "record alerts but do not notify, post or write the degraded flag")
 	flag.Parse()
 	for _, d := range strings.Split(reports, ",") {
@@ -140,6 +140,11 @@ func (o options) validate() error {
 
 // validateBounds enforces the agreed ranges of the timing flags.
 func (o options) validateBounds() error {
+	// A tick holds the queue while it posts: its post plus the output drain must end before the next
+	// tick would count as an unobserved gap, or a timed-out post would reset recovery windows.
+	if o.interval+o.postTimeout+drainAfterExit >= 2*o.interval+observeTimeout {
+		return fmt.Errorf("--post-timeout %s too long for --interval %s: interval + post timeout + %s drain must stay below the %s gap limit", o.postTimeout, o.interval, drainAfterExit, 2*o.interval+observeTimeout)
+	}
 	for _, b := range []struct {
 		name      string
 		d, lo, hi time.Duration

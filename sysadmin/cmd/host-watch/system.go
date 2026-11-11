@@ -126,7 +126,7 @@ func liveSystem(o options, self string) system {
 	if !o.notify {
 		s.notify = nil
 	}
-	if o.dryRun {
+	if o.dryRun || o.once {
 		s.notify, s.post = nil, nil
 		s.flagPresent = func(string) bool { return false }
 		s.writeFlag = func(string, degradedFlag) error { return nil }

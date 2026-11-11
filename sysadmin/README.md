@@ -22,7 +22,7 @@ How it works:
 - It observes with Apple binaries (`/bin/launchctl`, `/bin/ps`, `/usr/sbin/sysctl`) and in-process calls only, so it keeps working while the gate is shut.
 - Every alert is shown at once as a macOS notification and logged to `events.jsonl`; the log is best effort and a log failure never loses the notice, which lives in the saved queue.
 - It is also sent to a2a as one notice at a time. a2a is a non-Apple binary, so while execs are degraded notices are queued and sent once the host is healthy again.
-- a2a delivery is at least once; there is no exactly-once claim, because a2a has no idempotent post. Every notice line carries a stable delivery id (`#<seq>`). The tick alone owns the queue and posts synchronously: it records the batch as in flight and saves, posts with the post timeout (exit 0 means delivered; output is diagnostics only), and records the delivery in the same saved state. Only the current state format (version 1) is read; any other state file is refused, with no migration. A repeat is possible only when that durable record of the delivery is lost, or when the process dies between the post and the record; a repeat carries the same `#<seq>`.
+- a2a delivery is at least once; there is no exactly-once claim, because a2a has no idempotent post. Every notice line carries a stable delivery id (`#<seq>`). The tick alone owns the queue and posts synchronously: it records the batch as in flight and saves, posts with the post timeout (exit 0 means delivered; output is diagnostics only), and records the delivery in the same saved state. Only the current state format (version 1) is read; any other state file is refused, with no migration. A repeat is possible only when the durable record of the delivery is lost or could not be written, or when the process dies between the post and the record; a repeat carries the same `#<seq>`.
 - Its only automatic action is the exec-degraded flag, described in [docs/host-health-degraded-flag.md](docs/host-health-degraded-flag.md). It never kills, restarts or reconfigures other processes, launchd jobs or protection settings.
 - It writes a heartbeat file (RFC 3339) every tick.
 
@@ -52,7 +52,7 @@ Point the LaunchAgent at `$dir/host-watch-<sum>` and record the sha.
 
 ### Run
 
-Every input is an explicit flag; there are no defaults. `--once` observes only: one tick without the exec probe or any a2a post. `--dry-run` keeps its state in memory and never writes the state directory, the flag or a2a, so it can neither hide nor clear a live incident.
+Every input is an explicit flag; there are no defaults. `--once` is read-only: one tick that writes no state, event log, heartbeat or flag and sends no notification or a2a post, so it can run beside a live watcher. `--dry-run` keeps its state in memory and never writes the state directory, the flag or a2a, so it can neither hide nor clear a live incident.
 
 ```sh
 "$HOME/Library/Application Support/host-watch/bin/host-watch-SUM" \
@@ -63,10 +63,10 @@ Every input is an explicit flag; there are no defaults. `--once` observes only: 
   --a2a "$HOME/.local/bin/a2a" --as AGENT --room ROOM --to RECIPIENTS \
   --data-volume /System/Volumes/Data \
   --fseventsd-watchdog-label works.relux.mac-infra-fseventsd-watchdog \
-  --interval 15s --probe-every 60s --post-timeout 60s --clear-after 10m --notify
+  --interval 15s --probe-every 60s --post-timeout 20s --clear-after 10m --notify
 ```
 
-Install it as a user LaunchAgent, `works.relux.sysadmin.host-watch`, with `RunAtLoad`, `KeepAlive`, `ProcessType Background` and the arguments above. Give it `A2A_CONFIG_DIR` for the posting identity. Timing flags are bounded: `--interval` 1 s–60 s, `--probe-every` from `--interval` to 10 min, `--post-timeout` 1 s–60 s, `--clear-after` 10 min–24 h. `--degraded-flag` must be the contract path.
+Install it as a user LaunchAgent, `works.relux.sysadmin.host-watch`, with `RunAtLoad`, `KeepAlive`, `ProcessType Background` and the arguments above. Give it `A2A_CONFIG_DIR` for the posting identity. Timing flags are bounded: `--interval` 1 s–60 s, `--probe-every` from `--interval` to 10 min, `--post-timeout` 1 s–60 s and short enough that interval + post timeout + the 0.5 s output drain stays below the 2 × interval + 10 s gap limit (at 15 s intervals: under 24.5 s), `--clear-after` 10 min–24 h. `--degraded-flag` must be the contract path.
 
 ### Rollback
 

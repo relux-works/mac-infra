@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -105,7 +106,7 @@ func (w *watcher) eventsPath() string    { return filepath.Join(w.o.stateDir, "e
 func (w *watcher) heartbeatPath() string { return filepath.Join(w.o.stateDir, "heartbeat") }
 
 func (w *watcher) load() (state, error) {
-	if w.o.dryRun && w.mem != nil {
+	if w.readOnly() && w.mem != nil {
 		return *w.mem, nil
 	}
 	s := state{Version: stateVersion}
@@ -119,6 +120,9 @@ func (w *watcher) load() (state, error) {
 		var got state
 		if err := dec.Decode(&got); err != nil {
 			return s, fmt.Errorf("state %s: refusing a state file that is not the current format: %w", w.statePath(), err)
+		}
+		if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+			return s, fmt.Errorf("state %s: refusing trailing content after the state object", w.statePath())
 		}
 		if got.Version != stateVersion {
 			return s, fmt.Errorf("state %s: refusing state version %d (want %d); no migration exists", w.statePath(), got.Version, stateVersion)
@@ -150,7 +154,7 @@ func (w *watcher) save(s state) error {
 			return err
 		}
 	}
-	if w.o.dryRun {
+	if w.readOnly() {
 		w.mem = &s // never written: a dry run leaves the live state untouched
 		return nil
 	}
@@ -163,7 +167,7 @@ func (w *watcher) save(s state) error {
 }
 
 func (w *watcher) record(a alert) error {
-	if w.o.dryRun {
+	if w.readOnly() {
 		return nil
 	}
 	// O_NOFOLLOW: a symlink planted at events.jsonl is refused, never followed.
@@ -200,11 +204,12 @@ func setLevel(s *state, out *[]alert, stamp, key, level, text string) {
 	*out = append(*out, alert{At: stamp, Key: key, Text: fmt.Sprintf("%s %s: %s", strings.ToUpper(level), key, text)})
 }
 
-// tick runs one observation round. It never blocks on a non-Apple exec: the exec probe and the
-// a2a post run in the background with at most one of each outstanding.
+// tick runs one observation round. Observations use Apple binaries with bounded deadlines; the
+// exec probe runs in the background with at most one outstanding; the a2a post is synchronous and
+// bounded by the post timeout, which config validation keeps inside the recovery gap limit.
 func (w *watcher) tick(now time.Time) error {
 	realStart := time.Now()
-	if !w.o.dryRun {
+	if !w.readOnly() {
 		if err := ensurePrivateDir(w.o.stateDir); err != nil {
 			return err
 		}
@@ -659,3 +664,7 @@ func probeBeforeIncident(degradedSince string, launchedAt time.Time) bool {
 
 // oneLine keeps every notice on one physical line, so every line of a post carries its delivery id.
 var oneLine = strings.NewReplacer("\r\n", " \u23ce ", "\n", " \u23ce ", "\r", " \u23ce ")
+
+// readOnly is true for --dry-run and --once: such a run never writes the state directory (state,
+// events, heartbeat), the flag or a2a, so it cannot race a live watcher on the same state.
+func (w *watcher) readOnly() bool { return w.o.dryRun || w.o.once }
