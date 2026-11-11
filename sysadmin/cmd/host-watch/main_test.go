@@ -1658,33 +1658,47 @@ func TestReportScanDeadline(t *testing.T) {
 	}
 }
 
-// A FIFO named like a report is neither enumerated nor able to hang a body read; a regular report
-// with a code-signing termination is still recognized.
-func TestReportFIFOCannotHang(t *testing.T) {
+// A FIFO named like a report is not enumerated; a regular report next to it is.
+func TestReportFIFONotEnumerated(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "mac-firewall-2026-11-11-000000.ips")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	regular := filepath.Join(dir, "mac-firewall-2026-11-11-000001.ips")
-	if err := os.WriteFile(regular, []byte(`{"termination":{"namespace":"CODESIGNING"}}`), 0o600); err != nil {
+	if err := os.WriteFile(regular, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, _, _ := listReports([]string{dir}, []string{"mac-firewall"})
 	if len(got) != 1 || got[0].Path != regular {
 		t.Fatalf("enumerated: %+v", got)
 	}
-	done := make(chan bool, 1)
-	go func() { done <- reportIsCodesign(fifo) }()
-	select {
-	case cs := <-done:
-		if cs {
-			t.Fatal("FIFO classified as a code-signing report")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("body read blocked on a FIFO")
+}
+
+// A new host-tool report alerts by its file name alone: its body is never opened (here its path is
+// a FIFO, so any read would block the tick).
+func TestToolReportAlertsByNameOnly(t *testing.T) {
+	f := newFake()
+	w := newTestWatcher(t, f)
+	at := warm(t, w, t0)
+	fifo := filepath.Join(t.TempDir(), "mac-firewall-2026-11-11-005046.ips")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !reportIsCodesign(regular) {
-		t.Fatal("regular code-signing report not recognized")
+	f.set(func(f *fake) {
+		f.reports = []report{{Name: filepath.Base(fifo), Path: fifo, Class: "tool", Source: "/user-reports"}}
+	})
+	done := make(chan error, 1)
+	go func() { done <- w.tick(at.Add(15 * time.Second)) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("tick blocked: a report body was read")
+	}
+	if !strings.Contains(strings.Join(f.notes, "\n"), "mac-firewall-2026-11-11-005046.ips") {
+		t.Fatalf("tool report not alerted by name: %v", f.notes)
 	}
 }

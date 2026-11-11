@@ -15,7 +15,7 @@ The most common trigger is a burst of test binaries that are freshly built, re-s
 | held execs | `ps` rows older than 30 s with RSS ≤ 256 KB whose absolute binary path is outside the OS directories; bare argv[0] names and rows ps prints in parentheses do not count; the RSS threshold is not yet calibrated against a real stall | alert ≥ 3, critical ≥ 20 or rising for 3 ticks |
 | GUI | new `WindowServer` crash or hang reports | alert, at most once per 5 min per class, held reports go out with the next alert |
 | report sources | each configured directory and its `Retired` subdirectory are separate sources; configured directories may be symlinks (aliases); a source is seeded with its history on its first actual enumeration, and a missing `Retired` is not an enumeration | — |
-| host tools | new crash reports of the binaries named by `--tool-report-prefixes`; a code-signing kill is labelled `(CODESIGNING)` | alert |
+| host tools | new crash reports of the binaries named by `--tool-report-prefixes`; reports are classified by file name and source only, their bodies are never read | alert |
 | resources | `kern.memorystatus_vm_pressure_level`, `vm.swapusage`, free space on `--data-volume`, and whether the `--fseventsd-watchdog-label` LaunchAgent is disabled or not loaded | alert only |
 
 How it works:
