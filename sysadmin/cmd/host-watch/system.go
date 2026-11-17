@@ -150,7 +150,11 @@ type serviceState struct {
 // a2aPostArgs is the argv of one notice. a2a post refuses a message without --topic (or a reply
 // target) as a usage error, so every notice names its topic.
 func a2aPostArgs(o options, text string) []string {
-	return []string{"--as", o.as, "post", o.room, "--topic", o.topic, "--kind", "notice", "--to", o.to, text}
+	args := []string{"--as", o.as, "post", o.room, "--topic", o.topic, "--kind", "notice"}
+	if !o.unaddressed {
+		args = append(args, "--to", o.to)
+	}
+	return append(args, text)
 }
 
 // refusalLine picks the cause of a refused post from its stderr, at most 200 characters, so the

@@ -19,6 +19,22 @@ import (
 const runningDump = "system/com.apple.security.syspolicy = {\n\tactive count = 3\n\tstate = running\n\n\tprogram = /usr/libexec/syspolicyd\n\tendpoints = {\n\t\t\"com.apple.security.syspolicy\" = {\n\t\t\tstate = active\n\t\t}\n\t}\n\truns = 1\n\tpid = 549\n}\n"
 const throttledDump = "system/com.apple.security.syspolicy = {\n\tstate = spawn scheduled\n\truns = 23\n\tendpoints = {\n\t\tstate = active\n\t}\n}\n"
 
+// The Go-only post fixture records actual child argv without contacting Matrix.
+func TestMain(m *testing.M) {
+	if path := os.Getenv("HOST_WATCH_TEST_POST_ARGV"); path != "" {
+		data, err := json.Marshal(os.Args[1:])
+		if err == nil {
+			err = os.WriteFile(path, data, 0o600)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
 // parseLaunchctl reads only top-level keys: nested endpoint states must not mask the service state.
 func TestParseLaunchctl(t *testing.T) {
 	s, err := parseLaunchctl(runningDump)
@@ -703,6 +719,80 @@ func TestValidate(t *testing.T) {
 		if err := o.validate(); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+// Explicit unaddressed and legacy addressed configurations are valid; missing intent and
+// conflicting modes reject with the intended diagnostic, before any observation or post.
+func TestValidateAddressingIntent(t *testing.T) {
+	canonical, err := canonicalFlagPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := options{reportsDirs: []string{"/r"}, toolPrefixes: []string{"mac-firewall"}, stateDir: "/s", flagPath: canonical, a2a: "/a", as: "x", room: "!r", topic: "host-watch", dataVolume: "/d", fseventsLabel: "l", interval: 15 * time.Second, probeEvery: time.Minute, postTimeout: 20 * time.Second, clearAfter: 10 * time.Minute}
+	for _, c := range []struct {
+		name, to, wantErr string
+		unaddressed       bool
+	}{
+		{name: "addressed", to: "@recipient:example.test"},
+		{name: "unaddressed", unaddressed: true},
+		{name: "missing", wantErr: "--to or --unaddressed"},
+		{name: "conflicting", to: "@recipient:example.test", unaddressed: true, wantErr: "--unaddressed and --to are mutually exclusive"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := base
+			o.to, o.unaddressed = c.to, c.unaddressed
+			err := o.validate()
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("valid configuration rejected: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("got %v, want diagnostic %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// The production post runner sends no recipient flag in unaddressed mode and retains legacy
+// addressing. Actual child argv preserves topic and text exactly; this does not prove Matrix wake policy.
+func TestPostAddressingModes(t *testing.T) {
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unaddressed := range []bool{false, true} {
+		t.Run(fmt.Sprint(unaddressed), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "argv.json")
+			t.Setenv("HOST_WATCH_TEST_POST_ARGV", path)
+			o := options{a2a: bin, as: "me", room: "!room", topic: "host-watch", unaddressed: unaddressed}
+			if !unaddressed {
+				o.to = "@recipient:example.test"
+			}
+			text := "WARN probe: literal --to in text\nsecond line"
+			sys := liveSystem(o, "/usr/bin/true")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := sys.post(ctx, text); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"--as", "me", "post", "!room", "--topic", "host-watch", "--kind", "notice"}
+			if !unaddressed {
+				want = append(want, "--to", "@recipient:example.test")
+			}
+			want = append(want, text)
+			if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+				t.Fatalf("child argv %q, want %q", got, want)
+			}
+		})
 	}
 }
 

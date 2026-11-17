@@ -22,6 +22,7 @@ How it works:
 - It observes with Apple binaries (`/bin/launchctl`, `/bin/ps`, `/usr/sbin/sysctl`) and in-process calls only, so it keeps working while the gate is shut.
 - Every alert is shown at once as a macOS notification and logged to `events.jsonl`; the log is best effort and a log failure never loses the notice, which lives in the saved queue.
 - It is also sent to a2a as one notice at a time. a2a is a non-Apple binary, so while execs are degraded notices are queued and sent once the host is healthy again.
+- Choose explicit addressing: `--unaddressed` posts routine notices without addressees; `--to RECIPIENTS` retains addressed delivery. Supplying both modes or neither is refused. macOS notifications still follow `--notify` independently. Address an actionable escalation separately after checking that the condition still requires the recipient's action. Unaddressed notices can still match room or thread subscriptions.
 - a2a delivery is at least once; there is no exactly-once claim, because a2a has no idempotent post. Every notice line carries a stable delivery id (`#<seq>`). The tick alone owns the queue and posts synchronously: it records the batch as in flight and saves, posts with the post timeout (exit 0 means delivered; output is diagnostics only), and records the delivery in the same saved state. Only the current state format (version 1) is read; any other state file is refused, with no migration. A repeat is possible only when the durable record of the delivery is lost or could not be written, or when the process dies between the post and the record; a repeat carries the same `#<seq>`.
 - Its only automatic action is the exec-degraded flag, described in [docs/host-health-degraded-flag.md](docs/host-health-degraded-flag.md). It never kills, restarts or reconfigures other processes, launchd jobs or protection settings.
 - It writes a heartbeat file (RFC 3339) every tick.
@@ -60,7 +61,7 @@ Every input is an explicit flag; there are no defaults. `--once` is read-only: o
   --tool-report-prefixes mac-firewall,mac-infra-core,host-watch \
   --state-dir "$HOME/Library/Application Support/host-watch" \
   --degraded-flag "$HOME/Library/Application Support/host-health/exec-degraded" \
-  --a2a "$HOME/.local/bin/a2a" --as AGENT --room ROOM --topic TOPIC --to RECIPIENTS \
+  --a2a "$HOME/.local/bin/a2a" --as AGENT --room ROOM --topic TOPIC --unaddressed \
   --data-volume /System/Volumes/Data \
   --fseventsd-watchdog-label works.relux.mac-infra-fseventsd-watchdog \
   --interval 15s --probe-every 60s --post-timeout 20s --clear-after 10m --notify

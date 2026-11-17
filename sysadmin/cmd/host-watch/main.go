@@ -28,6 +28,7 @@ type options struct {
 	dataVolume, fseventsLabel                     string
 	interval, postTimeout, probeEvery, clearAfter time.Duration
 	notify, once, dryRun                          bool
+	unaddressed                                   bool
 }
 
 func main() {
@@ -45,7 +46,8 @@ func main() {
 	flag.StringVar(&o.as, "as", "", "required: a2a identity to post as")
 	flag.StringVar(&o.room, "room", "", "required: a2a room")
 	flag.StringVar(&o.topic, "topic", "", "required: a2a topic slug or root event id the notices are posted in")
-	flag.StringVar(&o.to, "to", "", "required: comma-separated addressees")
+	flag.StringVar(&o.to, "to", "", "comma-separated addressees; required unless --unaddressed")
+	flag.BoolVar(&o.unaddressed, "unaddressed", false, "post notices without addressees; mutually exclusive with --to")
 	flag.StringVar(&o.dataVolume, "data-volume", "", "required: data volume mount point for the free-space check")
 	flag.StringVar(&o.fseventsLabel, "fseventsd-watchdog-label", "", "required: user LaunchAgent label of the fseventsd watchdog")
 	flag.DurationVar(&o.interval, "interval", 0, "required: loop interval, e.g. 15s")
@@ -99,10 +101,16 @@ func (o options) validate() error {
 	if len(o.toolPrefixes) == 0 {
 		missing = append(missing, "--tool-report-prefixes")
 	}
-	for _, kv := range [][2]string{{"state-dir", o.stateDir}, {"degraded-flag", o.flagPath}, {"a2a", o.a2a}, {"as", o.as}, {"room", o.room}, {"topic", o.topic}, {"to", o.to}, {"data-volume", o.dataVolume}, {"fseventsd-watchdog-label", o.fseventsLabel}} {
+	for _, kv := range [][2]string{{"state-dir", o.stateDir}, {"degraded-flag", o.flagPath}, {"a2a", o.a2a}, {"as", o.as}, {"room", o.room}, {"topic", o.topic}, {"data-volume", o.dataVolume}, {"fseventsd-watchdog-label", o.fseventsLabel}} {
 		if kv[1] == "" {
 			missing = append(missing, "--"+kv[0])
 		}
+	}
+	if o.unaddressed && o.to != "" {
+		return errors.New("--unaddressed and --to are mutually exclusive")
+	}
+	if !o.unaddressed && o.to == "" {
+		missing = append(missing, "--to or --unaddressed")
 	}
 	for _, kv := range []struct {
 		name string
