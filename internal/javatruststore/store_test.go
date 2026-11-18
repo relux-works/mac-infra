@@ -397,6 +397,26 @@ func TestGradleUsesProjectScopedSettings(t *testing.T) {
 	if _, err := f.tool.Build(context.Background(), f.options); err != nil {
 		t.Fatal(err)
 	}
+	gradleHome := filepath.Join(f.projectOutput(), gradleHomeName)
+	if err := os.Mkdir(gradleHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(f.projectOutput(), storeFileName)
+	projectSettings := strings.Join([]string{
+		"systemProp.javax.net.ssl.trustStore=" + storePath,
+		"systemProp.javax.net.ssl.trustStorePassword=" + storePassword,
+		"systemProp.javax.net.ssl.trustStoreType=JKS",
+		"systemProp.gradle.user.home=" + gradleHome,
+		"systemProp.org.gradle.java.home=" + f.options.JavaHome,
+		"org.gradle.java.home=" + f.options.JavaHome,
+		"org.gradle.jvmargs=-Xmx1g -Djavax.net.ssl.trustStore=\"" + storePath + "\"",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(f.options.ProjectDir, "gradle.properties"), []byte(projectSettings), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gradleHome, "gradle.properties"), []byte("systemProp.javax.net.ssl.trustStore="+storePath+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	wrapper := filepath.Join(f.options.ProjectDir, "gradlew")
 	if err := os.WriteFile(wrapper, []byte("fixture wrapper"), 0700); err != nil {
 		t.Fatal(err)
@@ -409,7 +429,20 @@ func TestGradleUsesProjectScopedSettings(t *testing.T) {
 	t.Setenv("JAVA_HOME", "/wrong/java")
 	t.Setenv("GRADLE_OPTS", "-Dfixture.gradle=1")
 	t.Setenv("GRADLE_USER_HOME", "/wrong/gradle-home")
-	if err := f.tool.Gradle(context.Background(), f.options, []string{"--offline", "assemble"}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+	gradleArgs := []string{
+		"--offline", "assemble",
+		"--gradle-user-home=" + gradleHome,
+		"-g", gradleHome,
+		"--project-dir=" + f.options.ProjectDir,
+		"-p", ".",
+		"-Djavax.net.ssl.trustStore=" + storePath,
+		"--system-prop=javax.net.ssl.trustStorePassword=" + storePassword,
+		"--system-prop", "javax.net.ssl.trustStoreType=JKS",
+		"-Dgradle.user.home=" + gradleHome,
+		"-Dorg.gradle.java.home=" + f.options.JavaHome,
+		"-Dorg.gradle.jvmargs=-Xmx1g '-Djavax.net.ssl.trustStore=" + storePath + "'",
+	}
+	if err := f.tool.Gradle(context.Background(), f.options, gradleArgs, strings.NewReader(""), io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if process.call != 1 || process.name != "./gradlew" || process.dir != f.options.ProjectDir {
@@ -417,12 +450,15 @@ func TestGradleUsesProjectScopedSettings(t *testing.T) {
 	}
 	joinedArgs := strings.Join(process.args, " ")
 	for _, expected := range []string{
-		"--gradle-user-home=" + filepath.Join(f.projectOutput(), gradleHomeName),
+		"--gradle-user-home=" + gradleHome,
 		"-Dorg.gradle.java.home=" + f.options.JavaHome,
-		"-Djavax.net.ssl.trustStore=" + filepath.Join(f.projectOutput(), storeFileName),
+		"-Djavax.net.ssl.trustStore=" + storePath,
 		"-Djavax.net.ssl.trustStorePassword=" + storePassword,
 		"-Djavax.net.ssl.trustStoreType=JKS",
 		"--offline assemble",
+		"--project-dir=" + f.options.ProjectDir,
+		"-g " + gradleHome,
+		"-p .",
 	} {
 		if !strings.Contains(joinedArgs, expected) {
 			t.Errorf("Gradle args %q missing %q", joinedArgs, expected)
@@ -431,8 +467,8 @@ func TestGradleUsesProjectScopedSettings(t *testing.T) {
 	env := strings.Join(process.env, "\n")
 	for _, expected := range []string{
 		"JAVA_HOME=" + f.options.JavaHome,
-		"GRADLE_USER_HOME=" + filepath.Join(f.projectOutput(), gradleHomeName),
-		"JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=\"" + filepath.Join(f.projectOutput(), storeFileName) + "\"",
+		"GRADLE_USER_HOME=" + gradleHome,
+		"JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=\"" + storePath + "\"",
 	} {
 		if !strings.Contains(env, expected) {
 			t.Errorf("Gradle environment missing %q", expected)
