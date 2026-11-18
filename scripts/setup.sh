@@ -105,6 +105,7 @@ ALL_BINARIES=(
   "mac-tool-secret"
   "mac-tool-secret-probe"
   "mac-netnone"
+  "mac-java-truststore"
   "mac-firewall"
   "mac-keyvault"
   "mac-keyvault-kek"
@@ -327,6 +328,10 @@ if selected mac-netnone; then
   echo "Building mac-netnone..."
   go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-netnone" ./cmd/mac-netnone
 fi
+if selected mac-java-truststore; then
+  echo "Building mac-java-truststore..."
+  go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-java-truststore" ./cmd/mac-java-truststore
+fi
 if selected mac-firewall; then
   echo "Building mac-firewall..."
   go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-firewall" ./cmd/mac-firewall
@@ -374,6 +379,7 @@ BUILT_BINARIES=(
   "mac-tool-secret"
   "mac-tool-secret-probe"
   "mac-netnone"
+  "mac-java-truststore"
   "mac-firewall"
 )
 SELECTED_BUILDS=()
@@ -471,6 +477,9 @@ done
 if selected mac-netnone; then
   ln -sf "$BUILD_DIR/mac-netnone" "$BIN_DIR/mac-netnone"
 fi
+if selected mac-java-truststore; then
+  ln -sf "$BUILD_DIR/mac-java-truststore" "$BIN_DIR/mac-java-truststore"
+fi
 if selected mac-firewall; then
   ln -sf "$BUILD_DIR/mac-firewall" "$BIN_DIR/mac-firewall"
 fi
@@ -545,6 +554,9 @@ for name in mac-tool-secret mac-tool-secret-probe; do
 done
 if selected mac-netnone; then
   echo "  $BIN_DIR/mac-netnone -> $BUILD_DIR/mac-netnone"
+fi
+if selected mac-java-truststore; then
+  echo "  $BIN_DIR/mac-java-truststore -> $BUILD_DIR/mac-java-truststore"
 fi
 if selected mac-firewall; then
   echo "  $BIN_DIR/mac-firewall -> $BUILD_DIR/mac-firewall"

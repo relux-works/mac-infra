@@ -69,7 +69,7 @@ if /bin/launchctl print "$policy_job" >/dev/null 2>&1; then
   }
 fi
 
-rm -f "$BIN_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-sweep" "$BIN_DIR/mac-load-profile" "$BIN_DIR/mac-video-profile" "$BIN_DIR/mac-disk-profile" "$BIN_DIR/mac-cleanup" "$BIN_DIR/mac-infra-core" "$BIN_DIR/mac-safari-session" "$BIN_DIR/mac-chrome-session" "$BIN_DIR/mac-browser-site" "$BIN_DIR/mac-document-sanitize" "$BIN_DIR/mac-keyvault" "$BIN_DIR/mac-security" "$BIN_DIR/mac-policy-journal" "$BIN_DIR/mac-netnone" "$BIN_DIR/mac-firewall"
+rm -f "$BIN_DIR/mac-audio-reset" "$BIN_DIR/mac-audio-sweep" "$BIN_DIR/mac-load-profile" "$BIN_DIR/mac-video-profile" "$BIN_DIR/mac-disk-profile" "$BIN_DIR/mac-cleanup" "$BIN_DIR/mac-infra-core" "$BIN_DIR/mac-safari-session" "$BIN_DIR/mac-chrome-session" "$BIN_DIR/mac-browser-site" "$BIN_DIR/mac-document-sanitize" "$BIN_DIR/mac-keyvault" "$BIN_DIR/mac-security" "$BIN_DIR/mac-policy-journal" "$BIN_DIR/mac-netnone" "$BIN_DIR/mac-java-truststore" "$BIN_DIR/mac-firewall"
 # One-time migration cleanup for installs predating Curator distribution.
 # Current setup.sh no longer creates these retired global skill paths.
 rm -f "$HOME/.codex/skills/$SKILL_NAME" "$HOME/.claude/skills/$SKILL_NAME"

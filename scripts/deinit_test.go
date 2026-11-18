@@ -202,6 +202,34 @@ func TestSetupInstallsAndDeinitRemovesNetnone(t *testing.T) {
 	}
 }
 
+// Claim: mac-java-truststore is selectable, staged, linked, reported, and removed by deinit without executing either script.
+func TestSetupInstallsAndDeinitRemovesJavaTruststore(t *testing.T) {
+	setup, err := os.ReadFile("setup.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"mac-java-truststore"`,
+		`go -C "$PROJECT_ROOT" build -trimpath -ldflags "$LDFLAGS" -o "$STAGE_DIR/mac-java-truststore" ./cmd/mac-java-truststore`,
+		`ln -sf "$BUILD_DIR/mac-java-truststore" "$BIN_DIR/mac-java-truststore"`,
+		`echo "  $BIN_DIR/mac-java-truststore -> $BUILD_DIR/mac-java-truststore"`,
+	} {
+		if !strings.Contains(string(setup), want) {
+			t.Fatalf("setup missing %q", want)
+		}
+	}
+	deinit, err := os.ReadFile("deinit.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(deinit), "\n") {
+		if strings.HasPrefix(line, "rm -f ") && strings.Contains(line, `"$BIN_DIR/mac-java-truststore"`) {
+			return
+		}
+	}
+	t.Fatal("deinit removal list omits mac-java-truststore")
+}
+
 // Missing heartbeat CLI refuses deinit before deleting the installed netnone
 // link or the heartbeat plist. The fake-backed success case is the control.
 func TestDeinitRefusesMissingHeartbeatCLI(t *testing.T) {

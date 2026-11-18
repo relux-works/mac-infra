@@ -22,6 +22,7 @@ macOS operations tooling and agent skills for local workstation maintenance.
 | `apps/netfilter` | Per-app traffic analysis: an `NEFilterDataProvider` content-filter system extension (observe-only by default) that attributes every socket flow to its program (signing id, team, path, signing status) and logs app, remote hostname, port and direction | `xcodegen generate` and `xcodebuild` in `apps/netfilter`, `swift test` there for the identity resolver (see its README); signed activation is an owner step; `tail-flows.sh OUT.jsonl` for debugging | JSON lines in the unified log (subsystem `works.relux.mac-infra.netfilter`); [design](apps/netfilter/DESIGN.md) |
 | `host-watch` (`sysadmin/`) | Watchdog for the exec-gate stall: syspolicyd crash/throttle, non-Apple exec latency, held execs, WindowServer and tool crash reports, memory/swap/disk; Apple-only observation, macOS notification plus queued a2a notice, single action is the exec-degraded flag | `cd sysadmin && go test ./...`; `host-watch --once --dry-run …` (see `sysadmin/README.md`) | `state.json`, `events.jsonl`, `heartbeat` in `--state-dir`; flag at `--degraded-flag` |
 | `mac-netnone` | Run JVM/Gradle tests with outbound networking denied in a dedicated Colima profile | `mac-netnone prep --repo DIR --task test`, `mac-netnone run --repo DIR --task test --out DIR`, `mac-netnone selftest`, `mac-netnone status`, `mac-netnone stop` | `--out/<UTC timestamp>/` test results/reports; private prep records and fixture evidence under `~/Library/Application Support/mac-infra/netnone/` |
+| `mac-java-truststore` | Add one SHA-256-pinned public System.keychain CA root to a copy of a JDK's default cacerts and run one project's Gradle wrapper with that store | `mac-java-truststore build --project "$PWD" --java-home "$JAVA_HOME" --fingerprint "$ROOT_SHA256" --out .temp/java-trust`; `verify` with the same flags; `gradle` with the same flags and `-- assemble` | `.temp/java-trust/{truststore,manifest.json,gradle-user-home/}`; store directory mode `0700`, store and manifest mode `0600` |
 | `mac-policy-journal` | Observe Claude policy-file metadata without reading contents | `mac-policy-journal run --user-root ABS --journal ABS --rescan 30s`, `enable`, `status`, `disable` | Private `events.jsonl` and user LaunchAgent; [coverage, privacy and limits](docs/claude-policy-journal.md) |
 | `mac-security` | Bounded read-only macOS security evidence, persistence fingerprints and coverage-aware drift | `mac-security scan --json`, `mac-security baseline --file NEW_PATH --json`, `mac-security diff --file BASELINE --json` | JSON stdout + summary stderr; explicit baseline creates a new `0600` file; use `.temp/security/` |
 | `mac-tool-secret` | Inventory and verify plaintext-release and writer generic-password ACLs; foreign_writer fails; bind gated, real mutation unexercised; never reads or outputs secret values | Known-service `inventory --json`; local full `inventory --all --owner-sitting --out FILE`; `bind --service S --account A --owner PATH --dry-run`, attended `bind --owner-sitting`, `verify`, `verify-audit`; separate probe: `refused` passes, `allowed`/`inconclusive` fail | Metadata-only `0600` append-only hash-chained audit and checkpoint under `~/Library/Application Support/mac-infra/tool-secret/`; [workflow and SPI limits](agents/skills/mac-infra/references/tool-secret.md), verified on macOS 26.5.1 (25F80) |
@@ -148,6 +149,30 @@ Legacy records without an `arch` field are treated as arm64; they do not
 authorize amd64 runs. `status` shows the architecture of each prep record. Run executes
 the recorded immutable image with `--network none` and `./gradlew --offline TASK`.
 Gradle daemon IPC on loopback stays available inside the container.
+
+## Project-Scoped Java Truststores
+
+`mac-java-truststore` reads public certificates from `/Library/Keychains/System.keychain`, selects exactly one CA root by its SHA-256 certificate fingerprint, and builds a new truststore from the selected JDK's `lib/security/cacerts`. It is read-only with respect to the keychain and JDK. The relative `--out` path must have an existing, non-symlink parent under the project, and its final directory must not already exist. The project `.temp/` directory is ignored by this repository.
+
+```bash
+mkdir -p .temp
+mac-java-truststore build --project "$PWD" --java-home "$JAVA_HOME" --fingerprint "$ROOT_SHA256" --out .temp/java-trust
+mac-java-truststore verify --project "$PWD" --java-home "$JAVA_HOME" --fingerprint "$ROOT_SHA256" --out .temp/java-trust
+mac-java-truststore gradle --project "$PWD" --java-home "$JAVA_HOME" --fingerprint "$ROOT_SHA256" --out .temp/java-trust -- assemble
+```
+
+The output directory contains `truststore` and `manifest.json`, with an isolated
+`gradle-user-home/`. `verify` rechecks the pinned public root and the JDK cacerts
+and store hashes without rebuilding. `gradle` refuses stale output, then invokes only the
+project's executable `./gradlew`. It refuses conflicting project or isolated-home
+Gradle properties, and arguments that redirect the project or Gradle user home,
+select a different daemon JDK, or replace the truststore. It sets `JAVA_HOME`, `JAVA_TOOL_OPTIONS` and
+`GRADLE_USER_HOME` for that child process tree, so the Gradle client, daemon and
+toolchain JVMs receive the truststore. The selected user home and JDK are also
+passed explicitly, and daemon state stays local to this
+output directory. It does not change shell settings, user Gradle configuration
+or JDK files. The project's own build scripts remain responsible for their
+runtime behavior.
 
 `prep`, `run` and `selftest` accept `--arch arm64|amd64`, defaulting to `arm64`.
 Other values are usage errors (exit 2). Use `--arch amd64` for both prep and run

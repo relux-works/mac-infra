@@ -181,6 +181,39 @@ Use `mac-netnone prep`, then `run`, for JVM/Gradle tests in a dedicated
 network-denied Colima profile. Read the [workflow reference](references/netnone.md)
 for toolchain pinning, offline caches, qualification, load limits and state paths.
 
+## Project-Scoped Java Truststores
+
+Use `mac-java-truststore` when one Java/Gradle project needs a public CA root
+from `/Library/Keychains/System.keychain`. Supply the root's SHA-256 certificate
+fingerprint; the tool accepts exactly one matching self-signed CA root that is
+currently valid. It reads public certificate data only and does not change
+keychain trust settings.
+
+Choose a new output directory under the project with an existing, non-symlink
+parent. The directory and truststore are private (`0700` and `0600`). For
+example, from a repository where `.temp/` is ignored:
+
+```bash
+mkdir -p .temp
+mac-java-truststore build --project "$PWD" --java-home "$JAVA_HOME" --fingerprint "$ROOT_SHA256" --out .temp/java-trust
+mac-java-truststore verify --project "$PWD" --java-home "$JAVA_HOME" --fingerprint "$ROOT_SHA256" --out .temp/java-trust
+mac-java-truststore gradle --project "$PWD" --java-home "$JAVA_HOME" --fingerprint "$ROOT_SHA256" --out .temp/java-trust -- assemble
+```
+
+`build` copies the selected JDK's `lib/security/cacerts`, adds the pinned
+certificate to that copy, and writes `manifest.json`. `verify` rechecks the
+pinned public root and current JDK/store hashes without rebuilding. `gradle` verifies
+first and runs only the project's `./gradlew`. It sets `JAVA_HOME`,
+`JAVA_TOOL_OPTIONS` and `GRADLE_USER_HOME` for that process tree, and passes the
+selected user home and JDK explicitly; this covers the Gradle client, its daemon,
+and toolchain JVMs while keeping the daemon registry
+and caches under the chosen output directory. It refuses conflicting project or
+isolated-home Gradle properties, and arguments that change the project or Gradle
+user home, replace the pinned truststore, or select a different daemon JDK. No shell profile, global Gradle
+configuration, JDK file or keychain setting is changed. Use `verify` before a
+later build; a changed pin, JDK cacerts or store is refused until rebuilt into a
+new output directory.
+
 ## Exec-Gate Stall Watch
 
 When Apple binaries answer but every non-Apple exec hangs, check
