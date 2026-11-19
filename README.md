@@ -172,9 +172,11 @@ toolchain JVMs receive the truststore. The selected user home and JDK are also
 passed explicitly, and daemon state stays local to this
 output directory. It does not change shell settings, user Gradle configuration
 or JDK files. The project's own build scripts remain responsible for their
-runtime behavior. It refuses projects containing
+runtime behavior. It searches upward from the selected directory for Gradle's
+settings file and refuses when that build root contains
 `gradle/gradle-daemon-jvm.properties`, because daemon JVM criteria can override
-the selected JDK and are not resolved by this command.
+the selected JDK and are not resolved by this command. Custom settings-file
+arguments are refused so they cannot redirect that root check.
 
 `prep`, `run` and `selftest` accept `--arch arm64|amd64`, defaulting to `arm64`.
 Other values are usage errors (exit 2). Use `--arch amd64` for both prep and run

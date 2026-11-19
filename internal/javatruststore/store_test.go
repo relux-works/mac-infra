@@ -618,6 +618,59 @@ func TestGradleDaemonCriteriaRefusalAndPositive(t *testing.T) {
 			t.Fatalf("daemon criteria refusal created Gradle home: %v", err)
 		}
 	})
+	for _, settingsFile := range []string{"settings.gradle", "settings.gradle.kts"} {
+		t.Run("ancestor-criteria-refused-for-nested-wrapper/"+settingsFile, func(t *testing.T) {
+			f := newFixture(t)
+			projectRoot := f.options.ProjectDir
+			nested := filepath.Join(projectRoot, "nested", "subproject")
+			if err := os.MkdirAll(nested, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("missing-settings", filepath.Join(projectRoot, "nested", settingsFile)); err != nil {
+				t.Fatal(err)
+			}
+			settingsContents := "rootProject.name = 'fixture'\n"
+			if strings.HasSuffix(settingsFile, ".kts") {
+				settingsContents = "rootProject.name = \"fixture\"\n"
+			}
+			if err := os.WriteFile(filepath.Join(projectRoot, settingsFile), []byte(settingsContents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			criteriaDir := filepath.Join(projectRoot, "gradle")
+			if err := os.Mkdir(criteriaDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(criteriaDir, "gradle-daemon-jvm.properties"), []byte("toolchainVersion=99\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(nested, "gradlew"), []byte("fixture nested wrapper"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(nested, ".task"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			f.options.ProjectDir = nested
+			if _, err := f.tool.Build(context.Background(), f.options); err != nil {
+				t.Fatal(err)
+			}
+			process := &processCapture{}
+			f.tool.Processes = process
+			before := filesystemSnapshot(t, projectRoot, f.options.JavaHome)
+			if err := f.tool.Gradle(context.Background(), f.options, []string{"assemble"}, nil, io.Discard, io.Discard); Cause(err) != CauseGradleDaemonCriteria || ExitCode(err) != ExitRefusal {
+				t.Fatalf("nested Gradle cause=%q exit=%d, want ancestor daemon-criteria refusal", Cause(err), ExitCode(err))
+			}
+			if process.call != 0 {
+				t.Fatalf("ancestor daemon criteria refusal launched Gradle %d times", process.call)
+			}
+			after := filesystemSnapshot(t, projectRoot, f.options.JavaHome)
+			if !equalFilesystemSnapshots(before, after) {
+				t.Fatal("ancestor daemon criteria refusal changed project, truststore, manifest, or JDK state")
+			}
+			if _, err := os.Lstat(filepath.Join(f.projectOutput(), gradleHomeName)); !os.IsNotExist(err) {
+				t.Fatalf("ancestor daemon criteria refusal created Gradle home: %v", err)
+			}
+		})
+	}
 }
 
 // Claim: a project Gradle truststore override is rejected before creating Gradle state or launching the wrapper.
@@ -681,6 +734,11 @@ func TestGradleRefusesScopeOverridesInArguments(t *testing.T) {
 		{"-g", "/other/gradle-home", "assemble"},
 		{"-p", "/other/project", "assemble"},
 		{"--project-dir=/other/project", "assemble"},
+		{"-c", "/other/settings.gradle", "assemble"},
+		{"-c/other/settings.gradle", "assemble"},
+		{"-c=/other/settings.gradle", "assemble"},
+		{"--settings-file", "/other/settings.gradle", "assemble"},
+		{"--settings-file=/other/settings.gradle", "assemble"},
 		{"-Dorg.gradle.java.home=/other/jdk", "assemble"},
 	}
 	for _, args := range cases {

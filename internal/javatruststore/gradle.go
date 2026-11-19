@@ -17,10 +17,10 @@ func (t Tool) Gradle(ctx context.Context, options Options, args []string, stdin 
 	if err != nil {
 		return err
 	}
-	if err := refuseDaemonCriteria(info.ProjectDir); err != nil {
+	if err := validateGradleArgs(args, info); err != nil {
 		return err
 	}
-	if err := validateGradleArgs(args, info); err != nil {
+	if err := refuseDaemonCriteria(info.ProjectDir); err != nil {
 		return err
 	}
 	if err := checkGradleProperties(info.ProjectDir, info); err != nil {
@@ -60,8 +60,12 @@ func (t Tool) Gradle(ctx context.Context, options Options, args []string, stdin 
 }
 
 func refuseDaemonCriteria(projectDir string) error {
-	criteria := filepath.Join(projectDir, "gradle", "gradle-daemon-jvm.properties")
-	_, err := os.Lstat(criteria)
+	buildRoot, err := resolveGradleBuildRoot(projectDir)
+	if err != nil {
+		return refusal(CauseGradleDaemonCriteria, err)
+	}
+	criteria := filepath.Join(buildRoot, "gradle", "gradle-daemon-jvm.properties")
+	_, err = os.Lstat(criteria)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -71,11 +75,42 @@ func refuseDaemonCriteria(projectDir string) error {
 	return refusal(CauseGradleDaemonCriteria, nil)
 }
 
+// resolveGradleBuildRoot follows Gradle's default settings-file search from the
+// selected start directory toward the filesystem root. Custom settings-file
+// arguments are rejected by validateGradleArgs before this lookup.
+func resolveGradleBuildRoot(projectDir string) (string, error) {
+	start, err := filepath.Abs(projectDir)
+	if err != nil {
+		return "", err
+	}
+	for directory := filepath.Clean(start); ; directory = filepath.Dir(directory) {
+		for _, name := range []string{"settings.gradle", "settings.gradle.kts"} {
+			_, err := os.Stat(filepath.Join(directory, name))
+			if err == nil {
+				return directory, nil
+			}
+			if !os.IsNotExist(err) {
+				return "", err
+			}
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return filepath.Clean(start), nil
+		}
+	}
+}
+
 func validateGradleArgs(args []string, info StoreInfo) error {
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
 		if argument == "--" {
 			break
+		}
+		if _, consumesNext, matched := gradlePathOption(args, index, "--settings-file", "-c"); matched {
+			if consumesNext {
+				index++
+			}
+			return refusal(CauseGradleConfig, nil)
 		}
 		if value, consumesNext, matched := gradlePathOption(args, index, "--gradle-user-home", "-g"); matched {
 			if consumesNext {
