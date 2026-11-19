@@ -584,6 +584,45 @@ func TestGradleDaemonCriteriaRefusalAndPositive(t *testing.T) {
 			t.Fatalf("Gradle wrapper calls = %d, want 1", process.call)
 		}
 	})
+	t.Run("regular-settings-symlink-is-root-marker", func(t *testing.T) {
+		f := newFixture(t)
+		projectRoot := f.options.ProjectDir
+		nested := filepath.Join(projectRoot, "nested", "subproject")
+		if err := os.MkdirAll(nested, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projectRoot, "settings-source.gradle"), []byte("rootProject.name = 'fixture'\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("settings-source.gradle", filepath.Join(projectRoot, "settings.gradle")); err != nil {
+			t.Fatal(err)
+		}
+		criteriaDir := filepath.Join(nested, "gradle")
+		if err := os.Mkdir(criteriaDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(criteriaDir, "gradle-daemon-jvm.properties"), []byte("toolchainVersion=99\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(nested, ".task"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nested, "gradlew"), []byte("fixture nested wrapper"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		f.options.ProjectDir = nested
+		if _, err := f.tool.Build(context.Background(), f.options); err != nil {
+			t.Fatal(err)
+		}
+		process := &processCapture{}
+		f.tool.Processes = process
+		if err := f.tool.Gradle(context.Background(), f.options, []string{"assemble"}, nil, io.Discard, io.Discard); err != nil {
+			t.Fatalf("Gradle ignored a symlink to a regular settings file: %v", err)
+		}
+		if process.call != 1 {
+			t.Fatalf("Gradle wrapper calls = %d, want 1", process.call)
+		}
+	})
 	t.Run("criteria-refused-before-launch", func(t *testing.T) {
 		f := newFixture(t)
 		if _, err := f.tool.Build(context.Background(), f.options); err != nil {
@@ -619,57 +658,74 @@ func TestGradleDaemonCriteriaRefusalAndPositive(t *testing.T) {
 		}
 	})
 	for _, settingsFile := range []string{"settings.gradle", "settings.gradle.kts"} {
-		t.Run("ancestor-criteria-refused-for-nested-wrapper/"+settingsFile, func(t *testing.T) {
-			f := newFixture(t)
-			projectRoot := f.options.ProjectDir
-			nested := filepath.Join(projectRoot, "nested", "subproject")
-			if err := os.MkdirAll(nested, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink("missing-settings", filepath.Join(projectRoot, "nested", settingsFile)); err != nil {
-				t.Fatal(err)
-			}
-			settingsContents := "rootProject.name = 'fixture'\n"
-			if strings.HasSuffix(settingsFile, ".kts") {
-				settingsContents = "rootProject.name = \"fixture\"\n"
-			}
-			if err := os.WriteFile(filepath.Join(projectRoot, settingsFile), []byte(settingsContents), 0600); err != nil {
-				t.Fatal(err)
-			}
-			criteriaDir := filepath.Join(projectRoot, "gradle")
-			if err := os.Mkdir(criteriaDir, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(criteriaDir, "gradle-daemon-jvm.properties"), []byte("toolchainVersion=99\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(nested, "gradlew"), []byte("fixture nested wrapper"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(filepath.Join(nested, ".task"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			f.options.ProjectDir = nested
-			if _, err := f.tool.Build(context.Background(), f.options); err != nil {
-				t.Fatal(err)
-			}
-			process := &processCapture{}
-			f.tool.Processes = process
-			before := filesystemSnapshot(t, projectRoot, f.options.JavaHome)
-			if err := f.tool.Gradle(context.Background(), f.options, []string{"assemble"}, nil, io.Discard, io.Discard); Cause(err) != CauseGradleDaemonCriteria || ExitCode(err) != ExitRefusal {
-				t.Fatalf("nested Gradle cause=%q exit=%d, want ancestor daemon-criteria refusal", Cause(err), ExitCode(err))
-			}
-			if process.call != 0 {
-				t.Fatalf("ancestor daemon criteria refusal launched Gradle %d times", process.call)
-			}
-			after := filesystemSnapshot(t, projectRoot, f.options.JavaHome)
-			if !equalFilesystemSnapshots(before, after) {
-				t.Fatal("ancestor daemon criteria refusal changed project, truststore, manifest, or JDK state")
-			}
-			if _, err := os.Lstat(filepath.Join(f.projectOutput(), gradleHomeName)); !os.IsNotExist(err) {
-				t.Fatalf("ancestor daemon criteria refusal created Gradle home: %v", err)
-			}
-		})
+		for _, markerKind := range []string{"dangling-symlink", "directory", "symlink-to-directory"} {
+			t.Run("ancestor-criteria-refused-for-nested-wrapper/"+settingsFile+"/"+markerKind, func(t *testing.T) {
+				f := newFixture(t)
+				projectRoot := f.options.ProjectDir
+				nested := filepath.Join(projectRoot, "nested", "subproject")
+				if err := os.MkdirAll(nested, 0700); err != nil {
+					t.Fatal(err)
+				}
+				marker := filepath.Join(projectRoot, "nested", settingsFile)
+				switch markerKind {
+				case "dangling-symlink":
+					if err := os.Symlink("missing-settings", marker); err != nil {
+						t.Fatal(err)
+					}
+				case "directory":
+					if err := os.Mkdir(marker, 0700); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink-to-directory":
+					if err := os.Mkdir(filepath.Join(projectRoot, "nested", "settings-dir-target"), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink("settings-dir-target", marker); err != nil {
+						t.Fatal(err)
+					}
+				}
+				settingsContents := "rootProject.name = 'fixture'\n"
+				if strings.HasSuffix(settingsFile, ".kts") {
+					settingsContents = "rootProject.name = \"fixture\"\n"
+				}
+				if err := os.WriteFile(filepath.Join(projectRoot, settingsFile), []byte(settingsContents), 0600); err != nil {
+					t.Fatal(err)
+				}
+				criteriaDir := filepath.Join(projectRoot, "gradle")
+				if err := os.Mkdir(criteriaDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(criteriaDir, "gradle-daemon-jvm.properties"), []byte("toolchainVersion=99\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(nested, "gradlew"), []byte("fixture nested wrapper"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(nested, ".task"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				f.options.ProjectDir = nested
+				if _, err := f.tool.Build(context.Background(), f.options); err != nil {
+					t.Fatal(err)
+				}
+				process := &processCapture{}
+				f.tool.Processes = process
+				before := filesystemSnapshot(t, projectRoot, f.options.JavaHome)
+				if err := f.tool.Gradle(context.Background(), f.options, []string{"assemble"}, nil, io.Discard, io.Discard); Cause(err) != CauseGradleDaemonCriteria || ExitCode(err) != ExitRefusal {
+					t.Fatalf("nested Gradle cause=%q exit=%d, want ancestor daemon-criteria refusal", Cause(err), ExitCode(err))
+				}
+				if process.call != 0 {
+					t.Fatalf("ancestor daemon criteria refusal launched Gradle %d times", process.call)
+				}
+				after := filesystemSnapshot(t, projectRoot, f.options.JavaHome)
+				if !equalFilesystemSnapshots(before, after) {
+					t.Fatal("ancestor daemon criteria refusal changed project, truststore, manifest, or JDK state")
+				}
+				if _, err := os.Lstat(filepath.Join(f.projectOutput(), gradleHomeName)); !os.IsNotExist(err) {
+					t.Fatalf("ancestor daemon criteria refusal created Gradle home: %v", err)
+				}
+			})
+		}
 	}
 }
 

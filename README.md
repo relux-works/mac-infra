@@ -173,7 +173,7 @@ passed explicitly, and daemon state stays local to this
 output directory. It does not change shell settings, user Gradle configuration
 or JDK files. The project's own build scripts remain responsible for their
 runtime behavior. It searches upward from the selected directory for Gradle's
-settings file and refuses when that build root contains
+regular settings file and refuses when that build root contains
 `gradle/gradle-daemon-jvm.properties`, because daemon JVM criteria can override
 the selected JDK and are not resolved by this command. Custom settings-file
 arguments are refused so they cannot redirect that root check.

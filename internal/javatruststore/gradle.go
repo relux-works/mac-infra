@@ -78,6 +78,8 @@ func refuseDaemonCriteria(projectDir string) error {
 // resolveGradleBuildRoot follows Gradle's default settings-file search from the
 // selected start directory toward the filesystem root. Custom settings-file
 // arguments are rejected by validateGradleArgs before this lookup.
+// os.Stat accepts symlinks to regular files and ignores directories, matching
+// Gradle's settings-script file check.
 func resolveGradleBuildRoot(projectDir string) (string, error) {
 	start, err := filepath.Abs(projectDir)
 	if err != nil {
@@ -85,11 +87,11 @@ func resolveGradleBuildRoot(projectDir string) (string, error) {
 	}
 	for directory := filepath.Clean(start); ; directory = filepath.Dir(directory) {
 		for _, name := range []string{"settings.gradle", "settings.gradle.kts"} {
-			_, err := os.Stat(filepath.Join(directory, name))
-			if err == nil {
+			info, err := os.Stat(filepath.Join(directory, name))
+			if err == nil && info.Mode().IsRegular() {
 				return directory, nil
 			}
-			if !os.IsNotExist(err) {
+			if err != nil && !os.IsNotExist(err) {
 				return "", err
 			}
 		}

@@ -213,10 +213,10 @@ user home, replace the pinned truststore, or select a different daemon JDK. No s
 configuration, JDK file or keychain setting is changed. Use `verify` before a
 later build; a changed pin, JDK cacerts or store is refused until rebuilt into a
 new output directory. The Gradle route searches upward from the selected
-directory for Gradle's settings file and refuses when that build root contains
-`gradle/gradle-daemon-jvm.properties`, since its daemon criteria can override
-the selected JDK. Custom settings-file arguments are refused so they cannot
-redirect that root check.
+directory for Gradle's regular settings file and refuses when that build root
+contains `gradle/gradle-daemon-jvm.properties`, since its daemon criteria can
+override the selected JDK. Custom settings-file arguments are refused so they
+cannot redirect that root check.
 
 ## Exec-Gate Stall Watch
 
