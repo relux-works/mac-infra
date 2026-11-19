@@ -17,6 +17,9 @@ func (t Tool) Gradle(ctx context.Context, options Options, args []string, stdin 
 	if err != nil {
 		return err
 	}
+	if err := refuseDaemonCriteria(info.ProjectDir); err != nil {
+		return err
+	}
 	if err := validateGradleArgs(args, info); err != nil {
 		return err
 	}
@@ -54,6 +57,18 @@ func (t Tool) Gradle(ctx context.Context, options Options, args []string, stdin 
 		return operational(CauseProcessFailed, err)
 	}
 	return nil
+}
+
+func refuseDaemonCriteria(projectDir string) error {
+	criteria := filepath.Join(projectDir, "gradle", "gradle-daemon-jvm.properties")
+	_, err := os.Lstat(criteria)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return refusal(CauseGradleDaemonCriteria, err)
+	}
+	return refusal(CauseGradleDaemonCriteria, nil)
 }
 
 func validateGradleArgs(args []string, info StoreInfo) error {

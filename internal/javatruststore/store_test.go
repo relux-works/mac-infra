@@ -262,6 +262,60 @@ func TestSelectRootCompatibilityAndRefusals(t *testing.T) {
 	}
 }
 
+// Claim: Build refuses every invalid certificate selection before changing project output or JDK state, while a valid root still builds successfully.
+func TestBuildSelectionRefusalsPreserveState(t *testing.T) {
+	valid := makeCertificate(t, fixtureTime.Add(-time.Hour), fixtureTime.Add(time.Hour), true, "Valid Root", "Valid Root")
+	other := makeCertificate(t, fixtureTime.Add(-time.Hour), fixtureTime.Add(time.Hour), true, "Other Root", "Other Root")
+	nonCA := makeCertificate(t, fixtureTime.Add(-time.Hour), fixtureTime.Add(time.Hour), false, "Leaf", "Leaf")
+	nonSelfSigned := makeCertificate(t, fixtureTime.Add(-time.Hour), fixtureTime.Add(time.Hour), true, "Intermediate", "Other Issuer")
+	badSelfSignature := makeBadSelfSignature(t)
+	expired := makeCertificate(t, fixtureTime.Add(-2*time.Hour), fixtureTime.Add(-time.Hour), true, "Expired Root", "Expired Root")
+	notYet := makeCertificate(t, fixtureTime.Add(time.Hour), fixtureTime.Add(2*time.Hour), true, "Future Root", "Future Root")
+	tests := []struct {
+		name  string
+		certs []*x509.Certificate
+		pin   string
+		want  string
+	}{
+		{name: "valid-positive", certs: []*x509.Certificate{valid}, pin: fingerprint(valid)},
+		{name: "no-match", certs: []*x509.Certificate{valid}, pin: fingerprint(other), want: CauseNoMatch},
+		{name: "two-matches", certs: []*x509.Certificate{valid, valid}, pin: fingerprint(valid), want: CauseMultipleMatches},
+		{name: "non-ca", certs: []*x509.Certificate{nonCA}, pin: fingerprint(nonCA), want: CauseNotCA},
+		{name: "not-self-signed", certs: []*x509.Certificate{nonSelfSigned}, pin: fingerprint(nonSelfSigned), want: CauseNotSelfSigned},
+		{name: "bad-self-signature", certs: []*x509.Certificate{badSelfSignature}, pin: fingerprint(badSelfSignature), want: CauseNotSelfSigned},
+		{name: "expired", certs: []*x509.Certificate{expired}, pin: fingerprint(expired), want: CauseExpired},
+		{name: "not-yet-valid", certs: []*x509.Certificate{notYet}, pin: fingerprint(notYet), want: CauseNotYetValid},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.options.Fingerprint = test.pin
+			f.tool.Source = CertificateSourceFunc(func(context.Context) ([]*x509.Certificate, error) {
+				return test.certs, nil
+			})
+			before := filesystemSnapshot(t, f.options.ProjectDir, f.options.JavaHome)
+			info, err := f.tool.Build(context.Background(), f.options)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("valid Build failed: %v", err)
+				}
+				if got := fileMode(t, info.StorePath); got != 0600 {
+					t.Fatalf("positive store mode = %04o, want 0600", got)
+				}
+				return
+			}
+			if Cause(err) != test.want || ExitCode(err) != ExitRefusal {
+				t.Fatalf("Build cause=%q exit=%d, want cause=%q refusal", Cause(err), ExitCode(err), test.want)
+			}
+			after := filesystemSnapshot(t, f.options.ProjectDir, f.options.JavaHome)
+			if !equalFilesystemSnapshots(before, after) {
+				t.Fatal("certificate-selection refusal changed project or JDK state")
+			}
+		})
+	}
+}
+
 // Claim: fingerprints must be exactly 32 hexadecimal bytes, case-normalized before pin comparison.
 func TestNormalizeFingerprint(t *testing.T) {
 	valid := strings.Repeat("aB", 32)
@@ -276,30 +330,59 @@ func TestNormalizeFingerprint(t *testing.T) {
 	}
 }
 
-// Claim: output path traversal and symlink components are refused before the certificate source or importer is used.
+// Claim: a project-relative output path succeeds, while outside-project and symlink paths refuse without changing project, JDK, or target state.
 func TestOutputPathRefusals(t *testing.T) {
-	f := newFixture(t)
-	outside := t.TempDir()
-	link := filepath.Join(f.options.ProjectDir, "linked")
-	if err := os.Symlink(outside, link); err != nil {
-		t.Fatal(err)
-	}
 	for _, test := range []struct {
 		name string
 		path string
 		want string
 	}{
+		{name: "project-relative-positive", path: ".task/trust"},
 		{name: "outside-dir", path: "../outside/trust", want: CauseOutsideProject},
 		{name: "symlink-target", path: "linked/trust", want: CauseSymlink},
 	} {
+		test := test
 		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t)
+			var extraRoots []string
+			if test.want != "" {
+				outside := filepath.Join(filepath.Dir(f.options.ProjectDir), "outside")
+				if err := os.Mkdir(outside, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(outside, "sentinel"), []byte("outside fixture"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				extraRoots = append(extraRoots, outside)
+				if test.name == "symlink-target" {
+					if err := os.Symlink(outside, filepath.Join(f.options.ProjectDir, "linked")); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			options := f.options
 			options.OutputDir = test.path
-			if _, err := f.tool.Build(context.Background(), options); Cause(err) != test.want {
-				t.Fatalf("Build cause = %q, want %q", Cause(err), test.want)
+			roots := append([]string{f.options.ProjectDir, f.options.JavaHome}, extraRoots...)
+			before := filesystemSnapshot(t, roots...)
+			info, err := f.tool.Build(context.Background(), options)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("project-relative Build failed: %v", err)
+				}
+				if info.OutputDir != f.projectOutput() || f.importer.calls != 1 {
+					t.Fatalf("positive output=%q importer calls=%d", info.OutputDir, f.importer.calls)
+				}
+				return
+			}
+			if Cause(err) != test.want || ExitCode(err) != ExitRefusal {
+				t.Fatalf("Build cause=%q exit=%d, want cause=%q refusal", Cause(err), ExitCode(err), test.want)
 			}
 			if f.importer.calls != 0 {
 				t.Fatal("refused output path reached keytool importer")
+			}
+			after := filesystemSnapshot(t, roots...)
+			if !equalFilesystemSnapshots(before, after) {
+				t.Fatal("output-path refusal changed project, JDK, or target state")
 			}
 		})
 	}
@@ -326,68 +409,65 @@ func TestBuildFailureCleansPartialOutput(t *testing.T) {
 	}
 }
 
-// Claim: verify refuses a changed pin, changed JDK cacerts, or modified truststore and never invokes the build importer.
+// Claim: positive verification and stale pin, cacerts, or store refusals preserve project/JDK bytes and mtimes, including store and manifest state, without invoking the importer.
 func TestVerifyRefusesStaleInputsWithoutRebuild(t *testing.T) {
+	other := makeCertificate(t, fixtureTime.Add(-time.Hour), fixtureTime.Add(time.Hour), true, "Other Root", "Other Root")
 	f := newFixture(t)
 	if _, err := f.tool.Build(context.Background(), f.options); err != nil {
 		t.Fatal(err)
 	}
-	calls := f.importer.calls
-	storePath := filepath.Join(f.projectOutput(), storeFileName)
-	manifestPath := filepath.Join(f.projectOutput(), manifestName)
-	storeBefore, err := os.ReadFile(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeInfoBefore, err := os.Stat(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifestBefore, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := filesystemSnapshot(t, f.options.ProjectDir, f.options.JavaHome)
 	if _, err := f.tool.Verify(context.Background(), f.options); err != nil {
 		t.Fatalf("unchanged verify failed: %v", err)
 	}
-	storeAfter, err := os.ReadFile(storePath)
-	if err != nil {
-		t.Fatal(err)
+	if after := filesystemSnapshot(t, f.options.ProjectDir, f.options.JavaHome); !equalFilesystemSnapshots(before, after) {
+		t.Fatal("successful verify changed project or JDK state")
 	}
-	storeInfoAfter, err := os.Stat(storePath)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name    string
+		want    string
+		prepare func(*testing.T, fixture) Options
+	}{
+		{name: "stale-pin", want: CauseStaleRoot, prepare: func(_ *testing.T, f fixture) Options {
+			options := f.options
+			options.Fingerprint = fingerprint(other)
+			return options
+		}},
+		{name: "stale-cacerts", want: CauseStaleCACerts, prepare: func(t *testing.T, f fixture) Options {
+			if err := os.WriteFile(f.cacerts, []byte("changed default cacerts"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			return f.options
+		}},
+		{name: "modified-store", want: CauseStoreModified, prepare: func(t *testing.T, f fixture) Options {
+			storePath := filepath.Join(f.projectOutput(), storeFileName)
+			if err := os.WriteFile(storePath, []byte("modified store"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			return f.options
+		}},
 	}
-	manifestAfter, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(storeBefore, storeAfter) || !storeInfoBefore.ModTime().Equal(storeInfoAfter.ModTime()) || !bytes.Equal(manifestBefore, manifestAfter) {
-		t.Fatal("verify changed the store or manifest")
-	}
-	other := makeCertificate(t, fixtureTime.Add(-time.Hour), fixtureTime.Add(time.Hour), true, "Other Root", "Other Root")
-	options := f.options
-	options.Fingerprint = fingerprint(other)
-	if _, err := f.tool.Verify(context.Background(), options); Cause(err) != CauseStaleRoot {
-		t.Fatalf("changed pin cause = %q", Cause(err))
-	}
-	if err := os.WriteFile(f.cacerts, []byte("changed default cacerts"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.tool.Verify(context.Background(), f.options); Cause(err) != CauseStaleCACerts {
-		t.Fatalf("changed cacerts cause = %q", Cause(err))
-	}
-	if err := os.WriteFile(f.cacerts, []byte("fixture default cacerts"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(storePath, []byte("modified store"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.tool.Verify(context.Background(), f.options); Cause(err) != CauseStoreModified {
-		t.Fatalf("modified store cause = %q", Cause(err))
-	}
-	if f.importer.calls != calls {
-		t.Fatalf("verify called importer %d times; want %d", f.importer.calls, calls)
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t)
+			if _, err := f.tool.Build(context.Background(), f.options); err != nil {
+				t.Fatal(err)
+			}
+			calls := f.importer.calls
+			options := test.prepare(t, f)
+			before := filesystemSnapshot(t, f.options.ProjectDir, f.options.JavaHome)
+			if _, err := f.tool.Verify(context.Background(), options); Cause(err) != test.want || ExitCode(err) != ExitRefusal {
+				t.Fatalf("verify cause=%q exit=%d, want cause=%q refusal", Cause(err), ExitCode(err), test.want)
+			}
+			after := filesystemSnapshot(t, f.options.ProjectDir, f.options.JavaHome)
+			if !equalFilesystemSnapshots(before, after) {
+				t.Fatal("stale verification changed project or JDK bytes or mtimes")
+			}
+			if f.importer.calls != calls {
+				t.Fatalf("verify called importer %d times; want %d", f.importer.calls, calls)
+			}
+		})
 	}
 }
 
@@ -482,6 +562,62 @@ func TestGradleUsesProjectScopedSettings(t *testing.T) {
 	if got := fileMode(t, filepath.Join(f.projectOutput(), gradleHomeName)); got != 0700 {
 		t.Fatalf("Gradle home mode = %04o", got)
 	}
+}
+
+// Claim: without daemon JVM criteria Gradle launches with the selected settings, while an unprovable criteria file is refused before creating daemon state or starting the wrapper.
+func TestGradleDaemonCriteriaRefusalAndPositive(t *testing.T) {
+	t.Run("no-criteria-positive", func(t *testing.T) {
+		f := newFixture(t)
+		if _, err := f.tool.Build(context.Background(), f.options); err != nil {
+			t.Fatal(err)
+		}
+		wrapper := filepath.Join(f.options.ProjectDir, "gradlew")
+		if err := os.WriteFile(wrapper, []byte("fixture wrapper"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		process := &processCapture{}
+		f.tool.Processes = process
+		if err := f.tool.Gradle(context.Background(), f.options, []string{"assemble"}, nil, io.Discard, io.Discard); err != nil {
+			t.Fatalf("Gradle without daemon criteria failed: %v", err)
+		}
+		if process.call != 1 {
+			t.Fatalf("Gradle wrapper calls = %d, want 1", process.call)
+		}
+	})
+	t.Run("criteria-refused-before-launch", func(t *testing.T) {
+		f := newFixture(t)
+		if _, err := f.tool.Build(context.Background(), f.options); err != nil {
+			t.Fatal(err)
+		}
+		wrapper := filepath.Join(f.options.ProjectDir, "gradlew")
+		if err := os.WriteFile(wrapper, []byte("fixture wrapper"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		criteriaDir := filepath.Join(f.options.ProjectDir, "gradle")
+		if err := os.Mkdir(criteriaDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		criteria := filepath.Join(criteriaDir, "gradle-daemon-jvm.properties")
+		if err := os.WriteFile(criteria, []byte("toolchainVersion=99\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		process := &processCapture{}
+		f.tool.Processes = process
+		before := filesystemSnapshot(t, f.options.ProjectDir, f.options.JavaHome)
+		if err := f.tool.Gradle(context.Background(), f.options, []string{"assemble"}, nil, io.Discard, io.Discard); Cause(err) != CauseGradleDaemonCriteria || ExitCode(err) != ExitRefusal {
+			t.Fatalf("Gradle cause=%q exit=%d, want daemon-criteria refusal", Cause(err), ExitCode(err))
+		}
+		if process.call != 0 {
+			t.Fatalf("daemon criteria refusal launched Gradle %d times", process.call)
+		}
+		after := filesystemSnapshot(t, f.options.ProjectDir, f.options.JavaHome)
+		if !equalFilesystemSnapshots(before, after) {
+			t.Fatal("daemon criteria refusal changed project or JDK state")
+		}
+		if _, err := os.Lstat(filepath.Join(f.projectOutput(), gradleHomeName)); !os.IsNotExist(err) {
+			t.Fatalf("daemon criteria refusal created Gradle home: %v", err)
+		}
+	})
 }
 
 // Claim: a project Gradle truststore override is rejected before creating Gradle state or launching the wrapper.
@@ -637,6 +773,65 @@ func equalTrees(first, second map[string]string) bool {
 	}
 	for path, value := range first {
 		if second[path] != value {
+			return false
+		}
+	}
+	return true
+}
+
+type filesystemEntry struct {
+	mode          os.FileMode
+	modTime       time.Time
+	data          []byte
+	symlinkTarget string
+}
+
+// filesystemSnapshot captures directory and file mtimes and file bytes without following symlinks.
+func filesystemSnapshot(t *testing.T, roots ...string) map[string]filesystemEntry {
+	t.Helper()
+	snapshot := make(map[string]filesystemEntry)
+	for _, root := range roots {
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = filepath.WalkDir(absolute, func(path string, _ os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			state := filesystemEntry{mode: info.Mode(), modTime: info.ModTime()}
+			switch {
+			case info.Mode()&os.ModeSymlink != 0:
+				state.symlinkTarget, err = os.Readlink(path)
+			case info.IsDir():
+				// Directory bytes are represented by their entries; mode and mtime capture directory state.
+			default:
+				state.data, err = os.ReadFile(path)
+			}
+			if err != nil {
+				return err
+			}
+			snapshot[path] = state
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return snapshot
+}
+
+func equalFilesystemSnapshots(first, second map[string]filesystemEntry) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for path, before := range first {
+		after, exists := second[path]
+		if !exists || before.mode != after.mode || !before.modTime.Equal(after.modTime) || !bytes.Equal(before.data, after.data) || before.symlinkTarget != after.symlinkTarget {
 			return false
 		}
 	}

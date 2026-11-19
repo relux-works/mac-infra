@@ -212,7 +212,9 @@ isolated-home Gradle properties, and arguments that change the project or Gradle
 user home, replace the pinned truststore, or select a different daemon JDK. No shell profile, global Gradle
 configuration, JDK file or keychain setting is changed. Use `verify` before a
 later build; a changed pin, JDK cacerts or store is refused until rebuilt into a
-new output directory.
+new output directory. The Gradle route also refuses a project containing
+`gradle/gradle-daemon-jvm.properties`, since its daemon criteria can override the
+selected JDK and this tool does not resolve those criteria.
 
 ## Exec-Gate Stall Watch
 
