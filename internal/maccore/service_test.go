@@ -1,6 +1,7 @@
 package maccore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -88,6 +89,24 @@ func TestVPNCoreStatusClientDaemonWireRoundTrip(t *testing.T) {
 	}
 	if !response.OK || response.VPNCore == nil || response.VPNCore.State != "absent" {
 		t.Fatalf("vpn-core status response = %#v, want ok with absent status", response)
+	}
+
+	// Claim: the current request encodes vpn_core, which the legacy strict Request shape rejects as an unknown field.
+	var legacyWire bytes.Buffer
+	if err := json.NewEncoder(&legacyWire).Encode(Request{
+		Action:  ActionVPNCoreStatus,
+		VPNCore: &VPNCoreRequest{Target: "vpn-core"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	type legacyRequest struct {
+		Action Action `json:"action"`
+	}
+	var legacy legacyRequest
+	decoder := json.NewDecoder(&legacyWire)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&legacy); err == nil || err.Error() != `json: unknown field "vpn_core"` {
+		t.Fatalf("legacy decoder error = %v, want unknown field vpn_core", err)
 	}
 
 	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
