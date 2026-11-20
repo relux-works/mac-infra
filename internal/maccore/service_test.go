@@ -2,7 +2,9 @@ package maccore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +52,66 @@ func TestDaemonPing(t *testing.T) {
 	}
 	if !resp.OK || resp.DaemonPID <= 0 {
 		t.Fatalf("ping response = %#v, want ok with daemon pid", resp)
+	}
+}
+
+// Claim: the current client and daemon carry vpn-core status through the real Unix-socket JSON codec; valid status succeeds, unknown request fields are refused, and status writes no audit entry.
+func TestVPNCoreStatusClientDaemonWireRoundTrip(t *testing.T) {
+	fixture := newVPNFixture(t)
+	socketPath := filepath.Join(".temp", fmt.Sprintf("vpn-status-%d-%d.sock", os.Getpid(), time.Now().UnixNano()))
+	cfg := ServiceConfig{Label: "works.relux.test-core", SocketPath: socketPath}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	daemon := serviceDaemon{cfg: cfg, clientUID: os.Getuid(), clientGID: os.Getgid(), vpnCore: fixture.s}
+	serverErr := make(chan error, 1)
+	go func() {
+		for i := 0; i < 2; i++ {
+			conn, err := listener.Accept()
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			daemon.handleConn(conn)
+		}
+		serverErr <- nil
+	}()
+
+	response, err := Call(cfg, Request{
+		Action:  ActionVPNCoreStatus,
+		VPNCore: &VPNCoreRequest{Target: "vpn-core"},
+	})
+	if err != nil {
+		t.Fatalf("Call vpn-core status error = %v", err)
+	}
+	if !response.OK || response.VPNCore == nil || response.VPNCore.State != "absent" {
+		t.Fatalf("vpn-core status response = %#v, want ok with absent status", response)
+	}
+
+	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintln(conn, `{"action":"vpn_core_status","vpn_core":{"target":"vpn-core"},"unexpected":true}`); err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	var refused Response
+	if err := json.NewDecoder(conn).Decode(&refused); err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if refused.OK || refused.VPNCore != nil || refused.Error != `json: unknown field "unexpected"` {
+		t.Fatalf("unknown-field response = %#v, want a decode refusal before status", refused)
+	}
+	if _, err := os.Lstat(fixture.s.audit); !os.IsNotExist(err) {
+		t.Fatalf("read-only status created an audit entry: lstat error = %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("wire server error = %v", err)
 	}
 }
 
