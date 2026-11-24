@@ -4,11 +4,14 @@
 #import <Security/Security.h>
 #import "native_prepare.h"
 #include <dlfcn.h>
+#include <stdio.h>
 #include <unistd.h>
 #ifdef TOOLSECRET_TEST_TRACE
 #define TS_TRACE(s) fprintf(stderr,"toolsecret-test-phase:%s\n",s)
+#define TS_TRACE_STATUS(s,v) fprintf(stderr,"toolsecret-test-status:%s:%d\n",s,(int)(v))
 #else
 #define TS_TRACE(s) ((void)0)
+#define TS_TRACE_STATUS(s,v) ((void)0)
 #endif
 
 typedef OSStatus (*CopyRequirement)(SecTrustedApplicationRef, SecRequirementRef *);
@@ -359,6 +362,7 @@ OSStatus ts_prepare_access_with_copy_contents(SecAccessRef access,
                                               TSACLCopyContents copyContents) {
     if (!access || !plan || !copyContents) return errSecParam;
     OSStatus status=loadRequirementSPI();
+    TS_TRACE_STATUS("load-requirement-spi",status);
     if (status) return status;
     NSDictionary *before=plan[@"before"];
     NSDictionary *after=plan[@"after"];
@@ -371,6 +375,7 @@ OSStatus ts_prepare_access_with_copy_contents(SecAccessRef access,
     };
     status=0;
     NSDictionary *actualBefore=accessMetadata(access,attrs,NULL,&status);
+    TS_TRACE_STATUS("read-before-metadata",status);
     if (status) return status;
     if (![actualBefore isEqual:before]) return errSecDecode;
 
@@ -378,11 +383,14 @@ OSStatus ts_prepare_access_with_copy_contents(SecAccessRef access,
     // in-memory ACL edit. Unknown, mixed-encrypt, and opaque entries fail here.
     CFArrayRef acls=NULL; CFMutableSetRef encryptTargets=NULL;
     status=preflightWriterACLs(access,copyContents,&acls,&encryptTargets);
+    TS_TRACE_STATUS("writer-preflight",status);
     if (status) return status;
     NSUInteger targetCount=CFSetGetCount(encryptTargets);
     NSArray *expectedEncryptApps=plannedEncryptApplications(plan,targetCount,&status);
+    TS_TRACE_STATUS("plan-encrypt-applications",status);
     NSMutableArray *encryptApplications=[NSMutableArray array];
     if (!status && targetCount) status=trustedApplications(expectedEncryptApps,encryptApplications);
+    TS_TRACE_STATUS("create-encrypt-applications",status);
     if (status) { CFRelease(encryptTargets); CFRelease(acls); return status; }
 
     // The only writer mutation is replacing the NULL application list on the
@@ -395,6 +403,7 @@ OSStatus ts_prepare_access_with_copy_contents(SecAccessRef access,
         if (!status && originalApplications!=NULL) status=errSecDecode;
         if (!status && !description) status=errSecDecode;
         if (!status) status=SecACLSetContents(acl,(CFArrayRef)encryptApplications,description,selector);
+        TS_TRACE_STATUS("set-encrypt-contents",status);
         if (originalApplications) CFRelease(originalApplications);
         if (description) CFRelease(description);
         if (status) break;
@@ -456,7 +465,9 @@ OSStatus ts_prepare_access_with_copy_contents(SecAccessRef access,
     if (!status && prepared) {
         TS_TRACE("round-trip-prepared-access");
         *prepared=accessMetadata(access,attrs,removed,&status);
+        TS_TRACE_STATUS("round-trip-metadata",status);
         if (!status && ![*prepared isEqual:after]) status=errSecDecode;
+        TS_TRACE_STATUS("round-trip-compare",status);
     }
     CFRelease(removed);
     return status;

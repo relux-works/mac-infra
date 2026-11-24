@@ -35,7 +35,7 @@ func TestNativePreparationNarrowsOnlyPlannedEncryptACLsInMemory(t *testing.T) {
 	defer cancel()
 	fixture := filepath.Join(t.TempDir(), "native-prepare-fixture")
 	compile := exec.CommandContext(ctx, "/usr/bin/clang",
-		"-Wno-deprecated-declarations", "-framework", "Foundation", "-framework", "Security",
+		"-Wno-deprecated-declarations", "-DTOOLSECRET_TEST_TRACE", "-framework", "Foundation", "-framework", "Security",
 		"-o", fixture, "testdata/native_prepare_fixture.m")
 	if output, err := compile.CombinedOutput(); err != nil {
 		t.Fatalf("compile in-memory native fixture: %v\n%s", err, output)
