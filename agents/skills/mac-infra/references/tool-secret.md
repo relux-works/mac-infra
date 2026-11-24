@@ -125,6 +125,8 @@ mac-tool-secret bind --keychain /absolute/test.keychain-db --service SERVICE --a
 mac-tool-secret bind --service SERVICE --account ACCOUNT --owner /absolute/owner --owner-sitting
 mac-tool-secret bind --service SERVICE --account ACCOUNT --owner /absolute/owner --owner-sitting --keep /absolute/exception --owner-decision decision:REFERENCE
 mac-tool-secret verify --service SERVICE --account ACCOUNT --owner /absolute/owner --json
+mac-tool-secret bind --keychain /absolute/test.keychain-db --service SERVICE --account ACCOUNT --owner /absolute/owner --keep /usr/bin/security --owner-decision decision:d576-rollback --dry-run --json
+mac-tool-secret verify --keychain /absolute/test.keychain-db --service SERVICE --account ACCOUNT --owner /absolute/owner --rollback-subject /usr/bin/security --rollback-until 2026-10-30T00:00:00Z --json
 ```
 
 Ship the signed hardened owner reader and its status-only self-check, switch
@@ -159,6 +161,19 @@ the exception. The audit records the reference, kept paths and available
 signing metadata. This does not relax primary-owner checks or permit
 unverified stored requirements. A strict verify can still fail on extra kept
 owners or unsafe exceptions; it has no exception flag.
+
+Rollback retention is a narrow exception for `/usr/bin/security`: its stored
+requirement must exactly match the currently signature-validated designated
+requirement `identifier "com.apple.security" and anchor apple`, and it needs
+the exact rollback decision shown above. A path-only Apple anchor or another
+generic keep decision is refused. A rollback-authorizing bind and rollback
+verify must name an explicit absolute `--keychain`; neither may select through
+the user's default search list.
+
+A later bind does not retire the retained encrypt grant. The rollback expiry
+ends only the verification exception; it does not remove the ACL grant. Grant
+retirement requires a separately constrained, audit-bound writer-removal
+operation and is outside this change.
 
 The partition list becomes exactly `teamid:TEAM` for recognized Apple
 development/Developer ID certificate families (the certificate OU is checked),

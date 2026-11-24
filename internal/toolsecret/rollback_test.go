@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,7 +17,7 @@ const (
 	rollbackSubject   = "/usr/bin/security"
 	rollbackDecision  = "decision:d576-rollback"
 	rollbackUntilText = "2026-10-30T00:00:00Z"
-	securityDR        = `identifier "com.apple.security" and anchor apple`
+	securityDR        = rollbackSecurityRequirement
 )
 
 func rollbackApplication(path string) TrustedApplication {
@@ -47,6 +48,7 @@ func rollbackPlan(t *testing.T, writerACLs ...ReleaseACL) (Item, Plan) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	plan.Keychain = "/test/keychain-a"
 	return before, plan
 }
 
@@ -70,11 +72,17 @@ func appendPlanAudit(t *testing.T, path string, plan Plan, lastOutcome string) {
 }
 
 func rollbackVerifyArgs() []string {
-	return []string{
-		"verify", "--service", "works.relux.fixture", "--account", "rollback-account",
-		"--owner", validOwner().Path, "--rollback-subject", rollbackSubject,
-		"--rollback-until", rollbackUntilText, "--json",
+	return rollbackVerifyArgsForKeychain("/test/keychain-a")
+}
+
+func rollbackVerifyArgsForKeychain(keychain string) []string {
+	args := []string{
+		"verify", "--service", "works.relux.fixture", "--account", "rollback-account", "--owner", validOwner().Path,
 	}
+	if keychain != "<missing>" {
+		args = append(args, "--keychain", keychain)
+	}
+	return append(args, "--rollback-subject", rollbackSubject, "--rollback-until", rollbackUntilText, "--json")
 }
 
 func TestPlanBindNarrowsAnyApplicationEncrypt(t *testing.T) {
@@ -104,6 +112,132 @@ func TestPlanBindNarrowsAnyApplicationEncrypt(t *testing.T) {
 	}
 	if rollback.OwnerDecision != rollbackDecision || !slices.Contains(rollback.Keep, rollbackSubject) {
 		t.Fatalf("rollback authority missing from plan: %+v", rollback)
+	}
+}
+
+func TestRollbackSubjectRequiresExactValidatedRequirementAndDecision(t *testing.T) {
+	exact := TrustedApplication{Path: rollbackSubject, Requirement: rollbackSecurityRequirement}
+	for _, tc := range []struct {
+		name       string
+		apps       []TrustedApplication
+		owner      Owner
+		decision   string
+		wantAccept bool
+	}{
+		{name: "exact-current-requirement", apps: []TrustedApplication{exact}, owner: Owner{Path: rollbackSubject, Requirement: rollbackSecurityRequirement}, decision: rollbackDecision, wantAccept: true},
+		{name: "path-only-anchor", apps: []TrustedApplication{{Path: rollbackSubject, Requirement: "anchor apple"}}, owner: Owner{Path: rollbackSubject, Requirement: rollbackSecurityRequirement}, decision: rollbackDecision},
+		{name: "stale-current-requirement", apps: []TrustedApplication{exact}, owner: Owner{Path: rollbackSubject, Requirement: "anchor apple"}, decision: rollbackDecision},
+		{name: "missing-current-validation", apps: []TrustedApplication{exact}, decision: rollbackDecision},
+		{name: "wrong-generic-override", apps: []TrustedApplication{exact}, owner: Owner{Path: rollbackSubject, Requirement: rollbackSecurityRequirement}, decision: "decision:other"},
+		{name: "missing-decision", apps: []TrustedApplication{exact}, owner: Owner{Path: rollbackSubject, Requirement: rollbackSecurityRequirement}},
+		{name: "ambiguous-subject", apps: []TrustedApplication{exact, {Path: rollbackSubject, Requirement: "anchor apple"}}, owner: Owner{Path: rollbackSubject, Requirement: rollbackSecurityRequirement}, decision: rollbackDecision},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := rollbackItem(ReleaseACL{Authorizations: []string{"encrypt"}, AnyApplication: true})
+			before.ReleaseACLs[0].Applications = append(before.ReleaseACLs[0].Applications, tc.apps...)
+			owners := map[string]Owner{}
+			if tc.owner.Path != "" {
+				owners[rollbackSubject] = tc.owner
+			}
+			_, err := PlanBind(before, validOwner(), BindOptions{Keep: []string{rollbackSubject}, KeepOwners: owners, OwnerDecision: tc.decision})
+			if tc.wantAccept && err != nil {
+				t.Fatalf("exact validated rollback subject refused: %v", err)
+			}
+			if !tc.wantAccept && err == nil {
+				t.Fatal("unvalidated or generically overridden rollback subject accepted")
+			}
+		})
+	}
+}
+
+func rollbackBindArgsForKeychain(keychain string) []string {
+	args := []string{
+		"bind", "--service", "works.relux.fixture", "--account", "rollback-account",
+		"--owner", validOwner().Path, "--keep", rollbackSubject,
+		"--owner-decision", rollbackDecision, "--dry-run", "--json",
+	}
+	if keychain != "<missing>" {
+		args = append(args, "--keychain", keychain)
+	}
+	return args
+}
+
+func TestRollbackOperationsRequireExplicitAbsoluteKeychainBeforeQueries(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "bind-missing", args: rollbackBindArgsForKeychain("<missing>")},
+		{name: "bind-empty", args: rollbackBindArgsForKeychain("")},
+		{name: "bind-relative", args: rollbackBindArgsForKeychain("relative.keychain")},
+		{name: "verify-missing", args: rollbackVerifyArgsForKeychain("<missing>")},
+		{name: "verify-empty", args: rollbackVerifyArgsForKeychain("")},
+		{name: "verify-relative", args: rollbackVerifyArgsForKeychain("relative.keychain")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake()
+			c, out, _ := testCLI(t, f)
+			if code := c.Run(context.Background(), tc.args); code != 2 || f.startups != 0 || f.inventories != 0 || len(f.ownerCalls) != 0 || f.applies != 0 {
+				t.Fatalf("rollback operation queried or applied without explicit absolute keychain: exit=%d output=%s backend=%+v", code, out.String(), f)
+			}
+		})
+	}
+}
+
+func TestRollbackBindDryRunAcceptsExplicitAbsoluteKeychain(t *testing.T) {
+	wildcard := ReleaseACL{Authorizations: []string{"encrypt"}, AnyApplication: true}
+	f := newFake()
+	f.items = []Item{rollbackItem(wildcard)}
+	c, out, _ := testCLI(t, f)
+	if code := c.Run(context.Background(), rollbackBindArgsForKeychain("/test/explicit.keychain")); code != 0 || f.inventories != 1 || f.applies != 0 || !strings.Contains(out.String(), `"keychain":"/test/explicit.keychain"`) {
+		t.Fatalf("absolute dry-run was not accepted as a query-only plan: exit=%d output=%s", code, out.String())
+	}
+}
+
+func TestWorkerRejectsRollbackApplyWithoutAbsoluteKeychainBeforeDispatch(t *testing.T) {
+	_, plan := rollbackPlan(t, ReleaseACL{Authorizations: []string{"encrypt"}, AnyApplication: true})
+	originalDispatch := nativeDispatch
+	dispatches := 0
+	nativeDispatch = func(string) (string, error) {
+		dispatches++
+		return `{"status":0}`, nil
+	}
+	t.Cleanup(func() { nativeDispatch = originalDispatch })
+	for _, keychain := range []string{"", "relative.keychain"} {
+		request, err := json.Marshal(nativeRequest{Operation: "apply", Keychain: keychain, Plan: &plan, AllowUI: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := Worker(strings.NewReader(string(request)), &bytes.Buffer{}); code != 3 || dispatches != 0 {
+			t.Fatalf("rollback apply reached native dispatch with keychain %q: exit=%d dispatches=%d", keychain, code, dispatches)
+		}
+	}
+}
+
+func TestRollbackVerificationRequiresCurrentExactDesignatedRequirement(t *testing.T) {
+	_, plan := rollbackPlan(t, ReleaseACL{Authorizations: []string{"encrypt"}, AnyApplication: true})
+	for _, tc := range []struct {
+		name string
+		set  func(*fakeBackend)
+	}{
+		{name: "changed-current-requirement", set: func(f *fakeBackend) {
+			f.owners[rollbackSubject] = Owner{Path: rollbackSubject, Requirement: "anchor apple", Partition: validOwner().Partition}
+		}},
+		{name: "current-validation-failed", set: func(f *fakeBackend) {
+			f.ownerErrors[rollbackSubject] = fmt.Errorf("validation unavailable")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake()
+			f.items = []Item{plan.After}
+			tc.set(f)
+			c, out, _ := testCLI(t, f)
+			appendPlanAudit(t, c.AuditPath, plan, "applied")
+			code := c.Run(context.Background(), rollbackVerifyArgs())
+			if code == 0 || f.inventories != 0 || !strings.Contains(out.String(), "rollback") {
+				t.Fatalf("stale or unvalidated subject authorized rollback: exit=%d output=%s", code, out.String())
+			}
+		})
 	}
 }
 
@@ -139,15 +273,13 @@ func TestRollbackPlanIsBoundToKeychainSelection(t *testing.T) {
 	c, out, _ := testCLI(t, f)
 	appendPlanAudit(t, c.AuditPath, plan, "applied")
 
-	args := rollbackVerifyArgs()
-	args = append(args[:1], append([]string{"--keychain", "/test/keychain-b"}, args[1:]...)...)
+	args := rollbackVerifyArgsForKeychain("/test/keychain-b")
 	if code := c.Run(context.Background(), args); code != 3 || !strings.Contains(out.String(), "generic_reader") || !strings.Contains(out.String(), "foreign_writer") {
 		t.Fatalf("plan from a different keychain authorized retention: %d %s", code, out.String())
 	}
 
 	out.Reset()
-	args = rollbackVerifyArgs()
-	args = append(args[:1], append([]string{"--keychain", "/test/keychain-a"}, args[1:]...)...)
+	args = rollbackVerifyArgsForKeychain("/test/keychain-a")
 	if code := c.Run(context.Background(), args); code != 0 || !strings.Contains(out.String(), "rollback_retained") {
 		t.Fatalf("matching keychain plan was refused: %d %s", code, out.String())
 	}
@@ -235,16 +367,35 @@ func TestNullAndMixedWritersRemainForeign(t *testing.T) {
 	}
 
 	mixed := ReleaseACL{Authorizations: []string{"encrypt", "item_modify"}, AnyApplication: true}
-	_, plan := rollbackPlan(t, wildcard, mixed)
-	if len(plan.After.WriterACLs) != 2 || plan.After.WriterACLs[0].AnyApplication || !plan.After.WriterACLs[1].AnyApplication {
-		t.Fatalf("mixed writer behavior changed unexpectedly: %+v", plan.After.WriterACLs)
+	if !ForeignWriter(mixed, validOwner().Requirement) {
+		t.Fatal("mixed encrypt plus item_modify remained classified as a foreign writer")
 	}
-	f := newFake()
-	f.items = []Item{plan.After}
-	c, out, _ := testCLI(t, f)
-	appendPlanAudit(t, c.AuditPath, plan, "applied")
-	if code := c.Run(context.Background(), rollbackVerifyArgs()); code != 3 || !strings.Contains(out.String(), "foreign_writer") {
-		t.Fatalf("encrypt plus item_modify any-application writer passed: %d %s", code, out.String())
+	if _, err := PlanBind(rollbackItem(wildcard, mixed), validOwner(), BindOptions{}); err == nil {
+		t.Fatal("mixed encrypt plus item_modify was preserved in a bind plan")
+	}
+}
+
+func TestPlanBindRefusesUnsupportedAndOpaqueWriterACLsWithoutChangingInput(t *testing.T) {
+	wildcard := ReleaseACL{Authorizations: []string{"encrypt"}, AnyApplication: true}
+	for _, tc := range []struct {
+		name string
+		acl  ReleaseACL
+	}{
+		{name: "unmodeled-authorization", acl: ReleaseACL{Authorizations: []string{"encrypt"}, AnyApplication: true, UnmodeledAuthorizations: []string{"sign"}}},
+		{name: "opaque-contents", acl: ReleaseACL{Authorizations: []string{"item_modify"}, ContentsUnverified: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := rollbackItem(wildcard, tc.acl)
+			snapshot, _ := json.Marshal(before)
+			_, err := PlanBind(before, validOwner(), BindOptions{})
+			if err == nil {
+				t.Fatal("unsupported writer ACL was accepted")
+			}
+			after, _ := json.Marshal(before)
+			if !bytes.Equal(after, snapshot) {
+				t.Fatal("refused plan changed its input item")
+			}
+		})
 	}
 }
 

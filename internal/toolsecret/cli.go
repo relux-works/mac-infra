@@ -46,7 +46,19 @@ func (p *paths) Set(s string) error {
 }
 
 const usage = "mac-tool-secret [--json] inventory [--keychain PATH] [--service-prefix P] [--all --owner-sitting --out FILE] | bind --service S --account A --owner PATH [--keychain PATH] [--dry-run] [--owner-sitting] [--keep PATH]... [--owner-decision REF] | verify --service S --account A --owner PATH [--keychain PATH] | verify-audit [--audit-log FILE] [--expected-head SHA256]"
-const rollbackUsage = "mac-tool-secret [--json] inventory [--keychain PATH] [--service-prefix P] [--all --owner-sitting --out FILE] | bind --service S --account A --owner PATH [--keychain PATH] [--dry-run] [--owner-sitting] [--keep PATH]... [--owner-decision REF] | verify --service S --account A --owner PATH [--keychain PATH] [--rollback-subject /usr/bin/security --rollback-until RFC3339-UTC] | verify-audit [--audit-log FILE] [--expected-head SHA256]"
+const rollbackUsage = "mac-tool-secret [--json] inventory [--keychain PATH] [--service-prefix P] [--all --owner-sitting --out FILE] | bind --service S --account A --owner PATH --keychain ABSOLUTE_PATH [--dry-run] [--owner-sitting] [--keep PATH]... [--owner-decision REF] | verify --service S --account A --owner PATH --keychain ABSOLUTE_PATH [--rollback-subject /usr/bin/security --rollback-until RFC3339-UTC] | verify-audit [--audit-log FILE] [--expected-head SHA256]"
+
+func explicitFlag(args []string, name string) bool {
+	for i, arg := range args {
+		if arg == name {
+			return i+1 < len(args)
+		}
+		if strings.HasPrefix(arg, name+"=") {
+			return true
+		}
+	}
+	return false
+}
 
 func IsTerminal(f *os.File) bool { return terminalFD(int(f.Fd())) }
 
@@ -146,6 +158,7 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 	var rollbackUntil time.Time
 	var keep paths
 	dry, sitting, all := false, false, false
+	keychainProvided := explicitFlag(filtered, "--keychain")
 	if command == "inventory" {
 		fs.StringVar(&prefix, "service-prefix", "", "service prefix")
 		fs.BoolVar(&all, "all", false, "include all services; local file only")
@@ -197,6 +210,14 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 	if *k != "" && !filepath.IsAbs(*k) {
 		return emit(nil, fmt.Errorf("--keychain must be absolute"), 2)
 	}
+	rollbackVerify := command == "verify" && rollbackSubject != ""
+	rollbackBind := command == "bind" && (slices.Contains(keep, rollbackEncryptSubject) || ownerDecision == rollbackDecisionRef)
+	if rollbackVerify || rollbackBind {
+		usageText = rollbackUsage
+		if !keychainProvided || !filepath.IsAbs(*k) {
+			return emit(nil, fmt.Errorf("rollback retention requires an explicit absolute --keychain"), 2)
+		}
+	}
 	lookup := c.LookupEnv
 	if lookup == nil {
 		lookup = os.LookupEnv
@@ -225,7 +246,7 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 	if err := c.Backend.Startup(ctx); err != nil {
 		return emit(nil, err, 1)
 	}
-	var owner Owner
+	var owner, rollbackOwner Owner
 	if command != "inventory" {
 		var err error
 		owner, err = c.Backend.Owner(ctx, ownerPath)
@@ -234,6 +255,16 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 		}
 		if err = ValidateOwner(owner); err != nil {
 			return emit(nil, err, 3)
+		}
+	}
+	if rollbackVerify {
+		var err error
+		rollbackOwner, err = c.Backend.Owner(ctx, rollbackEncryptSubject)
+		if err != nil {
+			return emit(nil, fmt.Errorf("cannot validate rollback subject designated requirement: %w", err), 1)
+		}
+		if rollbackOwner.Path != rollbackEncryptSubject || rollbackOwner.Requirement != rollbackSecurityRequirement {
+			return emit(nil, refuse("rollback_subject_unverified", "current /usr/bin/security designated requirement is not the approved exact requirement"), 3)
 		}
 	}
 	items, err := c.Backend.Inventory(ctx, *k)
@@ -314,7 +345,7 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 				if now == nil {
 					now = time.Now
 				}
-				reasons = verifyWithRollback(found[0], owner, plan, rollbackUntil, now())
+				reasons = verifyWithRollback(found[0], owner, rollbackOwner, plan, rollbackUntil, now())
 			}
 		}
 		failures := make([]string, 0, len(reasons))

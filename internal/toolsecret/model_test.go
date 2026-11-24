@@ -221,19 +221,41 @@ func TestUnknownAndVerify(t *testing.T) {
 type fakeBackend struct {
 	items                          []Item
 	owner                          Owner
+	owners                         map[string]Owner
+	ownerErrors                    map[string]error
+	ownerCalls                     map[string]int
 	startups, inventories, applies int
 	err, errorApply                error
 	plan                           Plan
 	ui                             bool
 }
 
-func newFake() *fakeBackend                          { return &fakeBackend{items: []Item{weakItem()}, owner: validOwner()} }
+func newFake() *fakeBackend {
+	return &fakeBackend{
+		items:       []Item{weakItem()},
+		owner:       validOwner(),
+		owners:      map[string]Owner{rollbackEncryptSubject: {Path: rollbackEncryptSubject, Requirement: rollbackSecurityRequirement, Partition: validOwner().Partition}},
+		ownerErrors: map[string]error{},
+		ownerCalls:  map[string]int{},
+	}
+}
 func (f *fakeBackend) Startup(context.Context) error { f.startups++; return f.err }
 func (f *fakeBackend) Inventory(context.Context, string) ([]Item, error) {
 	f.inventories++
 	return f.items, nil
 }
-func (f *fakeBackend) Owner(context.Context, string) (Owner, error) { return f.owner, nil }
+func (f *fakeBackend) Owner(_ context.Context, path string) (Owner, error) {
+	f.ownerCalls[path]++
+	if err := f.ownerErrors[path]; err != nil {
+		return Owner{}, err
+	}
+	if current, ok := f.owners[path]; ok {
+		return current, nil
+	}
+	current := f.owner
+	current.Path = path
+	return current, nil
+}
 func (f *fakeBackend) Apply(_ context.Context, _ string, p Plan, ui bool) error {
 	f.applies++
 	f.plan = p

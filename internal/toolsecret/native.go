@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -117,6 +118,11 @@ func Worker(in io.Reader, out io.Writer) int {
 	if req.Operation != "startup" && req.Operation != "inventory" && req.Operation != "owner" && req.Operation != "apply" {
 		return 1
 	}
+	if req.Operation == "apply" && req.Plan != nil &&
+		(req.Plan.OwnerDecision == rollbackDecisionRef || containsPath(req.Plan.Keep, rollbackEncryptSubject)) &&
+		!filepath.IsAbs(req.Keychain) {
+		return 3
+	}
 	if req.AllowUI && (req.Operation != "apply" || !terminalFD(3) || !terminalFD(4)) {
 		return 3
 	}
@@ -159,4 +165,13 @@ func Worker(in io.Reader, out io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func containsPath(paths []string, path string) bool {
+	for _, candidate := range paths {
+		if candidate == path {
+			return true
+		}
+	}
+	return false
 }

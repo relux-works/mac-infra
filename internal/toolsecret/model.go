@@ -151,10 +151,11 @@ type TrustedApplication struct {
 func (a TrustedApplication) Unverified() bool { return strings.TrimSpace(a.Requirement) == "" }
 
 type ReleaseACL struct {
-	Authorizations     []string             `json:"authorizations"`
-	AnyApplication     bool                 `json:"any_application"`
-	Applications       []TrustedApplication `json:"applications"`
-	ContentsUnverified bool                 `json:"contents_unverified,omitempty"`
+	Authorizations          []string             `json:"authorizations"`
+	AnyApplication          bool                 `json:"any_application"`
+	Applications            []TrustedApplication `json:"applications"`
+	ContentsUnverified      bool                 `json:"contents_unverified,omitempty"`
+	UnmodeledAuthorizations []string             `json:"unmodeled_authorizations,omitempty"`
 }
 type Item struct {
 	Service          string       `json:"service"`
@@ -186,6 +187,9 @@ var PlaintextAuthorizations = [...]string{"decrypt", "export_clear", "export_wra
 var WriterAuthorizations = [...]string{"item_modify", "item_delete", "delete", "change_acl", "change_owner", "encrypt"}
 
 func CanWrite(acl ReleaseACL) bool {
+	if acl.ContentsUnverified || len(acl.UnmodeledAuthorizations) != 0 {
+		return true
+	}
 	for _, a := range acl.Authorizations {
 		if a == "any" || slices.Contains(WriterAuthorizations[:], a) {
 			return true
@@ -200,7 +204,7 @@ func ForeignWriter(acl ReleaseACL, ownerRequirement string) bool {
 	if !CanWrite(acl) {
 		return false
 	}
-	if acl.ContentsUnverified || acl.AnyApplication {
+	if acl.ContentsUnverified || len(acl.UnmodeledAuthorizations) != 0 || acl.AnyApplication {
 		return true
 	}
 	for _, a := range acl.Applications {
@@ -451,8 +455,9 @@ type BindOptions struct {
 }
 
 const (
-	rollbackEncryptSubject = "/usr/bin/security"
-	rollbackDecisionRef    = "decision:d576-rollback"
+	rollbackEncryptSubject      = "/usr/bin/security"
+	rollbackDecisionRef         = "decision:d576-rollback"
+	rollbackSecurityRequirement = `identifier "com.apple.security" and anchor apple`
 )
 
 func keptApplication(aclList []ReleaseACL, path string) (TrustedApplication, bool) {
@@ -477,7 +482,7 @@ func keptApplication(aclList []ReleaseACL, path string) (TrustedApplication, boo
 
 func isAnyApplicationEncrypt(acl ReleaseACL) bool {
 	return len(acl.Authorizations) == 1 && acl.Authorizations[0] == "encrypt" &&
-		acl.AnyApplication && len(acl.Applications) == 0 && !acl.ContentsUnverified
+		acl.AnyApplication && len(acl.Applications) == 0 && !acl.ContentsUnverified && len(acl.UnmodeledAuthorizations) == 0
 }
 
 func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
@@ -488,6 +493,15 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 	}
 	if item.PartitionUnknown {
 		return p, refuse("partition_unknown", "cannot parse partition ACL")
+	}
+	for _, acl := range item.WriterACLs {
+		if acl.ContentsUnverified || len(acl.UnmodeledAuthorizations) != 0 {
+			return p, refuse("writer_acl_unsupported", "writer ACL contents or authorizations are unsupported")
+		}
+		if slices.Contains(acl.Authorizations, "encrypt") &&
+			(len(acl.Authorizations) != 1 || acl.Authorizations[0] != "encrypt") {
+			return p, refuse("writer_acl_mixed", "encrypt must be the only authorization in a writer ACL")
+		}
 	}
 	apps := []TrustedApplication{OwnerApplication(owner)}
 	found := map[string]bool{}
@@ -505,6 +519,15 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 			if slices.Contains(keep, a.Path) {
 				found[a.Path] = true
 				current, ok := opts.KeepOwners[a.Path]
+				if a.Path == rollbackEncryptSubject {
+					if opts.OwnerDecision != rollbackDecisionRef {
+						return p, refuse("rollback_decision_required", "retaining /usr/bin/security requires its exact rollback decision")
+					}
+					if !ok || current.Path != rollbackEncryptSubject ||
+						current.Requirement != rollbackSecurityRequirement || a.Requirement != current.Requirement {
+						return p, refuse("rollback_subject_unverified", "stored /usr/bin/security requirement must equal its validated designated requirement")
+					}
+				}
 				var check error
 				if !ok {
 					check = fmt.Errorf("cannot validate kept application")
@@ -513,7 +536,7 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 				} else {
 					check = ValidateOwner(current)
 				}
-				if check != nil && opts.OwnerDecision == "" {
+				if check != nil && opts.OwnerDecision == "" && a.Path != rollbackEncryptSubject {
 					return p, refuse("unsafe_keep", "--keep requires owner-grade signing and hardening checks, or --owner-decision REF: "+a.Path)
 				}
 				if ok && current.Path == a.Path && !slices.ContainsFunc(p.KeepOwners, func(o Owner) bool { return o.Path == current.Path }) {
@@ -547,7 +570,7 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 		return p, refuse("unsafe_keep", "rollback subject has ambiguous or unavailable stored requirements")
 	}
 	// Normalize only the standalone encrypt:any grant. Mixed or unreadable writer
-	// ACLs are preserved and remain subject to strict verification.
+	// ACLs were refused above before a plan could be prepared.
 	if item.WriterACLs != nil {
 		p.After.WriterACLs = []ReleaseACL{}
 		for _, acl := range item.WriterACLs {
@@ -667,6 +690,11 @@ func normalizeACLs(acls []ReleaseACL) []ReleaseACL {
 			result[i].Authorizations = []string{}
 		}
 		slices.Sort(result[i].Authorizations)
+		result[i].UnmodeledAuthorizations = slices.Clone(result[i].UnmodeledAuthorizations)
+		if result[i].UnmodeledAuthorizations == nil {
+			result[i].UnmodeledAuthorizations = []string{}
+		}
+		slices.Sort(result[i].UnmodeledAuthorizations)
 		result[i].Applications = slices.Clone(result[i].Applications)
 		if result[i].Applications == nil {
 			result[i].Applications = []TrustedApplication{}
@@ -720,10 +748,11 @@ func rollbackWriterAllowance(plan Plan) (map[string]int, bool) {
 	return map[string]int{key: wildcards}, true
 }
 
-func validRollbackPlan(item Item, owner Owner, plan Plan) bool {
+func validRollbackPlan(item Item, owner Owner, rollbackOwner Owner, plan Plan) bool {
 	if plan.OwnerDecision != rollbackDecisionRef || !slices.Contains(plan.Keep, rollbackEncryptSubject) ||
 		plan.Owner.Path != owner.Path || plan.Owner.Requirement != owner.Requirement || plan.Owner.Partition != owner.Partition ||
-		!itemsMatch(plan.After, item) {
+		rollbackOwner.Path != rollbackEncryptSubject || rollbackOwner.Requirement != rollbackSecurityRequirement ||
+		!filepath.IsAbs(plan.Keychain) || !itemsMatch(plan.After, item) {
 		return false
 	}
 	kept := make(map[string]Owner, len(plan.KeepOwners))
@@ -732,6 +761,10 @@ func validRollbackPlan(item Item, owner Owner, plan Plan) bool {
 			return false
 		}
 		kept[current.Path] = current
+	}
+	storedRollback, ok := keptApplication(plan.After.ReleaseACLs, rollbackEncryptSubject)
+	if !ok || storedRollback.Requirement != rollbackOwner.Requirement || !reflect.DeepEqual(kept[rollbackEncryptSubject], rollbackOwner) {
+		return false
 	}
 	expected, err := PlanBind(plan.Before, plan.Owner, BindOptions{Keep: plan.Keep, KeepOwners: kept, OwnerDecision: plan.OwnerDecision})
 	expected.Keychain = plan.Keychain
@@ -742,8 +775,8 @@ func validRollbackPlan(item Item, owner Owner, plan Plan) bool {
 	return ok
 }
 
-func verifyWithRollback(item Item, owner Owner, plan Plan, until, now time.Time) []string {
-	if !now.Before(until) || !validRollbackPlan(item, owner, plan) {
+func verifyWithRollback(item Item, owner Owner, rollbackOwner Owner, plan Plan, until, now time.Time) []string {
+	if !now.Before(until) || !validRollbackPlan(item, owner, rollbackOwner, plan) {
 		return Verify(item, owner)
 	}
 	allowedWriters, _ := rollbackWriterAllowance(plan)
