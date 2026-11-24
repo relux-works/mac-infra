@@ -170,7 +170,7 @@ generic keep decision is refused. A rollback-authorizing bind and rollback
 verify must name an explicit absolute `--keychain`; neither may select through
 the user's default search list.
 
-A later bind does not retire the retained encrypt grant. The rollback expiry
+A second bind does not retire the retained encrypt grant. The rollback expiry
 ends only the verification exception; it does not remove the ACL grant. Grant
 retirement requires a separately constrained, audit-bound writer-removal
 operation and is outside this change.
