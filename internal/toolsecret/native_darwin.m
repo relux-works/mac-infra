@@ -319,7 +319,7 @@ static OSStatus trustedApplications(NSArray *descriptions, NSMutableArray *appli
 static OSStatus preflightWriterACLs(SecAccessRef access,
                                     TSACLCopyContents copyContents,
                                     CFArrayRef *aclsOut,
-                                    CFMutableSetRef targetsOut) {
+                                    CFMutableSetRef *targetsOut) {
     CFArrayRef acls=NULL;
     OSStatus status=SecAccessCopyACLList(access,&acls);
     if (status) return status;
