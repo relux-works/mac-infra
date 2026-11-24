@@ -64,9 +64,12 @@ func TestNativePreparationNarrowsOnlyPlannedEncryptACLsInMemory(t *testing.T) {
 		},
 	} {
 		run := exec.CommandContext(ctx, fixture, tc.mode)
-		output, err := run.CombinedOutput()
+		output, err := run.Output()
 		if err != nil {
-			t.Fatalf("in-memory native fixture %s: %v\n%s", tc.mode, err, output)
+			if exit, ok := err.(*exec.ExitError); ok {
+				t.Fatalf("in-memory native fixture %s: %v\n%s", tc.mode, err, exit.Stderr)
+			}
+			t.Fatalf("in-memory native fixture %s: %v", tc.mode, err)
 		}
 		var got Item
 		if err := json.Unmarshal(output, &got); err != nil {
