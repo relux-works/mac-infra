@@ -72,9 +72,25 @@ func TestNativePreparationNarrowsOnlyPlannedEncryptACLsInMemory(t *testing.T) {
 		if err := json.Unmarshal(output, &got); err != nil {
 			t.Fatalf("decode fixture %s output: %v\n%s", tc.mode, err, output)
 		}
-		want := []ReleaseACL{{Authorizations: []string{"encrypt"}, Applications: tc.want}}
-		if !reflect.DeepEqual(got.WriterACLs, want) {
-			t.Fatalf("fixture %s writer ACLs = %#v, want independently specified %#v", tc.mode, got.WriterACLs, want)
+		encryptACLs, opaqueOwnerACLs := 0, 0
+		for _, acl := range got.WriterACLs {
+			switch strings.Join(acl.Authorizations, ",") {
+			case "encrypt":
+				encryptACLs++
+				if acl.AnyApplication || acl.ContentsUnverified || !reflect.DeepEqual(acl.Applications, tc.want) {
+					t.Fatalf("fixture %s encrypt ACL = %#v, want independently specified applications %#v", tc.mode, acl, tc.want)
+				}
+			case "change_acl":
+				opaqueOwnerACLs++
+				if !acl.ContentsUnverified || acl.AnyApplication || len(acl.Applications) != 0 {
+					t.Fatalf("fixture %s did not preserve the unrelated opaque owner ACL: %#v", tc.mode, acl)
+				}
+			default:
+				t.Fatalf("fixture %s produced unexpected writer ACL: %#v", tc.mode, acl)
+			}
+		}
+		if encryptACLs != 1 || opaqueOwnerACLs != 1 {
+			t.Fatalf("fixture %s has %d encrypt ACLs and %d opaque owner ACLs, want one each: %#v", tc.mode, encryptACLs, opaqueOwnerACLs, got.WriterACLs)
 		}
 	}
 

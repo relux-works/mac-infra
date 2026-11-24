@@ -82,9 +82,18 @@ static NSDictionary *makePlan(SecAccessRef access, NSString *mode, OSStatus *sta
     }
     NSDictionary *writer=@{@"authorizations":@[ @"encrypt" ],@"any_application":@NO,@"applications":apps};
     if([mode isEqual:@"wrong-list"]) writer=@{@"authorizations":@[ @"encrypt" ],@"any_application":@NO,@"applications":@[applicationDescription(@{@"path":@"/test/other",@"requirement":owner[@"requirement"]})]};
+    NSMutableArray *writers=[NSMutableArray array];
+    for(NSDictionary *entry in before[@"writer_acls"]) {
+        NSArray *authorizations=entry[@"authorizations"];
+        BOOL targetEncrypt=authorizations.count==1 && [authorizations[0] isEqual:@"encrypt"] &&
+            [entry[@"any_application"] boolValue] && [entry[@"applications"] count]==0 &&
+            ![entry[@"contents_unverified"] boolValue] && [entry[@"unmodeled_authorizations"] count]==0;
+        if(!targetEncrypt)[writers addObject:entry];
+    }
+    [writers addObject:writer];
     NSMutableDictionary *after=[NSMutableDictionary dictionaryWithDictionary:before];
     after[@"release_acls"]=releaseACLs;
-    after[@"writer_acls"]=@[writer];
+    after[@"writer_acls"]=writers;
     after[@"partitions"]=@[@"teamid:TESTTEAM"];
     after[@"partition_unknown"]=@NO;
     return @{@"before":before,@"after":after,@"owner":owner,@"keep":keep,@"keep_owners":keepOwners,@"owner_decision":decision};

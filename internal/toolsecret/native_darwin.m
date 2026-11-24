@@ -336,11 +336,12 @@ static OSStatus preflightWriterACLs(SecAccessRef access,
         NSArray *writers=writerAuthorizations(authorizations);
         NSArray *unmodeled=unmodeledAuthorizations(authorizations);
         BOOL hasEncrypt=hasAuth(authorizations,kSecACLAuthorizationEncrypt);
-        BOOL relevant=releasesPlaintext(authorizations) || writers.count || unmodeled.count || hasAuth(authorizations,kSecACLAuthorizationPartitionID);
+        BOOL mustInspect=releasesPlaintext(authorizations) || hasEncrypt || hasAuth(authorizations,kSecACLAuthorizationPartitionID);
+        BOOL relevant=mustInspect || writers.count || unmodeled.count;
         TS_TRACE_AUTHORIZATIONS(authorizations);
         if (relevant && unmodeled.count) status=errSecDecode;
         if (!status && hasEncrypt && CFArrayGetCount(authorizations)!=1) status=errSecDecode;
-        if (!status && relevant) {
+        if (!status && mustInspect) {
             CFArrayRef applications=NULL; CFStringRef description=NULL; SecKeychainPromptSelector selector=0;
             status=copyContents(acl,&applications,&description,&selector);
             if (!status && hasEncrypt && applications==NULL && !description) status=errSecDecode;

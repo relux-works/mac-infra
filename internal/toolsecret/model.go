@@ -495,8 +495,11 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 		return p, refuse("partition_unknown", "cannot parse partition ACL")
 	}
 	for _, acl := range item.WriterACLs {
-		if acl.ContentsUnverified || len(acl.UnmodeledAuthorizations) != 0 {
+		if len(acl.UnmodeledAuthorizations) != 0 {
 			return p, refuse("writer_acl_unsupported", "writer ACL contents or authorizations are unsupported")
+		}
+		if acl.ContentsUnverified && (slices.Contains(acl.Authorizations, "encrypt") || slices.Contains(acl.Authorizations, "any")) {
+			return p, refuse("writer_acl_unsupported", "target writer ACL contents are unverified")
 		}
 		if slices.Contains(acl.Authorizations, "encrypt") &&
 			(len(acl.Authorizations) != 1 || acl.Authorizations[0] != "encrypt") {

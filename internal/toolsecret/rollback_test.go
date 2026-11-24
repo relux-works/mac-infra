@@ -383,7 +383,7 @@ func TestPlanBindRefusesUnsupportedAndOpaqueWriterACLsWithoutChangingInput(t *te
 		acl  ReleaseACL
 	}{
 		{name: "unmodeled-authorization", acl: ReleaseACL{Authorizations: []string{"encrypt"}, AnyApplication: true, UnmodeledAuthorizations: []string{"sign"}}},
-		{name: "opaque-contents", acl: ReleaseACL{Authorizations: []string{"item_modify"}, ContentsUnverified: true}},
+		{name: "opaque-encrypt-contents", acl: ReleaseACL{Authorizations: []string{"encrypt"}, AnyApplication: true, ContentsUnverified: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := rollbackItem(wildcard, tc.acl)
@@ -397,6 +397,11 @@ func TestPlanBindRefusesUnsupportedAndOpaqueWriterACLsWithoutChangingInput(t *te
 				t.Fatal("refused plan changed its input item")
 			}
 		})
+	}
+	ownerACL := ReleaseACL{Authorizations: []string{"change_acl"}, ContentsUnverified: true}
+	plan, err := PlanBind(rollbackItem(wildcard, ownerACL), validOwner(), BindOptions{})
+	if err != nil || !slices.ContainsFunc(plan.After.WriterACLs, func(acl ReleaseACL) bool { return aclSignature(acl) == aclSignature(ownerACL) }) {
+		t.Fatalf("unmodified opaque owner ACL should be preserved while target encrypt ACL is narrowed: plan=%+v err=%v", plan.After.WriterACLs, err)
 	}
 }
 
