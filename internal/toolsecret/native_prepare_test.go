@@ -49,7 +49,7 @@ func TestNativePreparationNarrowsOnlyPlannedEncryptACLsInMemory(t *testing.T) {
 			mode: "owner-only",
 			want: []TrustedApplication{{
 				Path:        "/test/owner",
-				Requirement: `identifier "works.relux.test" and anchor apple generic and certificate leaf[subject.OU] = "TESTTEAM" and certificate leaf = H"0123456789012345678901234567890123456789"`,
+				Requirement: `identifier "works.relux.test" and anchor apple generic and certificate leaf[subject.OU] = TESTTEAM and certificate leaf = H"0123456789012345678901234567890123456789"`,
 			}},
 		},
 		{
@@ -57,7 +57,7 @@ func TestNativePreparationNarrowsOnlyPlannedEncryptACLsInMemory(t *testing.T) {
 			want: []TrustedApplication{
 				{
 					Path:        "/test/owner",
-					Requirement: `identifier "works.relux.test" and anchor apple generic and certificate leaf[subject.OU] = "TESTTEAM" and certificate leaf = H"0123456789012345678901234567890123456789"`,
+					Requirement: `identifier "works.relux.test" and anchor apple generic and certificate leaf[subject.OU] = TESTTEAM and certificate leaf = H"0123456789012345678901234567890123456789"`,
 				},
 				{Path: "/usr/bin/security", Requirement: `identifier "com.apple.security" and anchor apple`},
 			},

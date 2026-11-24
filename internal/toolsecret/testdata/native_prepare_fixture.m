@@ -30,7 +30,7 @@ static OSStatus addEncryptACL(SecAccessRef access, NSString *mode, SecACLRef *cr
 static NSDictionary *ownerDescription(void) {
     return @{
         @"path":@"/test/owner",
-        @"requirement":@"identifier \"works.relux.test\" and anchor apple generic and certificate leaf[subject.OU] = \"TESTTEAM\" and certificate leaf = H\"0123456789012345678901234567890123456789\"",
+        @"requirement":@"identifier \"works.relux.test\" and anchor apple generic and certificate leaf[subject.OU] = TESTTEAM and certificate leaf = H\"0123456789012345678901234567890123456789\"",
         @"ad_hoc":@NO,
         @"hardened_runtime":@YES,
         @"entitlements":@[],
