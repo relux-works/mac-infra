@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -83,7 +84,7 @@ func recordHash(r AuditRecord) (string, error) {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:]), nil
 }
-func scanAudit(f *os.File) (AuditHead, error) {
+func scanAuditVisit(f *os.File, visit func(AuditRecord)) (AuditHead, error) {
 	head := AuditHead{Hash: genesisHash}
 	if _, e := f.Seek(0, io.SeekStart); e != nil {
 		return head, e
@@ -119,6 +120,9 @@ func scanAudit(f *os.File) (AuditHead, error) {
 		if r.Sequence != head.Count+1 || r.PreviousHash != head.Hash || r.Hash != h {
 			return head, fmt.Errorf("audit hash chain mismatch at record %d", head.Count+1)
 		}
+		if visit != nil {
+			visit(r)
+		}
 		head = AuditHead{Count: r.Sequence, Hash: r.Hash}
 	}
 	if e := scanner.Err(); e != nil {
@@ -141,7 +145,11 @@ func scanAudit(f *os.File) (AuditHead, error) {
 	return head, nil
 }
 func verifyAuditFile(f *os.File, expected string) (AuditHead, error) {
-	head, e := scanAudit(f)
+	return verifyAuditVisit(f, expected, nil)
+}
+
+func verifyAuditVisit(f *os.File, expected string, visit func(AuditRecord)) (AuditHead, error) {
+	head, e := scanAuditVisit(f, visit)
 	if e != nil {
 		return head, e
 	}
@@ -168,6 +176,57 @@ func verifyAuditFile(f *os.File, expected string) (AuditHead, error) {
 		return head, fmt.Errorf("audit expected head mismatch")
 	}
 	return head, nil
+}
+
+// latestAppliedPlan returns only the last completed, successful audit plan for
+// this item. A later intent or unknown outcome revokes an earlier plan until a
+// matching applied record completes.
+func latestAppliedPlan(path, keychain, service, account string) (Plan, bool, error) {
+	f, err := openOwnedFile(path, syscall.O_RDONLY)
+	if err != nil {
+		return Plan{}, false, err
+	}
+	defer f.Close()
+	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		return Plan{}, false, fmt.Errorf("audit is busy: %w", err)
+	}
+	var pending *AuditRecord
+	var accepted *Plan
+	_, err = verifyAuditVisit(f, "", func(record AuditRecord) {
+		matches := record.Plan.Keychain == keychain &&
+			((record.Before.Service == service && record.Before.Account == account) ||
+				(record.After.Service == service && record.After.Account == account))
+		if !matches {
+			if pending != nil {
+				pending = nil
+				accepted = nil
+			}
+			return
+		}
+		switch record.Outcome {
+		case "intent":
+			pending = &record
+			accepted = nil
+		case "applied", "failed_or_unknown":
+			if pending != nil && record.Sequence == pending.Sequence+1 && record.Actor == pending.Actor && reflect.DeepEqual(record.Plan, pending.Plan) && record.Outcome == "applied" {
+				plan := record.Plan
+				accepted = &plan
+			} else {
+				accepted = nil
+			}
+			pending = nil
+		default:
+			pending = nil
+			accepted = nil
+		}
+	})
+	if err != nil {
+		return Plan{}, false, err
+	}
+	if pending != nil || accepted == nil {
+		return Plan{}, false, nil
+	}
+	return *accepted, true, nil
 }
 func VerifyAudit(path, expected string) (AuditHead, error) {
 	if expected != "" {

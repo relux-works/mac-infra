@@ -46,6 +46,7 @@ func (p *paths) Set(s string) error {
 }
 
 const usage = "mac-tool-secret [--json] inventory [--keychain PATH] [--service-prefix P] [--all --owner-sitting --out FILE] | bind --service S --account A --owner PATH [--keychain PATH] [--dry-run] [--owner-sitting] [--keep PATH]... [--owner-decision REF] | verify --service S --account A --owner PATH [--keychain PATH] | verify-audit [--audit-log FILE] [--expected-head SHA256]"
+const rollbackUsage = "mac-tool-secret [--json] inventory [--keychain PATH] [--service-prefix P] [--all --owner-sitting --out FILE] | bind --service S --account A --owner PATH [--keychain PATH] [--dry-run] [--owner-sitting] [--keep PATH]... [--owner-decision REF] | verify --service S --account A --owner PATH [--keychain PATH] [--rollback-subject /usr/bin/security --rollback-until RFC3339-UTC] | verify-audit [--audit-log FILE] [--expected-head SHA256]"
 
 func IsTerminal(f *os.File) bool { return terminalFD(int(f.Fd())) }
 
@@ -64,6 +65,19 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 		command = filtered[0]
 		filtered = filtered[1:]
 	}
+	usageText := usage
+	if command == "help" || command == "--help" || command == "-h" {
+		usageText = rollbackUsage
+	}
+	if command == "verify" {
+		for _, arg := range filtered {
+			if arg == "--rollback-subject" || strings.HasPrefix(arg, "--rollback-subject=") ||
+				arg == "--rollback-until" || strings.HasPrefix(arg, "--rollback-until=") {
+				usageText = rollbackUsage
+				break
+			}
+		}
+	}
 	emit := func(result any, err error, exit int) int {
 		e := envelope{OK: err == nil, Command: command, Result: result}
 		if err != nil {
@@ -76,7 +90,7 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 			if exit == 2 {
 				code = "usage"
 			}
-			e.Error = &cliError{code, err.Error(), usage}
+			e.Error = &cliError{code, err.Error(), usageText}
 		}
 		if jsonMode {
 			if json.NewEncoder(c.Stdout).Encode(e) != nil {
@@ -91,7 +105,7 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 		return exit
 	}
 	if command == "help" || command == "--help" || command == "-h" {
-		return emit(map[string]string{"usage": usage}, nil, 0)
+		return emit(map[string]string{"usage": usageText}, nil, 0)
 	}
 	if command == "verify-audit" {
 		fs := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -128,6 +142,8 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 	k := fs.String("keychain", "", "keychain file")
 	service, account, ownerPath, prefix := "", "", "", ""
 	ownerDecision, outPath := "", ""
+	rollbackSubject, rollbackUntilText := "", ""
+	var rollbackUntil time.Time
 	var keep paths
 	dry, sitting, all := false, false, false
 	if command == "inventory" {
@@ -138,6 +154,10 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 		fs.StringVar(&service, "service", "", "service")
 		fs.StringVar(&account, "account", "", "account")
 		fs.StringVar(&ownerPath, "owner", "", "owner executable")
+		if command == "verify" {
+			fs.StringVar(&rollbackSubject, "rollback-subject", "", "exact retained rollback application")
+			fs.StringVar(&rollbackUntilText, "rollback-until", "", "rollback window end in UTC RFC3339")
+		}
 	}
 	if command == "bind" {
 		fs.BoolVar(&dry, "dry-run", false, "print plan only")
@@ -152,6 +172,24 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 	}
 	if fs.NArg() != 0 {
 		return emit(nil, fmt.Errorf("unexpected positional arguments"), 2)
+	}
+	if command == "verify" {
+		if (rollbackSubject == "") != (rollbackUntilText == "") {
+			return emit(nil, fmt.Errorf("--rollback-subject and --rollback-until must be supplied together"), 2)
+		}
+		if rollbackSubject != "" {
+			if rollbackSubject != rollbackEncryptSubject {
+				return emit(nil, fmt.Errorf("--rollback-subject must be %s", rollbackEncryptSubject), 2)
+			}
+			if !strings.HasSuffix(rollbackUntilText, "Z") {
+				return emit(nil, fmt.Errorf("--rollback-until must be RFC3339 UTC with a trailing Z"), 2)
+			}
+			var err error
+			rollbackUntil, err = time.Parse(time.RFC3339Nano, rollbackUntilText)
+			if err != nil {
+				return emit(nil, fmt.Errorf("invalid --rollback-until: %w", err), 2)
+			}
+		}
 	}
 	if command != "inventory" && (service == "" || account == "" || !filepath.IsAbs(ownerPath)) {
 		return emit(nil, fmt.Errorf("--service, --account and absolute --owner are required"), 2)
@@ -256,12 +294,41 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 	}
 	if command == "verify" {
 		reasons := Verify(found[0], owner)
+		if rollbackSubject != "" {
+			auditPath := c.AuditPath
+			if auditPath == "" {
+				auditPath, err = DefaultAuditPath()
+				if err != nil {
+					return emit(nil, err, 1)
+				}
+			}
+			if !filepath.IsAbs(auditPath) {
+				return emit(nil, fmt.Errorf("audit path must be absolute"), 2)
+			}
+			plan, ok, auditErr := latestAppliedPlan(auditPath, *k, service, account)
+			if auditErr != nil {
+				return emit(nil, fmt.Errorf("rollback plan audit cannot be verified: %w", auditErr), 1)
+			}
+			if ok {
+				now := c.Now
+				if now == nil {
+					now = time.Now
+				}
+				reasons = verifyWithRollback(found[0], owner, plan, rollbackUntil, now())
+			}
+		}
+		failures := make([]string, 0, len(reasons))
+		for _, reason := range reasons {
+			if reason != "rollback_retained" {
+				failures = append(failures, reason)
+			}
+		}
 		result := struct {
 			Verified bool     `json:"verified"`
 			Reasons  []string `json:"reasons"`
-		}{len(reasons) == 0, append([]string{}, reasons...)}
-		if len(reasons) > 0 {
-			return emit(result, refuse("verification_failed", strings.Join(reasons, "; ")), 3)
+		}{len(failures) == 0, append([]string{}, reasons...)}
+		if len(failures) > 0 {
+			return emit(result, refuse("verification_failed", strings.Join(failures, "; ")), 3)
 		}
 		return emit(result, nil, 0)
 	}
@@ -276,6 +343,7 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 	if err != nil {
 		return emit(nil, err, 3)
 	}
+	plan.Keychain = *k
 	if dry {
 		return emit(plan, nil, 0)
 	}

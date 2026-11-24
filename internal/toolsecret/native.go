@@ -143,6 +143,7 @@ func Worker(in io.Reader, out io.Writer) int {
 		if e != nil {
 			return 3
 		}
+		p.Keychain = req.Keychain
 		a, _ := json.Marshal(p)
 		b, _ := json.Marshal(req.Plan)
 		if !bytes.Equal(a, b) {

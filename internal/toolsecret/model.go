@@ -5,12 +5,15 @@ package toolsecret
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type RequirementClass string
@@ -434,6 +437,7 @@ func Inspect(item Item) InventoryItem {
 type Plan struct {
 	Before        Item     `json:"before"`
 	After         Item     `json:"after"`
+	Keychain      string   `json:"keychain,omitempty"`
 	Owner         Owner    `json:"owner"`
 	Keep          []string `json:"keep"`
 	KeepOwners    []Owner  `json:"keep_owners"`
@@ -444,6 +448,36 @@ type BindOptions struct {
 	Keep          []string
 	KeepOwners    map[string]Owner
 	OwnerDecision string
+}
+
+const (
+	rollbackEncryptSubject = "/usr/bin/security"
+	rollbackDecisionRef    = "decision:d576-rollback"
+)
+
+func keptApplication(aclList []ReleaseACL, path string) (TrustedApplication, bool) {
+	var found TrustedApplication
+	have := false
+	for _, acl := range aclList {
+		if !CanReleasePlaintext(acl) || acl.ContentsUnverified || acl.AnyApplication {
+			continue
+		}
+		for _, app := range acl.Applications {
+			if app.Path != path {
+				continue
+			}
+			if have && found != app {
+				return TrustedApplication{}, false
+			}
+			found, have = app, true
+		}
+	}
+	return found, have
+}
+
+func isAnyApplicationEncrypt(acl ReleaseACL) bool {
+	return len(acl.Authorizations) == 1 && acl.Authorizations[0] == "encrypt" &&
+		acl.AnyApplication && len(acl.Applications) == 0 && !acl.ContentsUnverified
 }
 
 func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
@@ -507,26 +541,55 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 		p.After.ReleaseACLs = append(p.After.ReleaseACLs, ReleaseACL{Authorizations: []string{auth}, Applications: apps})
 	}
 	p.After.Partitions = []string{owner.Partition}
-	// Removing wildcard plaintext entries also removes their writer authority.
-	// Other writer grants are preserved and remain subject to strict verify.
+	rollbackApp, haveRollbackApp := keptApplication(p.After.ReleaseACLs, rollbackEncryptSubject)
+	keepRollback := opts.OwnerDecision == rollbackDecisionRef && slices.Contains(keep, rollbackEncryptSubject)
+	if keepRollback && !haveRollbackApp {
+		return p, refuse("unsafe_keep", "rollback subject has ambiguous or unavailable stored requirements")
+	}
+	// Normalize only the standalone encrypt:any grant. Mixed or unreadable writer
+	// ACLs are preserved and remain subject to strict verification.
 	if item.WriterACLs != nil {
 		p.After.WriterACLs = []ReleaseACL{}
 		for _, acl := range item.WriterACLs {
-			if !slices.Contains(acl.Authorizations, "any") {
-				p.After.WriterACLs = append(p.After.WriterACLs, acl)
+			if slices.Contains(acl.Authorizations, "any") {
+				continue
 			}
+			if isAnyApplicationEncrypt(acl) {
+				apps := []TrustedApplication{OwnerApplication(owner)}
+				if keepRollback {
+					apps = append(apps, rollbackApp)
+				}
+				slices.SortFunc(apps, func(a, b TrustedApplication) int {
+					if order := cmp.Compare(a.Path, b.Path); order != 0 {
+						return order
+					}
+					return cmp.Compare(a.Requirement, b.Requirement)
+				})
+				acl.AnyApplication = false
+				acl.Applications = apps
+			}
+			p.After.WriterACLs = append(p.After.WriterACLs, acl)
 		}
 	}
 	return p, nil
 }
 
-func Verify(item Item, owner Owner) []string {
+func verify(item Item, owner Owner, retainedSubject string, allowedWriters map[string]int) ([]string, bool) {
 	var reasons []string
+	retained := false
 	if err := ValidateOwner(owner); err != nil {
 		reasons = append(reasons, err.Error())
 	}
 	owners := 0
 	for _, acl := range item.WriterACLs {
+		if retainedSubject == rollbackEncryptSubject && CanWrite(acl) {
+			key := aclSignature(acl)
+			if allowedWriters[key] > 0 {
+				allowedWriters[key]--
+				retained = true
+				continue
+			}
+		}
 		if ForeignWriter(acl, owner.Requirement) {
 			reasons = append(reasons, "foreign_writer")
 		}
@@ -550,10 +613,16 @@ func Verify(item Item, owner Owner) []string {
 				reasons = append(reasons, string(c))
 			}
 			if IsGenericApplication(a) {
-				reasons = append(reasons, "generic_reader")
+				if retainedSubject == rollbackEncryptSubject && a.Path == retainedSubject && !a.Unverified() {
+					retained = true
+				} else {
+					reasons = append(reasons, "generic_reader")
+				}
 			}
 			if a.Requirement == owner.Requirement {
 				owners++
+			} else if retainedSubject == rollbackEncryptSubject && a.Path == retainedSubject && !a.Unverified() {
+				// The one explicitly retained rollback reader is not an owner.
 			} else if !AppleInternal(a) {
 				reasons = append(reasons, "unexpected decrypt owner: "+a.Path)
 			}
@@ -564,6 +633,123 @@ func Verify(item Item, owner Owner) []string {
 	}
 	if item.PartitionUnknown || len(item.Partitions) != 1 || item.Partitions[0] != owner.Partition {
 		reasons = append(reasons, "partition_mismatch")
+	}
+	return reasons, retained
+}
+
+func Verify(item Item, owner Owner) []string {
+	reasons, _ := verify(item, owner, "", nil)
+	return reasons
+}
+
+func itemsMatch(a, b Item) bool {
+	normalize := func(item Item) Item {
+		item.ReleaseACLs = normalizeACLs(item.ReleaseACLs)
+		item.WriterACLs = normalizeACLs(item.WriterACLs)
+		item.Partitions = slices.Clone(item.Partitions)
+		if item.Partitions == nil {
+			item.Partitions = []string{}
+		}
+		slices.Sort(item.Partitions)
+		return item
+	}
+	return reflect.DeepEqual(normalize(a), normalize(b))
+}
+
+func normalizeACLs(acls []ReleaseACL) []ReleaseACL {
+	result := slices.Clone(acls)
+	if result == nil {
+		result = []ReleaseACL{}
+	}
+	for i := range result {
+		result[i].Authorizations = slices.Clone(result[i].Authorizations)
+		if result[i].Authorizations == nil {
+			result[i].Authorizations = []string{}
+		}
+		slices.Sort(result[i].Authorizations)
+		result[i].Applications = slices.Clone(result[i].Applications)
+		if result[i].Applications == nil {
+			result[i].Applications = []TrustedApplication{}
+		}
+		slices.SortFunc(result[i].Applications, func(a, b TrustedApplication) int {
+			if order := cmp.Compare(a.Path, b.Path); order != 0 {
+				return order
+			}
+			return cmp.Compare(a.Requirement, b.Requirement)
+		})
+	}
+	slices.SortFunc(result, func(a, b ReleaseACL) int {
+		left, _ := json.Marshal(a)
+		right, _ := json.Marshal(b)
+		return cmp.Compare(string(left), string(right))
+	})
+	return result
+}
+
+func aclSignature(acl ReleaseACL) string {
+	normalized := normalizeACLs([]ReleaseACL{acl})
+	b, _ := json.Marshal(normalized[0])
+	return string(b)
+}
+
+func rollbackWriterAllowance(plan Plan) (map[string]int, bool) {
+	wildcards := 0
+	for _, acl := range plan.Before.WriterACLs {
+		if isAnyApplicationEncrypt(acl) {
+			wildcards++
+		}
+	}
+	if wildcards == 0 {
+		return nil, false
+	}
+	rollbackApp, ok := keptApplication(plan.After.ReleaseACLs, rollbackEncryptSubject)
+	if !ok {
+		return nil, false
+	}
+	expected := ReleaseACL{Authorizations: []string{"encrypt"}, Applications: []TrustedApplication{OwnerApplication(plan.Owner), rollbackApp}}
+	key := aclSignature(expected)
+	available := 0
+	for _, acl := range plan.After.WriterACLs {
+		if aclSignature(acl) == key {
+			available++
+		}
+	}
+	if available < wildcards {
+		return nil, false
+	}
+	return map[string]int{key: wildcards}, true
+}
+
+func validRollbackPlan(item Item, owner Owner, plan Plan) bool {
+	if plan.OwnerDecision != rollbackDecisionRef || !slices.Contains(plan.Keep, rollbackEncryptSubject) ||
+		plan.Owner.Path != owner.Path || plan.Owner.Requirement != owner.Requirement || plan.Owner.Partition != owner.Partition ||
+		!itemsMatch(plan.After, item) {
+		return false
+	}
+	kept := make(map[string]Owner, len(plan.KeepOwners))
+	for _, current := range plan.KeepOwners {
+		if _, exists := kept[current.Path]; exists {
+			return false
+		}
+		kept[current.Path] = current
+	}
+	expected, err := PlanBind(plan.Before, plan.Owner, BindOptions{Keep: plan.Keep, KeepOwners: kept, OwnerDecision: plan.OwnerDecision})
+	expected.Keychain = plan.Keychain
+	if err != nil || !reflect.DeepEqual(expected, plan) {
+		return false
+	}
+	_, ok := rollbackWriterAllowance(plan)
+	return ok
+}
+
+func verifyWithRollback(item Item, owner Owner, plan Plan, until, now time.Time) []string {
+	if !now.Before(until) || !validRollbackPlan(item, owner, plan) {
+		return Verify(item, owner)
+	}
+	allowedWriters, _ := rollbackWriterAllowance(plan)
+	reasons, retained := verify(item, owner, rollbackEncryptSubject, allowedWriters)
+	if retained {
+		reasons = append(reasons, "rollback_retained")
 	}
 	return reasons
 }
