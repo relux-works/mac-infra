@@ -9,9 +9,11 @@
 #ifdef TOOLSECRET_TEST_TRACE
 #define TS_TRACE(s) fprintf(stderr,"toolsecret-test-phase:%s\n",s)
 #define TS_TRACE_STATUS(s,v) fprintf(stderr,"toolsecret-test-status:%s:%d\n",s,(int)(v))
+#define TS_TRACE_AUTHORIZATIONS(a) fprintf(stderr,"toolsecret-test-authorizations:%s\n",[[(NSArray *)(a) description] UTF8String])
 #else
 #define TS_TRACE(s) ((void)0)
 #define TS_TRACE_STATUS(s,v) ((void)0)
+#define TS_TRACE_AUTHORIZATIONS(a) ((void)0)
 #endif
 
 typedef OSStatus (*CopyRequirement)(SecTrustedApplicationRef, SecRequirementRef *);
@@ -335,6 +337,7 @@ static OSStatus preflightWriterACLs(SecAccessRef access,
         NSArray *unmodeled=unmodeledAuthorizations(authorizations);
         BOOL hasEncrypt=hasAuth(authorizations,kSecACLAuthorizationEncrypt);
         BOOL relevant=releasesPlaintext(authorizations) || writers.count || unmodeled.count || hasAuth(authorizations,kSecACLAuthorizationPartitionID);
+        TS_TRACE_AUTHORIZATIONS(authorizations);
         if (relevant && unmodeled.count) status=errSecDecode;
         if (!status && hasEncrypt && CFArrayGetCount(authorizations)!=1) status=errSecDecode;
         if (!status && relevant) {
