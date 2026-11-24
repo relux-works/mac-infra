@@ -771,7 +771,7 @@ func validRollbackPlan(item Item, owner Owner, rollbackOwner Owner, plan Plan) b
 	if err != nil || !reflect.DeepEqual(expected, plan) {
 		return false
 	}
-	_, ok := rollbackWriterAllowance(plan)
+	_, ok = rollbackWriterAllowance(plan)
 	return ok
 }
 
