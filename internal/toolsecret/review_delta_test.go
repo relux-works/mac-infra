@@ -166,7 +166,7 @@ func TestKeepOwnerChecks(t *testing.T) {
 			kept.Requirement = strings.ReplaceAll(strongDR, "works.relux.test", "works.relux.extra")
 			switch kind {
 			case "generic":
-				kept.Path = "/usr/bin/security"
+				kept.Path = "/bin/sh"
 			case "ad-hoc":
 				kept.AdHoc = true
 			case "cdhash":

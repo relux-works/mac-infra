@@ -143,7 +143,7 @@ func TestPlanAndKeep(t *testing.T) {
 	if !reflect.DeepEqual(p.Before, i) {
 		t.Fatal("before mutated")
 	}
-	p, err = PlanBind(i, validOwner(), BindOptions{Keep: []string{"/usr/bin/security", "/test/stale"}, OwnerDecision: "decision:test"})
+	p, err = PlanBind(i, validOwner(), BindOptions{Keep: []string{"/test/stale", "/test/old"}, OwnerDecision: "decision:test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestAudit(t *testing.T) {
 	c, out, _ := testCLI(t, f)
 	c.StdinTTY = true
 	c.StdoutTTY = true
-	if code := c.Run(context.Background(), append(bindArgs(), "--keep", "/usr/bin/security", "--owner-decision", "decision:test")); code != 0 {
+	if code := c.Run(context.Background(), append(bindArgs(), "--keep", "/test/stale", "--owner-decision", "decision:test")); code != 0 {
 		t.Fatalf("%d %s", code, out)
 	}
 	data, err := os.ReadFile(c.AuditPath)

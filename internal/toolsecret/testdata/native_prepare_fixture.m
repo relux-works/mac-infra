@@ -117,7 +117,12 @@ static int runFixture(NSString *mode) {
         CFRelease(access);
         return 0;
     }
-    if(status || !prepared){if(target)CFRelease(target);CFRelease(access);return 30;}
+    if(status || !prepared){
+        NSData *debugJSON=prepared ? [NSJSONSerialization dataWithJSONObject:prepared options:NSJSONWritingSortedKeys error:NULL] : nil;
+        NSString *debugText=debugJSON ? [[[NSString alloc] initWithData:debugJSON encoding:NSUTF8StringEncoding] autorelease] : @"<nil>";
+        fprintf(stderr,"native preparation refused: status=%d prepared=%s\n",(int)status,debugText.UTF8String);
+        if(target)CFRelease(target);CFRelease(access);return 30;
+    }
     NSData *json=[NSJSONSerialization dataWithJSONObject:prepared options:NSJSONWritingSortedKeys error:NULL];
     if(!json){if(target)CFRelease(target);CFRelease(access);return 31;}
     fwrite(json.bytes,1,json.length,stdout);

@@ -348,6 +348,7 @@ func TestRollbackDoesNotHideOtherGenericReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	plan.Keychain = "/test/keychain-a"
 	f := newFake()
 	f.items = []Item{plan.After}
 	c, out, _ := testCLI(t, f)
