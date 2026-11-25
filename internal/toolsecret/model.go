@@ -185,13 +185,60 @@ var ForbiddenEntitlements = []string{
 
 var PlaintextAuthorizations = [...]string{"decrypt", "export_clear", "export_wrapped"}
 var WriterAuthorizations = [...]string{"item_modify", "item_delete", "delete", "change_acl", "change_owner", "encrypt"}
+var secretUsingAuthorizations = [...]string{"derive", "mac", "sign"}
+
+const integrityAuthorization = "integrity"
+
+func hasSecretUsingAuthorization(acl ReleaseACL) bool {
+	for _, authorization := range acl.Authorizations {
+		if slices.Contains(secretUsingAuthorizations[:], authorization) {
+			return true
+		}
+	}
+	return false
+}
+
+func secretUsingACL(acl ReleaseACL) bool {
+	if len(acl.Authorizations) == 0 || acl.ContentsUnverified || len(acl.UnmodeledAuthorizations) != 0 {
+		return false
+	}
+	for _, authorization := range acl.Authorizations {
+		if !slices.Contains(secretUsingAuthorizations[:], authorization) {
+			return false
+		}
+	}
+	return true
+}
+
+func secretWriterNeedsNarrowing(acl ReleaseACL) bool {
+	return secretUsingACL(acl) && (acl.AnyApplication || len(acl.Applications) != 0)
+}
+
+func integrityACL(acl ReleaseACL) bool {
+	return len(acl.Authorizations) == 1 && acl.Authorizations[0] == integrityAuthorization &&
+		acl.AnyApplication && len(acl.Applications) == 0 && !acl.ContentsUnverified && len(acl.UnmodeledAuthorizations) == 0
+}
+
+func integrityACLsValid(acls []ReleaseACL) bool {
+	count := 0
+	for _, acl := range acls {
+		if !slices.Contains(acl.Authorizations, integrityAuthorization) {
+			continue
+		}
+		count++
+		if !integrityACL(acl) {
+			return false
+		}
+	}
+	return count <= 1
+}
 
 func CanWrite(acl ReleaseACL) bool {
 	if acl.ContentsUnverified || len(acl.UnmodeledAuthorizations) != 0 {
 		return true
 	}
 	for _, a := range acl.Authorizations {
-		if a == "any" || slices.Contains(WriterAuthorizations[:], a) {
+		if a == "any" || slices.Contains(WriterAuthorizations[:], a) || slices.Contains(secretUsingAuthorizations[:], a) {
 			return true
 		}
 	}
@@ -404,6 +451,9 @@ func Inspect(item Item) InventoryItem {
 			}
 		}
 	}
+	if !integrityACLsValid(item.WriterACLs) {
+		flag("integrity_acl_unsupported")
+	}
 	if slices.Contains(r.Flags, "generic_reader") {
 		s := strings.ToLower(item.Service + " " + item.Label)
 		for _, marker := range []string{"rollback", "backup", "migration", ".old", "-old", "_old"} {
@@ -494,9 +544,24 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 	if item.PartitionUnknown {
 		return p, refuse("partition_unknown", "cannot parse partition ACL")
 	}
+	if !integrityACLsValid(item.WriterACLs) {
+		return p, refuse("integrity_acl_unsupported", "integrity authorization must be the exact singleton system ACL")
+	}
 	for _, acl := range item.WriterACLs {
 		if len(acl.UnmodeledAuthorizations) != 0 {
 			return p, refuse("writer_acl_unsupported", "writer ACL contents or authorizations are unsupported")
+		}
+		if slices.Contains(acl.Authorizations, integrityAuthorization) {
+			continue
+		}
+		if hasSecretUsingAuthorization(acl) {
+			if !secretUsingACL(acl) {
+				return p, refuse("writer_acl_mixed", "derive, MAC and sign must be the only authorizations in a key-use ACL")
+			}
+			if acl.ContentsUnverified || (acl.AnyApplication && len(acl.Applications) != 0) {
+				return p, refuse("writer_acl_unsupported", "key-use ACL contents or applications are unsupported")
+			}
+			continue
 		}
 		if acl.ContentsUnverified && (slices.Contains(acl.Authorizations, "encrypt") || slices.Contains(acl.Authorizations, "any")) {
 			return p, refuse("writer_acl_unsupported", "target writer ACL contents are unverified")
@@ -580,6 +645,24 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 			if slices.Contains(acl.Authorizations, "any") {
 				continue
 			}
+			if slices.Contains(acl.Authorizations, integrityAuthorization) {
+				p.After.WriterACLs = append(p.After.WriterACLs, acl)
+				continue
+			}
+			if secretWriterNeedsNarrowing(acl) {
+				apps := []TrustedApplication{OwnerApplication(owner)}
+				if keepRollback {
+					apps = append(apps, rollbackApp)
+				}
+				slices.SortFunc(apps, func(a, b TrustedApplication) int {
+					if order := cmp.Compare(a.Path, b.Path); order != 0 {
+						return order
+					}
+					return cmp.Compare(a.Requirement, b.Requirement)
+				})
+				acl.AnyApplication = false
+				acl.Applications = apps
+			}
 			if isAnyApplicationEncrypt(acl) {
 				apps := []TrustedApplication{OwnerApplication(owner)}
 				if keepRollback {
@@ -603,6 +686,9 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 func verify(item Item, owner Owner, retainedSubject string, allowedWriters map[string]int) ([]string, bool) {
 	var reasons []string
 	retained := false
+	if !integrityACLsValid(item.WriterACLs) {
+		reasons = append(reasons, "integrity_acl_unsupported")
+	}
 	if err := ValidateOwner(owner); err != nil {
 		reasons = append(reasons, err.Error())
 	}
@@ -724,31 +810,45 @@ func aclSignature(acl ReleaseACL) string {
 }
 
 func rollbackWriterAllowance(plan Plan) (map[string]int, bool) {
-	wildcards := 0
-	for _, acl := range plan.Before.WriterACLs {
-		if isAnyApplicationEncrypt(acl) {
-			wildcards++
-		}
-	}
-	if wildcards == 0 {
-		return nil, false
-	}
 	rollbackApp, ok := keptApplication(plan.After.ReleaseACLs, rollbackEncryptSubject)
 	if !ok {
 		return nil, false
 	}
-	expected := ReleaseACL{Authorizations: []string{"encrypt"}, Applications: []TrustedApplication{OwnerApplication(plan.Owner), rollbackApp}}
-	key := aclSignature(expected)
-	available := 0
-	for _, acl := range plan.After.WriterACLs {
-		if aclSignature(acl) == key {
-			available++
+	apps := []TrustedApplication{OwnerApplication(plan.Owner), rollbackApp}
+	slices.SortFunc(apps, func(a, b TrustedApplication) int {
+		if order := cmp.Compare(a.Path, b.Path); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.Requirement, b.Requirement)
+	})
+	allowed := map[string]int{}
+	for _, acl := range plan.Before.WriterACLs {
+		if isAnyApplicationEncrypt(acl) {
+			expected := ReleaseACL{Authorizations: []string{"encrypt"}, Applications: apps}
+			allowed[aclSignature(expected)]++
+			continue
+		}
+		if secretWriterNeedsNarrowing(acl) {
+			expected := ReleaseACL{Authorizations: slices.Clone(acl.Authorizations), Applications: apps}
+			allowed[aclSignature(expected)]++
 		}
 	}
-	if available < wildcards {
+	if len(allowed) == 0 {
 		return nil, false
 	}
-	return map[string]int{key: wildcards}, true
+	available := make(map[string]int, len(allowed))
+	for _, acl := range plan.After.WriterACLs {
+		key := aclSignature(acl)
+		if allowed[key] > 0 {
+			available[key]++
+		}
+	}
+	for key, count := range allowed {
+		if available[key] < count {
+			return nil, false
+		}
+	}
+	return allowed, true
 }
 
 func validRollbackPlan(item Item, owner Owner, rollbackOwner Owner, plan Plan) bool {
@@ -779,8 +879,14 @@ func validRollbackPlan(item Item, owner Owner, rollbackOwner Owner, plan Plan) b
 }
 
 func verifyWithRollback(item Item, owner Owner, rollbackOwner Owner, plan Plan, until, now time.Time) []string {
-	if !now.Before(until) || !validRollbackPlan(item, owner, rollbackOwner, plan) {
+	if !now.Before(until) {
 		return Verify(item, owner)
+	}
+	if plan.OwnerDecision != rollbackDecisionRef || !slices.Contains(plan.Keep, rollbackEncryptSubject) {
+		return Verify(item, owner)
+	}
+	if !validRollbackPlan(item, owner, rollbackOwner, plan) {
+		return append(Verify(item, owner), "rollback_plan_mismatch")
 	}
 	allowedWriters, _ := rollbackWriterAllowance(plan)
 	reasons, retained := verify(item, owner, rollbackEncryptSubject, allowedWriters)

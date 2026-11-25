@@ -47,10 +47,12 @@ the trusted paths/requirements captured at trust time. Findings include
 names). Both `apple:` and `apple-tool:` always flag `partition_mismatch`.
 
 Inventory also reports `writer_acls` and per-entry `writers` findings for
-`item_modify`, `item_delete`, `delete`, `change_acl`, `change_owner`, `encrypt` and wildcard
-`any` authorizations. Each writer includes its stored applications and a
-`foreign_writer` verdict. A non-owner or unrestricted writer is flagged, and
-verify fails on `foreign_writer` even when plaintext readers are correct.
+`item_modify`, `item_delete`, `delete`, `change_acl`, `change_owner`, `encrypt`,
+`derive`, `mac`, `sign` and wildcard `any` authorizations. The `integrity`
+authorization is recorded in `writer_acls` as a special system entry, not as a
+writer. Each writer includes its stored applications and a `foreign_writer`
+verdict. A non-owner or unrestricted writer is flagged, and verify fails on
+`foreign_writer` even when plaintext readers are correct.
 Unreadable writer subjects or stored requirements fail closed. An empty
 explicit trusted list requires a system authorization dialog and is not an
 automatic foreign grant; a NULL list grants any application and is flagged.
@@ -62,6 +64,26 @@ them with its explicitly validated `--owner` requirement.
 group key to encrypt replacement data; this is a writer operation, although
 it cannot release plaintext. See Apple's [secure-storage implementation](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_cdsa_client/lib/securestorage.cpp)
 and [encryption authorization check](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/localdatabase.cpp).
+
+`derive`, `mac` and `sign` are modeled as secret-using operations. Apple defines
+them as deriving a new key, creating or verifying a message authentication code,
+and digitally signing data. They do not export the stored secret, but grant use
+of it; bind narrows automatically trusted ACLs to the validated owner and, only
+under the exact rollback decision, the retained rollback application. A
+prompt-only ACL with an explicit empty trusted list remains unchanged. Strict
+verification treats every other automatic application grant as
+`foreign_writer`. See Apple's [ACL authorization definitions](https://developer.apple.com/documentation/security/acl-authorization-keys)
+and [ACL evaluation model](https://developer.apple.com/documentation/security/access-control-lists).
+
+Apple's authorization reference does not describe `integrity`. Apple's Security
+implementation uses it for an internal Secure Storage integrity ACL: it
+computes and checks a digest of item attributes. We infer that this ACL
+protects metadata integrity rather than granting key use, secret release, item
+modification or ACL changes. The model accepts only one standalone `integrity`
+ACL with a null trusted-application list and preserves it unchanged; mixed,
+duplicate, explicit-application or unreadable forms are refused. The
+implementation path is visible in [`Item.cpp`](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/Item.cpp#L2903-L2954)
+and its digest check at [lines 3092–3154](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/Item.cpp#L3092-L3154).
 
 Inventory infers a team from pinned stored requirements and also compares the
 partition with a currently validated owner whose DR is unchanged. This detects

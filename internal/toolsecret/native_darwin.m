@@ -115,8 +115,30 @@ static NSArray *writerAuthorizations(CFArrayRef a) {
     if(hasAuth(a,kSecACLAuthorizationChangeACL))[result addObject:@"change_acl"];
     if(hasAuth(a,kSecACLAuthorizationChangeOwner))[result addObject:@"change_owner"];
     if(hasAuth(a,kSecACLAuthorizationEncrypt))[result addObject:@"encrypt"];
+    if(hasAuth(a,kSecACLAuthorizationDerive))[result addObject:@"derive"];
+    if(hasAuth(a,kSecACLAuthorizationMAC))[result addObject:@"mac"];
+    if(hasAuth(a,kSecACLAuthorizationSign))[result addObject:@"sign"];
+    if(hasAuth(a,kSecACLAuthorizationIntegrity))[result addObject:@"integrity"];
     if(hasAuth(a,kSecACLAuthorizationAny))[result addObject:@"any"];
     return result;
+}
+static BOOL isSecretUsingAuthorization(id authorization) {
+    return [@[(id)kSecACLAuthorizationDerive,
+              (id)kSecACLAuthorizationMAC,
+              (id)kSecACLAuthorizationSign] containsObject:authorization];
+}
+static BOOL hasSecretUsingAuthorization(CFArrayRef authorizations) {
+    for(id authorization in (NSArray *)authorizations) {
+        if(isSecretUsingAuthorization(authorization))return YES;
+    }
+    return NO;
+}
+static BOOL secretUsingAuthorizationsOnly(CFArrayRef authorizations) {
+    if(!authorizations || CFArrayGetCount(authorizations)==0)return NO;
+    for(id authorization in (NSArray *)authorizations) {
+        if(!isSecretUsingAuthorization(authorization))return NO;
+    }
+    return YES;
 }
 static BOOL isModeledAuthorization(id authorization) {
     return [@[(id)kSecACLAuthorizationAny,
@@ -129,6 +151,10 @@ static BOOL isModeledAuthorization(id authorization) {
               (id)kSecACLAuthorizationKeychainItemDelete,
               (id)kSecACLAuthorizationChangeACL,
               (id)kSecACLAuthorizationChangeOwner,
+              (id)kSecACLAuthorizationDerive,
+              (id)kSecACLAuthorizationMAC,
+              (id)kSecACLAuthorizationSign,
+              (id)kSecACLAuthorizationIntegrity,
               (id)kSecACLAuthorizationPartitionID] containsObject:authorization];
 }
 static NSArray *unmodeledAuthorizations(CFArrayRef authorizations) {
@@ -268,7 +294,7 @@ static NSArray *sortedApplications(NSArray *applications) {
     }];
 }
 
-static NSArray *plannedEncryptApplications(NSDictionary *plan, NSUInteger targets, OSStatus *status) {
+static NSArray *plannedWriterApplications(NSDictionary *plan, NSUInteger targets, OSStatus *status) {
     if (!targets) return @[];
     NSDictionary *owner=plan[@"owner"];
     NSString *ownerPath=owner[@"path"], *ownerRequirement=owner[@"requirement"];
@@ -298,9 +324,12 @@ static NSArray *plannedEncryptApplications(NSDictionary *plan, NSUInteger target
     for (NSDictionary *entry in plan[@"after"][@"writer_acls"]) {
         NSArray *authorizations=entry[@"authorizations"];
         NSArray *applications=entry[@"applications"];
-        if (authorizations.count==1 && [authorizations[0] isEqual:@"encrypt"] &&
-            ![entry[@"any_application"] boolValue] && ![entry[@"contents_unverified"] boolValue] &&
-            [entry[@"unmodeled_authorizations"] count]==0 && [applications isEqual:expected]) planned++;
+        BOOL encrypt=authorizations.count==1 && [authorizations[0] isEqual:@"encrypt"];
+        BOOL secretUsing=authorizations.count>0;
+        for(id authorization in authorizations)if(![@[@"derive",@"mac",@"sign"] containsObject:authorization])secretUsing=NO;
+        if ((encrypt || secretUsing) && ![entry[@"any_application"] boolValue] &&
+            ![entry[@"contents_unverified"] boolValue] && [entry[@"unmodeled_authorizations"] count]==0 &&
+            [applications isEqual:expected]) planned++;
     }
     if (planned<targets) { *status=errSecDecode; return nil; }
     return expected;
@@ -336,16 +365,22 @@ static OSStatus preflightWriterACLs(SecAccessRef access,
         NSArray *writers=writerAuthorizations(authorizations);
         NSArray *unmodeled=unmodeledAuthorizations(authorizations);
         BOOL hasEncrypt=hasAuth(authorizations,kSecACLAuthorizationEncrypt);
-        BOOL mustInspect=releasesPlaintext(authorizations) || hasEncrypt || hasAuth(authorizations,kSecACLAuthorizationPartitionID);
+        BOOL hasSecretUsing=hasSecretUsingAuthorization(authorizations);
+        BOOL hasIntegrity=hasAuth(authorizations,kSecACLAuthorizationIntegrity);
+        BOOL mustInspect=releasesPlaintext(authorizations) || hasEncrypt || hasSecretUsing || hasIntegrity || hasAuth(authorizations,kSecACLAuthorizationPartitionID);
         BOOL relevant=mustInspect || writers.count || unmodeled.count;
         TS_TRACE_AUTHORIZATIONS(authorizations);
         if (relevant && unmodeled.count) status=errSecDecode;
         if (!status && hasEncrypt && CFArrayGetCount(authorizations)!=1) status=errSecDecode;
+        if (!status && hasSecretUsing && !secretUsingAuthorizationsOnly(authorizations)) status=errSecDecode;
+        if (!status && hasIntegrity && CFArrayGetCount(authorizations)!=1) status=errSecDecode;
         if (!status && mustInspect) {
             CFArrayRef applications=NULL; CFStringRef description=NULL; SecKeychainPromptSelector selector=0;
             status=copyContents(acl,&applications,&description,&selector);
             if (!status && hasEncrypt && applications==NULL && !description) status=errSecDecode;
+            if (!status && hasIntegrity && applications!=NULL) status=errSecDecode;
             if (!status && hasEncrypt && applications==NULL) CFSetAddValue(targets,acl);
+            if (!status && hasSecretUsing && (applications==NULL || CFArrayGetCount(applications)>0)) CFSetAddValue(targets,acl);
             if (applications) CFRelease(applications);
             if (description) CFRelease(description);
         }
@@ -385,34 +420,44 @@ OSStatus ts_prepare_access_with_copy_contents(SecAccessRef access,
 
     // Inspect every relevant raw authorization and contents list before the first
     // in-memory ACL edit. Unknown, mixed-encrypt, and opaque entries fail here.
-    CFArrayRef acls=NULL; CFMutableSetRef encryptTargets=NULL;
-    status=preflightWriterACLs(access,copyContents,&acls,&encryptTargets);
+    CFArrayRef acls=NULL; CFMutableSetRef writerTargets=NULL;
+    status=preflightWriterACLs(access,copyContents,&acls,&writerTargets);
     TS_TRACE_STATUS("writer-preflight",status);
     if (status) return status;
-    NSUInteger targetCount=CFSetGetCount(encryptTargets);
-    NSArray *expectedEncryptApps=plannedEncryptApplications(plan,targetCount,&status);
-    TS_TRACE_STATUS("plan-encrypt-applications",status);
-    NSMutableArray *encryptApplications=[NSMutableArray array];
-    if (!status && targetCount) status=trustedApplications(expectedEncryptApps,encryptApplications);
-    TS_TRACE_STATUS("create-encrypt-applications",status);
-    if (status) { CFRelease(encryptTargets); CFRelease(acls); return status; }
+    NSUInteger targetCount=CFSetGetCount(writerTargets);
+    NSArray *expectedWriterApps=plannedWriterApplications(plan,targetCount,&status);
+    TS_TRACE_STATUS("plan-writer-applications",status);
+    NSMutableArray *writerApplications=[NSMutableArray array];
+    if (!status && targetCount) status=trustedApplications(expectedWriterApps,writerApplications);
+    TS_TRACE_STATUS("create-writer-applications",status);
+    if (status) { CFRelease(writerTargets); CFRelease(acls); return status; }
 
-    // The only writer mutation is replacing the NULL application list on the
-    // exact standalone encrypt ACL with the complete planned trusted list.
+    // Narrow app-granted Derive/MAC/Sign ACLs and standalone encrypt:any ACLs
+    // to the complete application list already validated by the Go plan.
     for (id raw in (NSArray *)acls) {
         SecACLRef acl=(SecACLRef)raw;
-        if (!CFSetContainsValue(encryptTargets,acl)) continue;
+        if (!CFSetContainsValue(writerTargets,acl)) continue;
         CFArrayRef originalApplications=NULL; CFStringRef description=NULL; SecKeychainPromptSelector selector=0;
         status=copyContents(acl,&originalApplications,&description,&selector);
-        if (!status && originalApplications!=NULL) status=errSecDecode;
+        CFArrayRef authorizations=NULL;
+        if (!status) {
+            authorizations=SecACLCopyAuthorizations(acl);
+            if (!authorizations) status=errSecDecode;
+        }
+        BOOL hasEncrypt=authorizations && hasAuth(authorizations,kSecACLAuthorizationEncrypt);
+        BOOL hasSecretUsing=authorizations && hasSecretUsingAuthorization(authorizations);
+        if (!status && hasEncrypt && originalApplications!=NULL) status=errSecDecode;
+        if (!status && hasSecretUsing && !secretUsingAuthorizationsOnly(authorizations)) status=errSecDecode;
+        if (!status && hasSecretUsing && originalApplications!=NULL && CFArrayGetCount(originalApplications)==0) status=errSecDecode;
         if (!status && !description) status=errSecDecode;
-        if (!status) status=SecACLSetContents(acl,(CFArrayRef)encryptApplications,description,selector);
-        TS_TRACE_STATUS("set-encrypt-contents",status);
+        if (!status) status=SecACLSetContents(acl,(CFArrayRef)writerApplications,description,selector);
+        TS_TRACE_STATUS("set-writer-contents",status);
+        if (authorizations) CFRelease(authorizations);
         if (originalApplications) CFRelease(originalApplications);
         if (description) CFRelease(description);
         if (status) break;
     }
-    CFRelease(encryptTargets);
+    CFRelease(writerTargets);
     if (status) { CFRelease(acls); return status; }
 
     CFMutableSetRef removed=CFSetCreateMutable(NULL,0,NULL);

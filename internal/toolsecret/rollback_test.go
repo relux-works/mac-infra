@@ -34,6 +34,57 @@ func rollbackItem(writerACLs ...ReleaseACL) Item {
 	return i
 }
 
+func modeledWriterFixture() Item {
+	legacy := TrustedApplication{Path: "/test/previous-owner", Requirement: `identifier "works.relux.previous" and anchor apple generic`}
+	return rollbackItem(
+		ReleaseACL{Authorizations: []string{"derive", "mac", "sign"}, Applications: []TrustedApplication{legacy}},
+		ReleaseACL{Authorizations: []string{integrityAuthorization}, AnyApplication: true, Applications: []TrustedApplication{}},
+		ReleaseACL{Authorizations: []string{"change_acl"}, Applications: []TrustedApplication{}},
+		ReleaseACL{Authorizations: []string{"encrypt"}, AnyApplication: true},
+	)
+}
+
+func planModeledWriterFixture(t *testing.T) (Item, Plan) {
+	t.Helper()
+	before := modeledWriterFixture()
+	keptOwners := map[string]Owner{
+		rollbackSubject: {Path: rollbackSubject, Requirement: securityDR, Partition: validOwner().Partition},
+	}
+	plan, err := PlanBind(before, validOwner(), BindOptions{
+		Keep:          []string{rollbackSubject},
+		KeepOwners:    keptOwners,
+		OwnerDecision: rollbackDecision,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Keychain = "/test/keychain-a"
+	return before, plan
+}
+
+func writerACLFor(t *testing.T, acls []ReleaseACL, authorization string) ReleaseACL {
+	t.Helper()
+	for _, acl := range acls {
+		if slices.Contains(acl.Authorizations, authorization) {
+			return acl
+		}
+	}
+	t.Fatalf("missing writer authorization %q in %+v", authorization, acls)
+	return ReleaseACL{}
+}
+
+func removeApplication(acls []ReleaseACL, path string) {
+	for i := range acls {
+		kept := make([]TrustedApplication, 0, len(acls[i].Applications))
+		for _, app := range acls[i].Applications {
+			if app.Path != path {
+				kept = append(kept, app)
+			}
+		}
+		acls[i].Applications = kept
+	}
+}
+
 func rollbackPlan(t *testing.T, writerACLs ...ReleaseACL) (Item, Plan) {
 	t.Helper()
 	before := rollbackItem(writerACLs...)
@@ -112,6 +163,162 @@ func TestPlanBindNarrowsAnyApplicationEncrypt(t *testing.T) {
 	}
 	if rollback.OwnerDecision != rollbackDecision || !slices.Contains(rollback.Keep, rollbackSubject) {
 		t.Fatalf("rollback authority missing from plan: %+v", rollback)
+	}
+}
+
+// Claim: the exact four-entry fixture narrows Derive/MAC/Sign and encrypt:any to owner plus the approved rollback app, while preserving the special Integrity ACL and the prompt-only ChangeACL ACL.
+func TestPlanBindModelsObservedWriterForms(t *testing.T) {
+	for _, fixture := range []string{"synthetic-a", "synthetic-b"} {
+		t.Run(fixture, func(t *testing.T) {
+			before := modeledWriterFixture()
+			before.Service = fixture
+			snapshot, err := json.Marshal(before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keptOwners := map[string]Owner{
+				rollbackSubject: {Path: rollbackSubject, Requirement: securityDR, Partition: validOwner().Partition},
+			}
+			plan, err := PlanBind(before, validOwner(), BindOptions{
+				Keep:          []string{rollbackSubject},
+				KeepOwners:    keptOwners,
+				OwnerDecision: rollbackDecision,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			unchanged, err := json.Marshal(before)
+			if err != nil || !bytes.Equal(snapshot, unchanged) {
+				t.Fatalf("planning changed the source ACLs: err=%v", err)
+			}
+			if len(before.WriterACLs) != 4 || len(plan.After.WriterACLs) != 4 {
+				t.Fatalf("writer entry count changed: before=%d after=%d", len(before.WriterACLs), len(plan.After.WriterACLs))
+			}
+			wantApps := []TrustedApplication{OwnerApplication(validOwner()), rollbackApplication(rollbackSubject)}
+			secret := writerACLFor(t, plan.After.WriterACLs, "derive")
+			if !slices.Equal(secret.Authorizations, []string{"derive", "mac", "sign"}) || secret.AnyApplication || !slices.Equal(secret.Applications, wantApps) {
+				t.Fatalf("key-use ACL was not narrowed exactly: %+v", secret)
+			}
+			encrypt := writerACLFor(t, plan.After.WriterACLs, "encrypt")
+			if encrypt.AnyApplication || !slices.Equal(encrypt.Applications, wantApps) {
+				t.Fatalf("encrypt:any ACL was not narrowed exactly: %+v", encrypt)
+			}
+			integrity := writerACLFor(t, plan.After.WriterACLs, integrityAuthorization)
+			if !integrityACL(integrity) {
+				t.Fatalf("special Integrity ACL changed: %+v", integrity)
+			}
+			changeACL := writerACLFor(t, plan.After.WriterACLs, "change_acl")
+			if changeACL.AnyApplication || len(changeACL.Applications) != 0 {
+				t.Fatalf("prompt-only ChangeACL entry changed: %+v", changeACL)
+			}
+		})
+	}
+}
+
+// Claim: an audited fake-backend plan passes rollback-aware verification with all modeled writer forms, and an unexpected key-use writer remains foreign.
+func TestRollbackVerifyModelsSecretUsingWriters(t *testing.T) {
+	_, plan := planModeledWriterFixture(t)
+	f := newFake()
+	f.items = []Item{plan.After}
+	c, out, _ := testCLI(t, f)
+	appendPlanAudit(t, c.AuditPath, plan, "applied")
+	if code := c.Run(context.Background(), rollbackVerifyArgs()); code != 0 || !strings.Contains(out.String(), "rollback_retained") {
+		t.Fatalf("planned ACLs did not pass rollback-aware verification: %d %s", code, out.String())
+	}
+	if strings.Count(out.String(), "rollback_retained") != 1 || strings.Contains(out.String(), "foreign_writer") || strings.Contains(out.String(), "integrity_acl_unsupported") {
+		t.Fatalf("verification result contains an unexpected finding: %s", out.String())
+	}
+
+	foreign := plan.After
+	foreign.WriterACLs = slices.Clone(foreign.WriterACLs)
+	foreign.ReleaseACLs = slices.Clone(foreign.ReleaseACLs)
+	for i := range foreign.WriterACLs {
+		foreign.WriterACLs[i].Applications = slices.Clone(foreign.WriterACLs[i].Applications)
+	}
+	for i := range foreign.ReleaseACLs {
+		foreign.ReleaseACLs[i].Applications = slices.Clone(foreign.ReleaseACLs[i].Applications)
+	}
+	removeApplication(foreign.ReleaseACLs, rollbackSubject)
+	removeApplication(foreign.WriterACLs, rollbackSubject)
+	if reasons := Verify(foreign, validOwner()); len(reasons) != 0 {
+		t.Fatalf("strict control without rollback applications should pass before adding a foreign writer: %v", reasons)
+	}
+	secret := writerACLFor(t, foreign.WriterACLs, "derive")
+	for i := range foreign.WriterACLs {
+		if slices.Equal(foreign.WriterACLs[i].Authorizations, secret.Authorizations) {
+			foreign.WriterACLs[i].Applications = append(foreign.WriterACLs[i].Applications, TrustedApplication{
+				Path:        "/test/unapproved-writer",
+				Requirement: `identifier "works.relux.unapproved" and anchor apple generic`,
+			})
+		}
+	}
+	if !slices.Contains(Verify(foreign, validOwner()), "foreign_writer") {
+		t.Fatal("a foreign Derive/MAC/Sign application was not reported as foreign_writer")
+	}
+}
+
+// Claim: rollback-aware verification fails if the audited rollback reader is dropped, even when the remaining ACLs would pass ordinary strict verification.
+func TestRollbackVerifyRejectsDroppedRollbackReader(t *testing.T) {
+	_, plan := planModeledWriterFixture(t)
+	withoutRollback := plan.After
+	withoutRollback.ReleaseACLs = slices.Clone(withoutRollback.ReleaseACLs)
+	withoutRollback.WriterACLs = slices.Clone(withoutRollback.WriterACLs)
+	removeApplication(withoutRollback.ReleaseACLs, rollbackSubject)
+	removeApplication(withoutRollback.WriterACLs, rollbackSubject)
+	if reasons := Verify(withoutRollback, validOwner()); len(reasons) != 0 {
+		t.Fatalf("ordinary strict control should pass after all rollback grants are removed: %v", reasons)
+	}
+	f := newFake()
+	f.items = []Item{withoutRollback}
+	c, out, _ := testCLI(t, f)
+	appendPlanAudit(t, c.AuditPath, plan, "applied")
+	if code := c.Run(context.Background(), rollbackVerifyArgs()); code != 3 || !strings.Contains(out.String(), "rollback_plan_mismatch") || strings.Contains(out.String(), "rollback_retained") {
+		t.Fatalf("dropping the rollback reader did not fail the audited rollback check: %d %s", code, out.String())
+	}
+}
+
+// Claim: unknown writer authorizations and malformed Integrity forms remain refused, paired with the exact supported Integrity control.
+func TestPlanBindRefusesUnknownAndMalformedIntegrityWriters(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*Item)
+		code string
+	}{
+		{
+			name: "unknown authorization",
+			edit: func(item *Item) { item.WriterACLs[0].UnmodeledAuthorizations = []string{"ACLAuthorizationUnknown"} },
+			code: "writer_acl_unsupported",
+		},
+		{
+			name: "integrity trusted application",
+			edit: func(item *Item) { item.WriterACLs[1].AnyApplication = false },
+			code: "integrity_acl_unsupported",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := modeledWriterFixture()
+			tc.edit(&item)
+			_, err := PlanBind(item, validOwner(), BindOptions{})
+			refusal, ok := err.(*Refusal)
+			if !ok || refusal.Code != tc.code {
+				t.Fatalf("got refusal %v, want %s", err, tc.code)
+			}
+		})
+	}
+}
+
+// Claim: team-OU-only owner requirements remain refused with the valid certificate-pinned fixture as the positive control.
+func TestPlanBindStillRefusesTeamOUForgeableOwner(t *testing.T) {
+	owner := validOwner()
+	owner.Requirement = `identifier "works.relux.test" and certificate leaf[subject.OU] = "TESTTEAM"`
+	if ClassifyRequirement(owner.Requirement) != TeamOUForgeable {
+		t.Fatalf("fixture classification = %s, want %s", ClassifyRequirement(owner.Requirement), TeamOUForgeable)
+	}
+	if _, err := PlanBind(modeledWriterFixture(), validOwner(), BindOptions{}); err != nil {
+		t.Fatalf("certificate-pinned owner control refused: %v", err)
+	}
+	if _, err := PlanBind(modeledWriterFixture(), owner, BindOptions{}); err == nil {
+		t.Fatal("team-OU-only owner was accepted")
 	}
 }
 
