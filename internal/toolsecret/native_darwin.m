@@ -348,9 +348,13 @@ static OSStatus trustedApplications(NSArray *descriptions, NSMutableArray *appli
     for (NSDictionary *description in descriptions) {
         NSString *path=description[@"path"], *text=description[@"requirement"];
         if (![path isKindOfClass:[NSString class]] || ![text isKindOfClass:[NSString class]] || path.length==0 || text.length==0) return errSecDecode;
+        TS_TRACE("trusted-applications-parse-requirement");
         SecRequirementRef requirement=NULL; SecTrustedApplicationRef application=NULL;
         OSStatus status=SecRequirementCreateWithString((CFStringRef)text,0,&requirement);
+        TS_TRACE_STATUS("trusted-applications-parse-requirement",status);
+        TS_TRACE("trusted-applications-create-application");
         if (!status) status=createRequirement([path UTF8String],requirement,&application);
+        TS_TRACE_STATUS("trusted-applications-create-application",status);
         if (requirement) CFRelease(requirement);
         if (status) { if(application)CFRelease(application); return status; }
         [applications addObject:(id)application];

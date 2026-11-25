@@ -219,9 +219,11 @@ static OSStatus addReviewACL(SecAccessRef access,
                              NSString *descriptionText) {
     NSMutableArray *applications=[NSMutableArray array];
     OSStatus status=0;
+    TS_TRACE("fixture-review-build-trusted-applications");
     if(!anyApplication)status=trustedApplications(applicationDescriptions,applications);
     TS_TRACE_STATUS("fixture-review-trusted-applications",status);
     SecACLRef acl=NULL;
+    TS_TRACE("fixture-review-create-acl");
     if(!status)status=SecACLCreateWithSimpleContents(access,
         anyApplication ? NULL : (CFArrayRef)applications,
         (CFStringRef)descriptionText,0,&acl);
@@ -233,6 +235,7 @@ static OSStatus addReviewACL(SecAccessRef access,
         [authorizations addObject:authorization];
     }
     TS_TRACE_STATUS("fixture-review-map-authorizations",status);
+    TS_TRACE("fixture-review-update-authorizations");
     if(!status)status=SecACLUpdateAuthorizations(acl,(CFArrayRef)authorizations);
     TS_TRACE_STATUS("fixture-review-update-authorizations",status);
     if(acl)CFRelease(acl);
