@@ -13,9 +13,10 @@ import (
 	"time"
 )
 
-// Claim keeper delta 2: every writer tag is reported and foreign writers fail verify, paired with owner-only and prompt-only controls.
+// Claim keeper delta 2: every metadata-modifying and secret-using writer authorization is reported and foreign writers fail verify, paired with owner-only, prompt-only and Integrity controls.
 func TestForeignWriters(t *testing.T) {
-	for _, auth := range append(append([]string{}, WriterAuthorizations[:]...), "any") {
+	authorizations := append(append(append([]string{}, WriterAuthorizations[:]...), secretUsingAuthorizations[:]...), "any")
+	for _, auth := range authorizations {
 		t.Run(auth, func(t *testing.T) {
 			i := boundItem()
 			i.Service = "works.relux.writer-test"
@@ -80,9 +81,9 @@ func TestForeignWriters(t *testing.T) {
 	if len(Inspect(i).Flags) != 0 || len(Verify(i, validOwner())) != 0 {
 		t.Fatal("prompt-only control treated as automatic foreign writer")
 	}
-	i.WriterACLs[0] = ReleaseACL{Authorizations: []string{"sign"}, AnyApplication: true}
-	if len(Inspect(i).Writers) != 0 || len(Verify(i, validOwner())) != 0 {
-		t.Fatal("non-writer control flagged")
+	i.WriterACLs[0] = ReleaseACL{Authorizations: []string{integrityAuthorization}, AnyApplication: true, Applications: []TrustedApplication{}}
+	if len(Inspect(i).Writers) != 0 || len(Inspect(i).Flags) != 0 || len(Verify(i, validOwner())) != 0 {
+		t.Fatal("exact Integrity metadata control was treated as a writer")
 	}
 }
 
