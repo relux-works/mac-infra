@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Claim keeper delta 2: every metadata-modifying and secret-using writer authorization is reported and foreign writers fail verify, paired with owner-only, prompt-only and Integrity controls.
+// Claim: every metadata-modifying and secret-using writer authorization is reported and foreign writers fail verify, paired with owner-only, prompt-only and Integrity controls.
 func TestForeignWriters(t *testing.T) {
 	authorizations := append(append(append([]string{}, WriterAuthorizations[:]...), secretUsingAuthorizations[:]...), "any")
 	for _, auth := range authorizations {
