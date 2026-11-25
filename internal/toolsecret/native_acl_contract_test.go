@@ -249,7 +249,7 @@ func TestNativeInventoryOverlapPreparationMatchesRollbackPlan(t *testing.T) {
 			Applications:   append([]TrustedApplication(nil), beforeApplications...),
 		}},
 		WriterACLs: []ReleaseACL{
-			{Authorizations: []string{"change_acl"}, Applications: []TrustedApplication{}},
+			{Authorizations: []string{"change_acl"}, Applications: []TrustedApplication{}, ContentsUnverified: true},
 			{Authorizations: []string{"derive", "mac", "sign"}, Applications: append([]TrustedApplication(nil), beforeApplications...)},
 			{Authorizations: []string{"encrypt"}, AnyApplication: true, Applications: []TrustedApplication{}},
 			{Authorizations: []string{"integrity"}, AnyApplication: true, Applications: []TrustedApplication{}},
