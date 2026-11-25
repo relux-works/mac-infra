@@ -133,12 +133,21 @@ static BOOL hasSecretUsingAuthorization(CFArrayRef authorizations) {
     }
     return NO;
 }
-static BOOL secretUsingAuthorizationsOnly(CFArrayRef authorizations) {
+static BOOL secretUsingAuthorizationsWithReleaseOnly(CFArrayRef authorizations) {
     if(!authorizations || CFArrayGetCount(authorizations)==0)return NO;
+    BOOL hasSecretUsing=NO;
+    NSArray *releaseOnly=@[(id)kSecACLAuthorizationDecrypt,
+                           (id)kSecACLAuthorizationExportClear,
+                           (id)kSecACLAuthorizationExportWrapped];
     for(id authorization in (NSArray *)authorizations) {
-        if(!isSecretUsingAuthorization(authorization))return NO;
+        if(isSecretUsingAuthorization(authorization)) {
+            hasSecretUsing=YES;
+            continue;
+        }
+        if([releaseOnly containsObject:authorization])continue;
+        return NO;
     }
-    return YES;
+    return hasSecretUsing;
 }
 static BOOL isModeledAuthorization(id authorization) {
     return [@[(id)kSecACLAuthorizationAny,
@@ -358,6 +367,7 @@ static OSStatus preflightWriterACLs(SecAccessRef access,
     OSStatus status=SecAccessCopyACLList(access,&acls);
     if (status) return status;
     CFMutableSetRef targets=CFSetCreateMutable(NULL,0,NULL);
+    NSUInteger integrityACLCount=0;
     for (id raw in (NSArray *)acls) {
         SecACLRef acl=(SecACLRef)raw;
         CFArrayRef authorizations=SecACLCopyAuthorizations(acl);
@@ -370,9 +380,10 @@ static OSStatus preflightWriterACLs(SecAccessRef access,
         BOOL mustInspect=releasesPlaintext(authorizations) || hasEncrypt || hasSecretUsing || hasIntegrity || hasAuth(authorizations,kSecACLAuthorizationPartitionID);
         BOOL relevant=mustInspect || writers.count || unmodeled.count;
         TS_TRACE_AUTHORIZATIONS(authorizations);
+        if (hasIntegrity && ++integrityACLCount>1) status=errSecDecode;
         if (relevant && unmodeled.count) status=errSecDecode;
         if (!status && hasEncrypt && CFArrayGetCount(authorizations)!=1) status=errSecDecode;
-        if (!status && hasSecretUsing && !secretUsingAuthorizationsOnly(authorizations)) status=errSecDecode;
+        if (!status && hasSecretUsing && !secretUsingAuthorizationsWithReleaseOnly(authorizations)) status=errSecDecode;
         if (!status && hasIntegrity && CFArrayGetCount(authorizations)!=1) status=errSecDecode;
         if (!status && mustInspect) {
             CFArrayRef applications=NULL; CFStringRef description=NULL; SecKeychainPromptSelector selector=0;
@@ -419,7 +430,8 @@ OSStatus ts_prepare_access_with_copy_contents(SecAccessRef access,
     if (![actualBefore isEqual:before]) return errSecDecode;
 
     // Inspect every relevant raw authorization and contents list before the first
-    // in-memory ACL edit. Unknown, mixed-encrypt, and opaque entries fail here.
+    // in-memory ACL edit. Unknown, unrelated mixed, duplicate Integrity, and
+    // opaque entries fail here.
     CFArrayRef acls=NULL; CFMutableSetRef writerTargets=NULL;
     status=preflightWriterACLs(access,copyContents,&acls,&writerTargets);
     TS_TRACE_STATUS("writer-preflight",status);
@@ -447,7 +459,7 @@ OSStatus ts_prepare_access_with_copy_contents(SecAccessRef access,
         BOOL hasEncrypt=authorizations && hasAuth(authorizations,kSecACLAuthorizationEncrypt);
         BOOL hasSecretUsing=authorizations && hasSecretUsingAuthorization(authorizations);
         if (!status && hasEncrypt && originalApplications!=NULL) status=errSecDecode;
-        if (!status && hasSecretUsing && !secretUsingAuthorizationsOnly(authorizations)) status=errSecDecode;
+        if (!status && hasSecretUsing && !secretUsingAuthorizationsWithReleaseOnly(authorizations)) status=errSecDecode;
         if (!status && hasSecretUsing && originalApplications!=NULL && CFArrayGetCount(originalApplications)==0) status=errSecDecode;
         if (!status && !description) status=errSecDecode;
         if (!status) status=SecACLSetContents(acl,(CFArrayRef)writerApplications,description,selector);

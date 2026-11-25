@@ -1,4 +1,6 @@
 #import "../native_darwin.m"
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 static SecACLRef opaqueACL;
@@ -142,8 +144,164 @@ static int runFixture(NSString *mode) {
     return 0;
 }
 
+static id reviewAuthorization(NSString *name) {
+    NSDictionary *values=@{
+        @"decrypt":(id)kSecACLAuthorizationDecrypt,
+        @"export_clear":(id)kSecACLAuthorizationExportClear,
+        @"export_wrapped":(id)kSecACLAuthorizationExportWrapped,
+        @"derive":(id)kSecACLAuthorizationDerive,
+        @"mac":(id)kSecACLAuthorizationMAC,
+        @"sign":(id)kSecACLAuthorizationSign,
+        @"item_modify":(id)kSecACLAuthorizationKeychainItemModify,
+        @"encrypt":(id)kSecACLAuthorizationEncrypt,
+        @"change_acl":(id)kSecACLAuthorizationChangeACL,
+        @"integrity":(id)kSecACLAuthorizationIntegrity,
+        @"gen_key":(id)kSecACLAuthorizationGenKey
+    };
+    return values[name];
+}
+
+// Review probes create only in-memory ACL objects. They never call item APIs.
+static int runPreflightContractProbe(NSString *authNames,
+                                     NSString *applicationMode,
+                                     NSUInteger aclCopies) {
+    SecAccessRef access=newAccess();
+    if(!access)return 50;
+    NSMutableArray *authorizations=[NSMutableArray array];
+    for(NSString *name in [authNames componentsSeparatedByString:@","]) {
+        id authorization=reviewAuthorization(name);
+        if(!authorization){CFRelease(access);return 51;}
+        [authorizations addObject:authorization];
+    }
+    if(!authorizations.count || aclCopies==0 || aclCopies>2){CFRelease(access);return 52;}
+
+    CFArrayRef applications=[applicationMode isEqual:@"empty"] ? (CFArrayRef)@[] : NULL;
+    SecACLRef first=NULL, second=NULL;
+    OSStatus status=0;
+    for(NSUInteger i=0;i<aclCopies && !status;i++) {
+        SecACLRef acl=NULL;
+        status=SecACLCreateWithSimpleContents(access,applications,CFSTR("review in-memory ACL"),0,&acl);
+        if(!status)status=SecACLUpdateAuthorizations(acl,(CFArrayRef)authorizations);
+        if(status){if(acl)CFRelease(acl);break;}
+        if(i==0)first=acl;else second=acl;
+    }
+    if(status){if(first)CFRelease(first);if(second)CFRelease(second);CFRelease(access);return 53;}
+    BOOL opaque=[applicationMode isEqual:@"opaque"];
+    if(opaque)opaqueACL=first;
+
+    OSStatus metadataStatus=0;
+    NSDictionary *before=accessMetadata(access,fixtureAttributes(),NULL,&metadataStatus);
+    if(metadataStatus){opaqueACL=NULL;if(first)CFRelease(first);if(second)CFRelease(second);CFRelease(access);return 54;}
+
+    CFArrayRef acls=NULL;
+    CFMutableSetRef targets=NULL;
+    status=preflightWriterACLs(access,opaque ? copyContentsWithOpaqueACL : SecACLCopyContents,&acls,&targets);
+    long targetCount=targets ? (long)CFSetGetCount(targets) : -1L;
+    if(targets)CFRelease(targets);
+    if(acls)CFRelease(acls);
+
+    NSDictionary *after=accessMetadata(access,fixtureAttributes(),NULL,&metadataStatus);
+    BOOL unchanged=!metadataStatus && [before isEqual:after];
+    printf("{\"status\":%d,\"targets\":%ld,\"unchanged\":%s}\n",
+           (int)status,targetCount,unchanged ? "true" : "false");
+    opaqueACL=NULL;
+    if(first)CFRelease(first);
+    if(second)CFRelease(second);
+    CFRelease(access);
+    return 0;
+}
+
+static OSStatus addReviewACL(SecAccessRef access,
+                             NSArray *authorizationNames,
+                             NSArray *applicationDescriptions,
+                             BOOL anyApplication,
+                             NSString *descriptionText) {
+    NSMutableArray *applications=[NSMutableArray array];
+    OSStatus status=0;
+    if(!anyApplication)status=trustedApplications(applicationDescriptions,applications);
+    SecACLRef acl=NULL;
+    if(!status)status=SecACLCreateWithSimpleContents(access,
+        anyApplication ? NULL : (CFArrayRef)applications,
+        (CFStringRef)descriptionText,0,&acl);
+    NSMutableArray *authorizations=[NSMutableArray array];
+    for(NSString *name in authorizationNames) {
+        id authorization=reviewAuthorization(name);
+        if(!authorization){status=errSecDecode;break;}
+        [authorizations addObject:authorization];
+    }
+    if(!status)status=SecACLUpdateAuthorizations(acl,(CFArrayRef)authorizations);
+    if(acl)CFRelease(acl);
+    return status;
+}
+
+static OSStatus addInventoryOverlapAccess(SecAccessRef access, NSDictionary *plan) {
+    NSDictionary *before=plan[@"before"];
+    NSArray *releaseACLs=before[@"release_acls"];
+    NSArray *writerACLs=before[@"writer_acls"];
+    if(![releaseACLs isKindOfClass:[NSArray class]] || releaseACLs.count!=1 ||
+       ![writerACLs isKindOfClass:[NSArray class]])return errSecDecode;
+    NSDictionary *release=releaseACLs[0];
+    NSDictionary *keyUse=nil;
+    for(NSDictionary *writer in writerACLs) {
+        NSArray *names=writer[@"authorizations"];
+        BOOL secretUsing=names.count>0;
+        for(NSString *name in names)if(![@[@"derive",@"mac",@"sign"] containsObject:name])secretUsing=NO;
+        if(secretUsing) {
+            if(keyUse)return errSecDecode;
+            keyUse=writer;
+        }
+    }
+    if(!keyUse || ![release[@"authorizations"] isKindOfClass:[NSArray class]] ||
+       ![release[@"applications"] isEqual:keyUse[@"applications"]] ||
+       ![release[@"any_application"] isEqual:keyUse[@"any_application"]])return errSecDecode;
+
+    NSMutableArray *combined=[NSMutableArray arrayWithArray:release[@"authorizations"]];
+    [combined addObjectsFromArray:keyUse[@"authorizations"]];
+    OSStatus status=addReviewACL(access,combined,release[@"applications"],
+                                 [release[@"any_application"] boolValue],
+                                 @"review combined release and key-use ACL");
+    if(status)return status;
+    for(NSDictionary *writer in writerACLs) {
+        if(writer==keyUse)continue;
+        status=addReviewACL(access,writer[@"authorizations"],writer[@"applications"],
+                            [writer[@"any_application"] boolValue],
+                            @"review writer ACL");
+        if(status)return status;
+    }
+    return 0;
+}
+
+static int runInventoryOverlapRoundTrip(void) {
+    NSData *input=[[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
+    NSDictionary *plan=[NSJSONSerialization JSONObjectWithData:input options:0 error:NULL];
+    if(![plan isKindOfClass:[NSDictionary class]])return 60;
+    SecAccessRef access=newAccess();
+    if(!access)return 61;
+    OSStatus status=addInventoryOverlapAccess(access,plan);
+    if(status){CFRelease(access);return 62;}
+    NSDictionary *prepared=nil;
+    status=ts_prepare_access(access,plan,&prepared);
+    NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"status":@(status),@"prepared":prepared ?: [NSNull null]}
+                                                options:NSJSONWritingSortedKeys error:NULL];
+    if(!json){CFRelease(access);return 63;}
+    fwrite(json.bytes,1,json.length,stdout);
+    fputc('\n',stdout);
+    CFRelease(access);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
+        if(argc==5 && strcmp(argv[1],"contract")==0) {
+            char *end=NULL;
+            unsigned long copies=strtoul(argv[4],&end,10);
+            if(!end || *end || copies==0 || copies>2)return 2;
+            return runPreflightContractProbe([NSString stringWithUTF8String:argv[2]],
+                                             [NSString stringWithUTF8String:argv[3]],
+                                             (NSUInteger)copies);
+        }
+        if(argc==2 && strcmp(argv[1],"inventory-overlap-roundtrip")==0)
+            return runInventoryOverlapRoundTrip();
         if(argc!=2)return 2;
         return runFixture([NSString stringWithUTF8String:argv[1]]);
     }

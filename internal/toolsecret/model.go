@@ -637,8 +637,8 @@ func PlanBind(item Item, owner Owner, opts BindOptions) (Plan, error) {
 	if keepRollback && !haveRollbackApp {
 		return p, refuse("unsafe_keep", "rollback subject has ambiguous or unavailable stored requirements")
 	}
-	// Normalize only the standalone encrypt:any grant. Mixed or unreadable writer
-	// ACLs were refused above before a plan could be prepared.
+	// Normalize eligible secret-use grants and the standalone encrypt:any grant.
+	// Mixed or unreadable writer ACLs were refused above before planning.
 	if item.WriterACLs != nil {
 		p.After.WriterACLs = []ReleaseACL{}
 		for _, acl := range item.WriterACLs {

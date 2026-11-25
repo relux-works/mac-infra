@@ -82,8 +82,12 @@ protects metadata integrity rather than granting key use, secret release, item
 modification or ACL changes. The model accepts only one standalone `integrity`
 ACL with a null trusted-application list and preserves it unchanged; mixed,
 duplicate, explicit-application or unreadable forms are refused. The
-implementation path is visible in [`Item.cpp`](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/Item.cpp#L2903-L2954)
-and its digest check at [lines 3092–3154](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/Item.cpp#L3092-L3154).
+implementation encodes attributes before hashing in
+[`ItemImpl::computeDigestFromDictionary`](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_keychain/lib/Item.cpp#L463),
+adds the integrity ACL in
+[`ItemImpl::addIntegrity`](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_keychain/lib/Item.cpp#L478),
+and retrieves and checks it in
+[`ItemImpl::checkIntegrityFromDictionary`](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_keychain/lib/Item.cpp#L600).
 
 Inventory infers a team from pinned stored requirements and also compares the
 partition with a currently validated owner whose DR is unchanged. This detects
