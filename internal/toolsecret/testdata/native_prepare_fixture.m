@@ -298,6 +298,22 @@ static int runInventoryOverlapRoundTrip(void) {
     status=addInventoryOverlapAccess(access,plan);
     TS_TRACE_STATUS("fixture-build-inventory-overlap-access",status);
     if(status){CFRelease(access);return 62;}
+    NSDictionary *before=plan[@"before"];
+    NSDictionary *attrs=@{
+        (id)kSecAttrService:before[@"service"] ?: @"",
+        (id)kSecAttrAccount:before[@"account"] ?: @"",
+        (id)kSecAttrLabel:before[@"label"] ?: @"",
+        (id)kSecAttrCreator:before[@"creator"] ?: @0
+    };
+    OSStatus metadataStatus=0;
+    NSDictionary *actualBefore=accessMetadata(access,attrs,NULL,&metadataStatus);
+    if(metadataStatus || ![actualBefore isEqual:before]) {
+        NSData *actualJSON=[NSJSONSerialization dataWithJSONObject:actualBefore ?: @{} options:NSJSONWritingSortedKeys error:NULL];
+        NSData *planJSON=[NSJSONSerialization dataWithJSONObject:before options:NSJSONWritingSortedKeys error:NULL];
+        fprintf(stderr,"fixture-before-mismatch status=%d actual=%s expected=%s\n",(int)metadataStatus,
+                actualJSON ? [[[NSString alloc] initWithData:actualJSON encoding:NSUTF8StringEncoding] autorelease].UTF8String : "<unavailable>",
+                planJSON ? [[[NSString alloc] initWithData:planJSON encoding:NSUTF8StringEncoding] autorelease].UTF8String : "<unavailable>");
+    }
     NSDictionary *prepared=nil;
     TS_TRACE("fixture-prepare-inventory-overlap-access");
     status=ts_prepare_access(access,plan,&prepared);
