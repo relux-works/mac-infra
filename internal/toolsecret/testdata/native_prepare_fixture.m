@@ -220,27 +220,33 @@ static OSStatus addReviewACL(SecAccessRef access,
     NSMutableArray *applications=[NSMutableArray array];
     OSStatus status=0;
     if(!anyApplication)status=trustedApplications(applicationDescriptions,applications);
+    TS_TRACE_STATUS("fixture-review-trusted-applications",status);
     SecACLRef acl=NULL;
     if(!status)status=SecACLCreateWithSimpleContents(access,
         anyApplication ? NULL : (CFArrayRef)applications,
         (CFStringRef)descriptionText,0,&acl);
+    TS_TRACE_STATUS("fixture-review-create-acl",status);
     NSMutableArray *authorizations=[NSMutableArray array];
     for(NSString *name in authorizationNames) {
         id authorization=reviewAuthorization(name);
         if(!authorization){status=errSecDecode;break;}
         [authorizations addObject:authorization];
     }
+    TS_TRACE_STATUS("fixture-review-map-authorizations",status);
     if(!status)status=SecACLUpdateAuthorizations(acl,(CFArrayRef)authorizations);
+    TS_TRACE_STATUS("fixture-review-update-authorizations",status);
     if(acl)CFRelease(acl);
     return status;
 }
 
 static OSStatus addInventoryOverlapAccess(SecAccessRef access, NSDictionary *plan) {
+    TS_TRACE("fixture-overlap-plan-read");
     NSDictionary *before=plan[@"before"];
     NSArray *releaseACLs=before[@"release_acls"];
     NSArray *writerACLs=before[@"writer_acls"];
     if(![releaseACLs isKindOfClass:[NSArray class]] || releaseACLs.count!=1 ||
        ![writerACLs isKindOfClass:[NSArray class]])return errSecDecode;
+    TS_TRACE("fixture-overlap-scan-writers");
     NSDictionary *release=releaseACLs[0];
     NSDictionary *keyUse=nil;
     for(NSDictionary *writer in writerACLs) {
@@ -255,9 +261,11 @@ static OSStatus addInventoryOverlapAccess(SecAccessRef access, NSDictionary *pla
     if(!keyUse || ![release[@"authorizations"] isKindOfClass:[NSArray class]] ||
        ![release[@"applications"] isEqual:keyUse[@"applications"]] ||
        ![release[@"any_application"] isEqual:keyUse[@"any_application"]])return errSecDecode;
+    TS_TRACE("fixture-overlap-merge-authorizations");
 
     NSMutableArray *combined=[NSMutableArray arrayWithArray:release[@"authorizations"]];
     [combined addObjectsFromArray:keyUse[@"authorizations"]];
+    TS_TRACE("fixture-overlap-create-raw-acl");
     OSStatus status=addReviewACL(access,combined,release[@"applications"],
                                  [release[@"any_application"] boolValue],
                                  @"review combined release and key-use ACL");
