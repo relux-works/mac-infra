@@ -233,9 +233,9 @@ func TestNativeInventoryOverlapPreparationMatchesRollbackPlan(t *testing.T) {
 	}
 
 	owner := validOwner()
+	owner.Requirement = `identifier "works.relux.test" and anchor apple generic and certificate leaf[subject.OU] = TESTTEAM and certificate leaf = H"0123456789012345678901234567890123456789"`
 	rollback := TrustedApplication{Path: rollbackSubject, Requirement: rollbackSecurityRequirement}
-	legacy := TrustedApplication{Path: "/test/previous-owner", Requirement: `identifier "works.relux.previous" and anchor apple generic`}
-	beforeApplications := []TrustedApplication{legacy, rollback}
+	beforeApplications := []TrustedApplication{{Path: owner.Path, Requirement: owner.Requirement}, rollback}
 	sort.Slice(beforeApplications, func(i, j int) bool {
 		if beforeApplications[i].Path != beforeApplications[j].Path {
 			return beforeApplications[i].Path < beforeApplications[j].Path
