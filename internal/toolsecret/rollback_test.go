@@ -211,6 +211,33 @@ func TestPlanBindModelsObservedWriterForms(t *testing.T) {
 			if changeACL.AnyApplication || len(changeACL.Applications) != 0 {
 				t.Fatalf("prompt-only ChangeACL entry changed: %+v", changeACL)
 			}
+
+			f := newFake()
+			f.items = []Item{before}
+			c, out, _ := testCLI(t, f)
+			args := []string{
+				"bind", "--service", before.Service, "--account", before.Account,
+				"--owner", validOwner().Path, "--keep", rollbackSubject,
+				"--owner-decision", rollbackDecision, "--keychain", "/test/keychain-a",
+				"--dry-run", "--json",
+			}
+			if code := c.Run(context.Background(), args); code != 0 {
+				t.Fatalf("fake dry-run failed: %d %s", code, out.String())
+			}
+			var preview struct {
+				Result Plan `json:"result"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &preview); err != nil {
+				t.Fatalf("decode dry-run plan: %v", err)
+			}
+			if len(preview.Result.After.WriterACLs) != len(plan.After.WriterACLs) {
+				t.Fatalf("dry-run omitted writer entries: got=%d want=%d", len(preview.Result.After.WriterACLs), len(plan.After.WriterACLs))
+			}
+			for i, expected := range plan.After.WriterACLs {
+				if aclSignature(preview.Result.After.WriterACLs[i]) != aclSignature(expected) {
+					t.Fatalf("dry-run writer entry %d differs: got=%+v want=%+v", i, preview.Result.After.WriterACLs[i], expected)
+				}
+			}
 		})
 	}
 }
