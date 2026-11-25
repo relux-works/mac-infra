@@ -156,6 +156,7 @@ static id reviewAuthorization(NSString *name) {
         @"encrypt":(id)kSecACLAuthorizationEncrypt,
         @"change_acl":(id)kSecACLAuthorizationChangeACL,
         @"integrity":(id)kSecACLAuthorizationIntegrity,
+        @"any":(id)kSecACLAuthorizationAny,
         @"gen_key":(id)kSecACLAuthorizationGenKey
     };
     return values[name];
@@ -260,12 +261,14 @@ static OSStatus addInventoryOverlapAccess(SecAccessRef access, NSDictionary *pla
     OSStatus status=addReviewACL(access,combined,release[@"applications"],
                                  [release[@"any_application"] boolValue],
                                  @"review combined release and key-use ACL");
+    TS_TRACE_STATUS("fixture-add-overlap-acl",status);
     if(status)return status;
     for(NSDictionary *writer in writerACLs) {
         if(writer==keyUse)continue;
         status=addReviewACL(access,writer[@"authorizations"],writer[@"applications"],
                             [writer[@"any_application"] boolValue],
                             @"review writer ACL");
+        TS_TRACE_STATUS("fixture-add-writer-acl",status);
         if(status)return status;
     }
     return 0;
@@ -277,10 +280,14 @@ static int runInventoryOverlapRoundTrip(void) {
     if(![plan isKindOfClass:[NSDictionary class]])return 60;
     SecAccessRef access=newAccess();
     if(!access)return 61;
+    TS_TRACE("fixture-build-inventory-overlap-access");
     OSStatus status=addInventoryOverlapAccess(access,plan);
+    TS_TRACE_STATUS("fixture-build-inventory-overlap-access",status);
     if(status){CFRelease(access);return 62;}
     NSDictionary *prepared=nil;
+    TS_TRACE("fixture-prepare-inventory-overlap-access");
     status=ts_prepare_access(access,plan,&prepared);
+    TS_TRACE_STATUS("fixture-prepare-inventory-overlap-access",status);
     NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"status":@(status),@"prepared":prepared ?: [NSNull null]}
                                                 options:NSJSONWritingSortedKeys error:NULL];
     if(!json){CFRelease(access);return 63;}

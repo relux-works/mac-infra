@@ -226,7 +226,7 @@ func TestNativeInventoryOverlapPreparationMatchesRollbackPlan(t *testing.T) {
 	defer cancel()
 	fixture := filepath.Join(t.TempDir(), "native-overlap-roundtrip")
 	compile := exec.CommandContext(ctx, "/usr/bin/clang",
-		"-Wno-deprecated-declarations", "-framework", "Foundation", "-framework", "Security",
+		"-Wno-deprecated-declarations", "-DTOOLSECRET_TEST_TRACE", "-framework", "Foundation", "-framework", "Security",
 		"-o", fixture, "testdata/native_prepare_fixture.m")
 	if output, err := compile.CombinedOutput(); err != nil {
 		t.Fatalf("compile in-memory native ACL fixture: %v\n%s", err, output)
@@ -274,19 +274,22 @@ func TestNativeInventoryOverlapPreparationMatchesRollbackPlan(t *testing.T) {
 	}
 	command := exec.CommandContext(ctx, fixture, "inventory-overlap-roundtrip")
 	command.Stdin = bytes.NewReader(input)
-	output, err := command.CombinedOutput()
+	var output, diagnostics bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &diagnostics
+	err = command.Run()
 	if err != nil {
-		t.Fatalf("native in-memory preparation setup: %v\n%s", err, output)
+		t.Fatalf("native in-memory preparation setup: %v\n%s", err, diagnostics.String())
 	}
 	var result struct {
 		Status   int  `json:"status"`
 		Prepared Item `json:"prepared"`
 	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode native round-trip: %v: %s", err, output)
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatalf("decode native round-trip: %v: %s", err, output.String())
 	}
 	if result.Status != 0 {
-		t.Fatalf("native preparation refused Go plan: status=%d output=%s", result.Status, output)
+		t.Fatalf("native preparation refused Go plan: status=%d output=%s\ndiagnostics=%s", result.Status, output.String(), diagnostics.String())
 	}
 	if !reflect.DeepEqual(result.Prepared, plan.After) {
 		t.Fatalf("native prepared ACL metadata differs from Go plan:\n got: %+v\nwant: %+v", result.Prepared, plan.After)
