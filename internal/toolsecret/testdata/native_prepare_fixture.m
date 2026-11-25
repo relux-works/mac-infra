@@ -291,8 +291,11 @@ static int runInventoryOverlapRoundTrip(void) {
     if(![plan isKindOfClass:[NSDictionary class]])return 60;
     SecAccessRef access=newAccess();
     if(!access)return 61;
+    OSStatus status=loadRequirementSPI();
+    TS_TRACE_STATUS("fixture-load-requirement-spi",status);
+    if(status){CFRelease(access);return 64;}
     TS_TRACE("fixture-build-inventory-overlap-access");
-    OSStatus status=addInventoryOverlapAccess(access,plan);
+    status=addInventoryOverlapAccess(access,plan);
     TS_TRACE_STATUS("fixture-build-inventory-overlap-access",status);
     if(status){CFRelease(access);return 62;}
     NSDictionary *prepared=nil;
