@@ -23,3 +23,6 @@ coverage.out
 /.planning/
 /AGENTS.md
 /CLAUDE.md
+.axiloom.json
+.task-board/
+.ctx/
