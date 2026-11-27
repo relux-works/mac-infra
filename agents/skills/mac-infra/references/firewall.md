@@ -442,6 +442,55 @@ the per-flow log of the netfilter content-filter system extension
   raise both before enabling the source. When the shared cap evicts ALF
   events, the digest window reports it (`evicted_through`, `truncated`).
 
+### Retained netfilter split section
+
+`watch digest --config /ABSOLUTE/firewall-watch.json --since 24h --json --split`
+adds `netfilter` with schema `mac-infra.netfilter-digest/v1` and basis
+`retained_events`. Existing split members and non-split output keep their
+behavior. Invalid store/configuration data still causes a nonzero exit and
+stderr; it never becomes a successful empty digest.
+
+The section counts retained event rows once in inclusive `[since, as_of]`,
+independently of cumulative `Event.Counts`. It includes app/reduced-signer
+counts, retained destination tuples, explicit outbound unsigned/ad-hoc internet
+observations, and the existing exact `policy_unusual_port` result for service
+ports 4444, 6667, 1337, 31337, 9001 and 9050. A port alone does not select that
+category or override an earlier policy. Missing direction is unknown. New
+`known_fp` is empty; existing denies and decisions retain their legacy buckets.
+These local rows remain private. Flow-window totals, full code identity and
+destination novelty are explicitly unavailable; destinations are retained
+tuples, not a complete list or evidence that an endpoint is new.
+
+Availability requires retained rows or positive-duration netfilter coverage
+within the window. Current `collection_status` reports the configuration only:
+disabled collection can still have historical evidence. Coverage uses netfilter
+spans, exact stalls, legacy-boundary provenance and conservative global loss
+watermarks, without inheriting ALF gaps or extending the last saved boundary.
+Unavailable/partial/truncated history must not be rendered as healthy zero
+flows. The complete loaded span bound includes the existing 256-span replay
+tail; its separate finite gap limit is 300770, rather than the retained-row
+limit of 100000.
+
+`alarms` independently reads the existing incident journal, verifies the entire
+bounded retained chain before selecting the window, and returns only counts of
+`warning`, `alarm` and `reconcile_mismatch`, positive sequence references and a
+truncation flag. It creates no directory, lock, file or history and performs no
+repair. The directory must already be caller-owned, non-symlink `0700`; the
+file must be caller-owned, regular, non-symlink, single-link `0600`. Acquisition
+uses no-follow descriptor checks, at most 16MiB, 4096 bytes per newline-terminated
+record and 11000 retained records. Missing/unsafe/unreadable history is
+`unavailable` with null counts; malformed/broken-chain history is `invalid`.
+A safe present empty journal is `verified` with zero counts. A retained first
+sequence above 1 remains truncated even for an empty later window. Chain
+verification is a snapshot check, not an external trust anchor or proof of
+lifetime completeness. Incident payloads are omitted.
+
+JSON is written to stdout and may contain private local analytics; redirect it
+only to a private task-scoped artifact. Room-facing consumers must use a typed
+aggregate projection that excludes rows, app/path/host/port/signer, incident
+payloads and sequence references. Updating this producer does not install or
+qualify a consumer.
+
 `max_entries` independently caps dedup entries, signature cache entries, and
 retained events in total across all daily files. Dedup/events also expire by
 `retention_days`. Dedup and signature cache entries over the cap are evicted

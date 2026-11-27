@@ -122,7 +122,12 @@ func runWatch(args []string, out, errOut io.Writer) int {
 		}
 		if split {
 			now := time.Now()
-			return printJSON(s.Split(now.Add(-period), now))
+			digest, e := s.SplitWithNetfilter(now.Add(-period), now)
+			if e != nil {
+				fmt.Fprintln(errOut, e)
+				return 1
+			}
+			return printJSON(digest)
 		}
 		groups := s.Digest(time.Now().Add(-period))
 		if asJSON {

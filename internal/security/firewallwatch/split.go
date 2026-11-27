@@ -131,6 +131,7 @@ type DigestSplit struct {
 	RealDeny    []SplitRow            `json:"real_deny"`
 	KnownFP     map[string]SplitGroup `json:"known_fp"`
 	NeedsReview []SplitRow            `json:"needs_review"`
+	Netfilter   *netfilterDigest      `json:"netfilter,omitempty"`
 }
 
 // Split classifies every retained event at or after since into at most one

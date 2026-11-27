@@ -1,0 +1,4326 @@
+{
+  "schema": "mac-infra.netfilter-digest-contract-fixtures/v1",
+  "source_base": "079e1d2cf02d0d362db123312f49905f73368065",
+  "contract_revision": 3,
+  "notice": "Synthetic acceptance expectations, not executed tests, output capture, review or deployment qualification. Each case names its paired full legacy_control_ref and supplies the exact new netfilter value; null here means ABSENT whole section for the legacy case, never an emitted null object. Materialize a digest by copying that legacy control and, only for non-null netfilter, adding the netfilter member. Producer witnesses are explicit facts/retained events, not complete persisted Stores. No source/consumer acceptance instrument was run.",
+  "cases": [
+    {
+      "id": "legacy-absent",
+      "claim": "Legacy rendering remains byte-identical; missing new section is unsupported.",
+      "expected": {
+        "consumer": "unsupported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": null
+    },
+    {
+      "id": "available-empty",
+      "claim": "Known source coverage and verified empty existing journal support retained0, never flow0.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "producer_witness": {
+        "source_enabled": true,
+        "events": [],
+        "coverage": [
+          {
+            "source": "netfilter",
+            "start": "2026-10-31T08:00:00Z",
+            "end": "2026-10-31T09:00:00Z"
+          }
+        ],
+        "journal_fixture": "existing-safe-zero-byte-file"
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "disabled-current-historical-covered",
+      "claim": "Current disabled source does not erase historical covered evidence; disabled must be visible.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "disabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "enabled-absent-history",
+      "claim": "Enabled current config with no history is unavailable, not healthy zero.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "producer_witness": {
+        "source_enabled": true,
+        "events": [],
+        "coverage": []
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "unavailable",
+        "reason": "history_absent",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "unavailable",
+            "gaps": [
+              {
+                "from": "2026-10-31T08:00:00Z",
+                "to": "2026-10-31T09:00:00Z",
+                "kind": "not_running"
+              }
+            ],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": true
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "disabled-no-history",
+      "claim": "Disabled and absent history remain explicit independent states.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "unavailable",
+        "reason": "history_absent",
+        "collection_status": "disabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "unavailable",
+            "gaps": [
+              {
+                "from": "2026-10-31T08:00:00Z",
+                "to": "2026-10-31T09:00:00Z",
+                "kind": "not_running"
+              }
+            ],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": true
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "journal-not_found",
+      "claim": "Unavailable/invalid journal differs from verified empty with zero writes.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "journal_writes_allowed": 0
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "unavailable",
+          "reason": "not_found",
+          "counts": null,
+          "seq_refs": [],
+          "truncated": true
+        }
+      }
+    },
+    {
+      "id": "journal-unreadable",
+      "claim": "Unavailable/invalid journal differs from verified empty with zero writes.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "journal_writes_allowed": 0
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "unavailable",
+          "reason": "unreadable",
+          "counts": null,
+          "seq_refs": [],
+          "truncated": true
+        }
+      }
+    },
+    {
+      "id": "journal-unsafe_path",
+      "claim": "Unavailable/invalid journal differs from verified empty with zero writes.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "journal_writes_allowed": 0
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "unavailable",
+          "reason": "unsafe_path",
+          "counts": null,
+          "seq_refs": [],
+          "truncated": true
+        }
+      }
+    },
+    {
+      "id": "journal-malformed",
+      "claim": "Unavailable/invalid journal differs from verified empty with zero writes.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "journal_writes_allowed": 0
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "invalid",
+          "reason": "malformed",
+          "counts": null,
+          "seq_refs": [],
+          "truncated": true
+        }
+      }
+    },
+    {
+      "id": "journal-chain_invalid",
+      "claim": "Unavailable/invalid journal differs from verified empty with zero writes.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "journal_writes_allowed": 0
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "invalid",
+          "reason": "chain_invalid",
+          "counts": null,
+          "seq_refs": [],
+          "truncated": true
+        }
+      }
+    },
+    {
+      "id": "unknown-schema",
+      "claim": "Unsupported schema cannot render new-section healthy-zero.",
+      "expected": {
+        "consumer": "unsupported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v2",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "unknown-basis",
+      "claim": "Unknown basis is not a flow-count capability.",
+      "expected": {
+        "consumer": "unsupported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "flows",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "null-array",
+      "claim": "Required arrays cannot be null.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": null,
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "negative-count",
+      "claim": "Reject negative integer count.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": -1,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "boolean-count",
+      "claim": "Boolean is not an integer count.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": true,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "invented-flow-capability",
+      "claim": "No measured flow capability in first retained stage.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "available",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "invented-novelty",
+      "claim": "No novelty proof from first retained observation.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "available",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "missing-required-basis",
+      "claim": "Missing required field is not a default.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "extra-detail-member",
+      "claim": "Closed new object rejects unexpected payload fields.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        },
+        "detail": "synthetic-private-detail.invalid"
+      }
+    },
+    {
+      "id": "blanket-known-fp",
+      "claim": "No new netfilter exemptions are admitted.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {
+          "all_apple": {
+            "event_rows": 1
+          }
+        },
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "missing-journal-fabricated-zero",
+      "claim": "Unavailable journal must carry null counts and conservative truncation.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "unavailable",
+          "reason": "not_found",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "netfilter-stall-alf-covered",
+      "claim": "New source gap cannot alter old ALF covered window.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "producer_witness": {
+        "alf_covered": true,
+        "netfilter_stall": [
+          "2026-10-31T08:00:00Z",
+          "2026-10-31T08:00:01Z"
+        ]
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "partial",
+            "gaps": [
+              {
+                "from": "2026-10-31T08:00:00Z",
+                "to": "2026-10-31T08:00:01Z",
+                "kind": "stall"
+              }
+            ],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": true
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "legacy-source-coverage",
+      "claim": "Retained legacy spans cover recorded portions and bound an unknown-cause gap; source evidence is available while coverage remains partial.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "partial",
+            "gaps": [
+              {
+                "from": "2026-10-31T08:10:00Z",
+                "to": "2026-10-31T08:50:00Z",
+                "kind": "legacy_unknown"
+              }
+            ],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": true
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      },
+      "producer_witness": {
+        "source_enabled": true,
+        "events": [],
+        "coverage": [
+          {
+            "source": "netfilter",
+            "start": "2026-10-31T07:59:00Z",
+            "end": "2026-10-31T08:10:00Z",
+            "legacy": true
+          },
+          {
+            "source": "netfilter",
+            "start": "2026-10-31T08:50:00Z",
+            "end": "2026-10-31T09:01:00Z",
+            "legacy": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "one-key100-one-row",
+      "claim": "One retained row remains one event row despite cumulative100.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "event_rows": 1,
+        "flow_window_counts": "unavailable"
+      },
+      "producer_witness": {
+        "actual_flow_observations": 100,
+        "retained_events": [
+          {
+            "source": "netfilter",
+            "counts": 100,
+            "kind": "outbound",
+            "ts": "2026-10-31T08:30:00Z"
+          }
+        ],
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 443,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 100,
+            "proposed_label": "digest",
+            "reason": "knn",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-01",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 443,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "escalation1plus100-two-rows",
+      "claim": "Two retained emissions count2, not101 flows.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "event_rows": 2,
+        "flow_window_counts": "unavailable"
+      },
+      "producer_witness": {
+        "retained_cumulative_counts": [
+          1,
+          100
+        ],
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 443,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "digest",
+            "reason": "knn",
+            "mode": "shadow"
+          },
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 443,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 100,
+            "proposed_label": "digest",
+            "reason": "knn",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-02",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 2,
+          "outbound_event_rows": 2,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 2,
+            "outbound_event_rows": 2,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 443,
+            "event_rows": 2
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "cumulative100-faked-as-rows",
+      "claim": "Totals disagree with retained group sums.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 100,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 443,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "same-bucket-host-loss",
+      "claim": "Two observed hostnames can collapse to one retained tuple; no exact cardinality/novelty claim.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "producer_witness": {
+        "observed_hostnames": [
+          "api.example.invalid",
+          "cdn.example.invalid"
+        ],
+        "same_dedup_bucket": "example.invalid",
+        "retained_rows": 1,
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 443,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "digest",
+            "reason": "knn",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-01",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 443,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "policy4444",
+      "claim": "Retained policy reason and original direction/precedence control category; number alone is insufficient.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "unusual_port_event_rows": 1
+      },
+      "producer_witness": {
+        "source": "netfilter",
+        "kind": "outbound",
+        "reason": "policy_unusual_port",
+        "label": "decide",
+        "signer": "Team: SYNTHETIC",
+        "remote_class": "internet",
+        "port": 4444,
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 4444,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "decide",
+            "reason": "policy_unusual_port",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-03",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 4444,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 1,
+          "rows": [
+            {
+              "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+              "signer": "Team: SYNTHETIC",
+              "port": 4444,
+              "event_rows": 1
+            }
+          ]
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "port8443",
+      "claim": "Retained policy reason and original direction/precedence control category; number alone is insufficient.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "unusual_port_event_rows": 0
+      },
+      "producer_witness": {
+        "source": "netfilter",
+        "kind": "outbound",
+        "reason": "knn",
+        "label": "decide",
+        "signer": "Team: SYNTHETIC",
+        "remote_class": "internet",
+        "port": 8443,
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 8443,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "decide",
+            "reason": "knn",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-04",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 8443,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "raw-ip-precedence4444",
+      "claim": "Retained policy reason and original direction/precedence control category; number alone is insufficient.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "unusual_port_event_rows": 0
+      },
+      "producer_witness": {
+        "source": "netfilter",
+        "kind": "outbound",
+        "reason": "policy_raw_ip",
+        "label": "decide",
+        "signer": "Team: SYNTHETIC",
+        "remote_class": "internet-raw-ip",
+        "port": 4444,
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 4444,
+            "remote_class": "internet-raw-ip",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "decide",
+            "reason": "policy_raw_ip",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-05",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet-raw-ip",
+            "bucket": "example.invalid",
+            "port": 4444,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "unsigned-precedence4444",
+      "claim": "Retained policy reason and original direction/precedence control category; number alone is insufficient.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "unusual_port_event_rows": 0
+      },
+      "producer_witness": {
+        "source": "netfilter",
+        "kind": "outbound",
+        "reason": "policy_unsigned_outbound",
+        "label": "decide",
+        "signer": "unsigned",
+        "remote_class": "internet",
+        "port": 4444,
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "unsigned",
+            "verdict": "observed",
+            "port": 4444,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "decide",
+            "reason": "policy_unsigned_outbound",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-06",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "unsigned",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "unsigned",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 4444,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 1,
+          "rows": [
+            {
+              "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+              "signer": "unsigned",
+              "event_rows": 1
+            }
+          ]
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "unknown-direction4444",
+      "claim": "Retained policy reason and original direction/precedence control category; number alone is insufficient.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "unusual_port_event_rows": 0
+      },
+      "producer_witness": {
+        "source": "netfilter",
+        "kind": "unknown",
+        "reason": "policy_unusual_port",
+        "label": "decide",
+        "signer": "Team: SYNTHETIC",
+        "remote_class": "internet",
+        "port": 4444,
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 4444,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "decide",
+            "reason": "policy_unusual_port",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-03",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 1,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 0,
+            "unknown_direction_event_rows": 1,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "unknown",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 4444,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "inbound-local4444",
+      "claim": "Retained policy reason and original direction/precedence control category; number alone is insufficient.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "unusual_port_event_rows": 0
+      },
+      "producer_witness": {
+        "source": "netfilter",
+        "kind": "inbound",
+        "reason": "policy_exposed_service",
+        "label": "decide",
+        "signer": "Team: SYNTHETIC",
+        "remote_class": "lan",
+        "port": 4444,
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 4444,
+            "remote_class": "lan",
+            "bucket": "example.invalid",
+            "kind": "inbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "decide",
+            "reason": "policy_exposed_service",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-07",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 0,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "inbound",
+            "host": "api.example.invalid",
+            "remote_class": "lan",
+            "bucket": "example.invalid",
+            "port": 4444,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "room-safe-aggregate",
+      "claim": "New room section may contain approved aggregate counts/status only.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "new_room_section": "netfilter: retained=1 outbound=1 coverage=covered collection=enabled alarms=verified/0; flow counts, identity, novelty unavailable",
+        "room_privacy_violation": false
+      },
+      "producer_witness": {
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 443,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "digest",
+            "reason": "knn",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-01",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 443,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "room-sensitive-plant",
+      "claim": "A bounded privacy control must detect injected local row/detail in NEW section; safe adjacent control must pass.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "new_room_section": "netfilter: retained=1 app=/Applications/Synthetic.app host=api.example.invalid signer=Team:SYNTHETIC detail=private-row seq=7",
+        "room_privacy_violation": true
+      },
+      "producer_witness": {
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "verdict": "observed",
+            "port": 443,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "digest",
+            "reason": "knn",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-01",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 443,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "deny-not-exempt",
+      "claim": "No new exemption removes an existing deny/decide; old bucket projection stays intact.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "producer_witness": {
+        "netfilter_verdict": "deny",
+        "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+        "signer": "Apple",
+        "expected_existing_bucket": "real_deny",
+        "new_exemptions": [],
+        "retained_reason": "hard_non_allow",
+        "retained_source_events": [
+          {
+            "ts": "2026-10-31T08:30:00Z",
+            "source": "netfilter",
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Apple",
+            "verdict": "deny",
+            "port": 443,
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "kind": "outbound",
+            "host": "api.example.invalid",
+            "counts": 1,
+            "proposed_label": "decide",
+            "reason": "hard_non_allow",
+            "mode": "shadow"
+          }
+        ]
+      },
+      "legacy_control_ref": "legacy-08",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Apple",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Apple",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 443,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "invalid-service-port",
+      "claim": "Reject malformed required numeric shape beside valid service-port/integer controls.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 1,
+          "outbound_event_rows": 1,
+          "unknown_direction_event_rows": 0,
+          "first_ts": "2026-10-31T08:30:00Z",
+          "last_ts": "2026-10-31T08:30:00Z",
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "event_rows": 1,
+            "outbound_event_rows": 1,
+            "unknown_direction_event_rows": 0,
+            "distinct_retained_destinations": 1
+          }
+        ],
+        "destinations": [
+          {
+            "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+            "signer": "Team: SYNTHETIC",
+            "direction": "outbound",
+            "host": "api.example.invalid",
+            "remote_class": "internet",
+            "bucket": "example.invalid",
+            "port": 0,
+            "event_rows": 1
+          }
+        ],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "fractional-counter",
+      "claim": "Reject malformed required numeric shape beside valid service-port/integer controls.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0.5,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "journal-verified-one-alarm",
+      "claim": "A verified nonempty chain produces a nonzero alarm; always-zero implementation fails this control.",
+      "producer_witness": {
+        "journal_raw": "{\"seq\":1,\"ts\":\"2026-10-31T08:30:00Z\",\"kind\":\"alarm\",\"source\":\"netfilter\",\"actor\":\"synthetic\",\"target\":\"local-fixture\",\"action\":\"synthetic alarm\",\"prev_hash\":\"\",\"hash\":\"7e3ed73a00db99bf791abea453cf949eaed230e36691f9d59f706732a81787c4\"}\n",
+        "journal_fixture": "existing-safe-file; expected canonical Go Entry digest, not an executed Verify result"
+      },
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false,
+        "journal_writes_allowed": 0,
+        "alarm": 1
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "covered",
+            "gaps": [],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": false
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 1,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [
+            1
+          ],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "two-source-spans-three-gaps",
+      "claim": "Two disjoint nonlegacy spans yield three distinct not_running gaps; gaps are not bounded by source span count.",
+      "expected": {
+        "consumer": "supported",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "producer_witness": {
+        "source_enabled": true,
+        "events": [],
+        "coverage": [
+          {
+            "source": "netfilter",
+            "start": "2026-10-31T08:00:01Z",
+            "end": "2026-10-31T08:00:02Z"
+          },
+          {
+            "source": "netfilter",
+            "start": "2026-10-31T08:00:03Z",
+            "end": "2026-10-31T08:00:04Z"
+          }
+        ],
+        "journal_fixture": "existing-safe-zero-byte-file"
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "available",
+        "reason": "none",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "partial",
+            "gaps": [
+              {
+                "from": "2026-10-31T08:00:00Z",
+                "to": "2026-10-31T08:00:01Z",
+                "kind": "not_running"
+              },
+              {
+                "from": "2026-10-31T08:00:02Z",
+                "to": "2026-10-31T08:00:03Z",
+                "kind": "not_running"
+              },
+              {
+                "from": "2026-10-31T08:00:04Z",
+                "to": "2026-10-31T09:00:00Z",
+                "kind": "not_running"
+              }
+            ],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": true
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "id": "legacy-span-wrong-unavailable-status",
+      "claim": "Overlapping retained source evidence cannot be labeled unavailable; independent producer witness matches the valid legacy neighbor.",
+      "expected": {
+        "consumer": "invalid",
+        "legacy_projection_unchanged": true,
+        "healthy_flow_zero_allowed": false
+      },
+      "legacy_control_ref": "legacy-00",
+      "netfilter": {
+        "schema": "mac-infra.netfilter-digest/v1",
+        "basis": "retained_events",
+        "status": "unavailable",
+        "reason": "history_absent",
+        "collection_status": "enabled",
+        "capabilities": {
+          "flow_window_counts": "unavailable",
+          "full_code_identity": "unavailable",
+          "destination_novelty": "unavailable",
+          "destination_completeness": "retained_tuples_only"
+        },
+        "window": {
+          "since": "2026-10-31T08:00:00Z",
+          "as_of": "2026-10-31T09:00:00Z",
+          "event_rows": 0,
+          "outbound_event_rows": 0,
+          "unknown_direction_event_rows": 0,
+          "first_ts": null,
+          "last_ts": null,
+          "event_evicted_through": null,
+          "coverage": {
+            "status": "partial",
+            "gaps": [
+              {
+                "from": "2026-10-31T08:10:00Z",
+                "to": "2026-10-31T08:50:00Z",
+                "kind": "legacy_unknown"
+              }
+            ],
+            "coalesced_short_stalls": {
+              "count": 0,
+              "stalled_ns": 0
+            },
+            "evicted_through": null,
+            "truncated": true
+          }
+        },
+        "per_app": [],
+        "destinations": [],
+        "unsigned_or_adhoc_outbound": {
+          "event_rows": 0,
+          "rows": []
+        },
+        "odd_ports": {
+          "policy": "policy_unusual_port",
+          "event_rows": 0,
+          "rows": []
+        },
+        "known_fp": {},
+        "alarms": {
+          "status": "verified",
+          "reason": "none",
+          "counts": {
+            "warning": 0,
+            "alarm": 0,
+            "reconcile_mismatch": 0
+          },
+          "seq_refs": [],
+          "truncated": false
+        }
+      },
+      "producer_witness": {
+        "source_enabled": true,
+        "events": [],
+        "coverage": [
+          {
+            "source": "netfilter",
+            "start": "2026-10-31T07:59:00Z",
+            "end": "2026-10-31T08:10:00Z",
+            "legacy": true
+          },
+          {
+            "source": "netfilter",
+            "start": "2026-10-31T08:50:00Z",
+            "end": "2026-10-31T09:01:00Z",
+            "legacy": true
+          }
+        ]
+      }
+    }
+  ],
+  "legacy_controls": {
+    "legacy-00": {
+      "window": {
+        "since": "2026-10-31T08:00:00Z",
+        "as_of": "2026-10-31T09:00:00Z",
+        "first_ts": null,
+        "last_ts": null,
+        "events_in_window": 0,
+        "coverage_gaps": [],
+        "coalesced_short_stalls": {
+          "count": 0,
+          "stalled_ns": 0
+        },
+        "evicted_through": null,
+        "coverage_evicted_through": null,
+        "truncated": false,
+        "slow_ops": {
+          "records": [],
+          "kinds": {},
+          "dropped_through": null
+        }
+      },
+      "health": {
+        "entries": 0,
+        "events": 0,
+        "signer_cache": 0,
+        "last_event": "0001-01-01T00:00:00Z",
+        "backend_healthy": false,
+        "health_as_of": "2026-10-31T09:00:00Z",
+        "unrecognized": 0,
+        "invalid_json": 0,
+        "unrecognized_samples": null,
+        "nettop_error": "",
+        "netfilter_invalid": 0,
+        "netfilter_rejected_sender": 0,
+        "netfilter_error": "",
+        "mode": "shadow",
+        "line_queue_high_water": {
+          "alf": 0,
+          "netfilter": 0,
+          "max_at": {
+            "alf": null,
+            "netfilter": null
+          }
+        },
+        "shutdown_dropped_lines": {
+          "alf": 0,
+          "netfilter": 0
+        },
+        "run_loop_timing": {
+          "save": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "classification": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "maintenance": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "journal": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          }
+        },
+        "journal_torn_tail": 0
+      },
+      "real_deny": [],
+      "known_fp": {
+        "nettop_policy_raw_ip": {
+          "count": 0,
+          "rows": []
+        },
+        "alf_unknown_or_allow_decide": {
+          "count": 0,
+          "rows": []
+        },
+        "loopback_ssh_limactl_knn": {
+          "count": 0,
+          "rows": []
+        }
+      },
+      "needs_review": []
+    },
+    "legacy-01": {
+      "window": {
+        "since": "2026-10-31T08:00:00Z",
+        "as_of": "2026-10-31T09:00:00Z",
+        "first_ts": "2026-10-31T08:30:00Z",
+        "last_ts": "2026-10-31T08:30:00Z",
+        "events_in_window": 1,
+        "coverage_gaps": [],
+        "coalesced_short_stalls": {
+          "count": 0,
+          "stalled_ns": 0
+        },
+        "evicted_through": null,
+        "coverage_evicted_through": null,
+        "truncated": false,
+        "slow_ops": {
+          "records": [],
+          "kinds": {},
+          "dropped_through": null
+        }
+      },
+      "health": {
+        "entries": 1,
+        "events": 1,
+        "signer_cache": 0,
+        "last_event": "2026-10-31T08:30:00Z",
+        "backend_healthy": false,
+        "health_as_of": "2026-10-31T09:00:00Z",
+        "unrecognized": 0,
+        "invalid_json": 0,
+        "unrecognized_samples": null,
+        "nettop_error": "",
+        "netfilter_invalid": 0,
+        "netfilter_rejected_sender": 0,
+        "netfilter_error": "",
+        "mode": "shadow",
+        "line_queue_high_water": {
+          "alf": 0,
+          "netfilter": 0,
+          "max_at": {
+            "alf": null,
+            "netfilter": null
+          }
+        },
+        "shutdown_dropped_lines": {
+          "alf": 0,
+          "netfilter": 0
+        },
+        "run_loop_timing": {
+          "save": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "classification": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "maintenance": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "journal": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          }
+        },
+        "journal_torn_tail": 0
+      },
+      "real_deny": [],
+      "known_fp": {
+        "nettop_policy_raw_ip": {
+          "count": 0,
+          "rows": []
+        },
+        "alf_unknown_or_allow_decide": {
+          "count": 0,
+          "rows": []
+        },
+        "loopback_ssh_limactl_knn": {
+          "count": 0,
+          "rows": []
+        }
+      },
+      "needs_review": []
+    },
+    "legacy-02": {
+      "window": {
+        "since": "2026-10-31T08:00:00Z",
+        "as_of": "2026-10-31T09:00:00Z",
+        "first_ts": "2026-10-31T08:30:00Z",
+        "last_ts": "2026-10-31T08:30:00Z",
+        "events_in_window": 2,
+        "coverage_gaps": [],
+        "coalesced_short_stalls": {
+          "count": 0,
+          "stalled_ns": 0
+        },
+        "evicted_through": null,
+        "coverage_evicted_through": null,
+        "truncated": false,
+        "slow_ops": {
+          "records": [],
+          "kinds": {},
+          "dropped_through": null
+        }
+      },
+      "health": {
+        "entries": 1,
+        "events": 2,
+        "signer_cache": 0,
+        "last_event": "2026-10-31T08:30:00Z",
+        "backend_healthy": false,
+        "health_as_of": "2026-10-31T09:00:00Z",
+        "unrecognized": 0,
+        "invalid_json": 0,
+        "unrecognized_samples": null,
+        "nettop_error": "",
+        "netfilter_invalid": 0,
+        "netfilter_rejected_sender": 0,
+        "netfilter_error": "",
+        "mode": "shadow",
+        "line_queue_high_water": {
+          "alf": 0,
+          "netfilter": 0,
+          "max_at": {
+            "alf": null,
+            "netfilter": null
+          }
+        },
+        "shutdown_dropped_lines": {
+          "alf": 0,
+          "netfilter": 0
+        },
+        "run_loop_timing": {
+          "save": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "classification": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "maintenance": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "journal": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          }
+        },
+        "journal_torn_tail": 0
+      },
+      "real_deny": [],
+      "known_fp": {
+        "nettop_policy_raw_ip": {
+          "count": 0,
+          "rows": []
+        },
+        "alf_unknown_or_allow_decide": {
+          "count": 0,
+          "rows": []
+        },
+        "loopback_ssh_limactl_knn": {
+          "count": 0,
+          "rows": []
+        }
+      },
+      "needs_review": []
+    },
+    "legacy-03": {
+      "window": {
+        "since": "2026-10-31T08:00:00Z",
+        "as_of": "2026-10-31T09:00:00Z",
+        "first_ts": "2026-10-31T08:30:00Z",
+        "last_ts": "2026-10-31T08:30:00Z",
+        "events_in_window": 1,
+        "coverage_gaps": [],
+        "coalesced_short_stalls": {
+          "count": 0,
+          "stalled_ns": 0
+        },
+        "evicted_through": null,
+        "coverage_evicted_through": null,
+        "truncated": false,
+        "slow_ops": {
+          "records": [],
+          "kinds": {},
+          "dropped_through": null
+        }
+      },
+      "health": {
+        "entries": 1,
+        "events": 1,
+        "signer_cache": 0,
+        "last_event": "2026-10-31T08:30:00Z",
+        "backend_healthy": false,
+        "health_as_of": "2026-10-31T09:00:00Z",
+        "unrecognized": 0,
+        "invalid_json": 0,
+        "unrecognized_samples": null,
+        "nettop_error": "",
+        "netfilter_invalid": 0,
+        "netfilter_rejected_sender": 0,
+        "netfilter_error": "",
+        "mode": "shadow",
+        "line_queue_high_water": {
+          "alf": 0,
+          "netfilter": 0,
+          "max_at": {
+            "alf": null,
+            "netfilter": null
+          }
+        },
+        "shutdown_dropped_lines": {
+          "alf": 0,
+          "netfilter": 0
+        },
+        "run_loop_timing": {
+          "save": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "classification": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "maintenance": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "journal": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          }
+        },
+        "journal_torn_tail": 0
+      },
+      "real_deny": [],
+      "known_fp": {
+        "nettop_policy_raw_ip": {
+          "count": 0,
+          "rows": []
+        },
+        "alf_unknown_or_allow_decide": {
+          "count": 0,
+          "rows": []
+        },
+        "loopback_ssh_limactl_knn": {
+          "count": 0,
+          "rows": []
+        }
+      },
+      "needs_review": [
+        {
+          "ts": "2026-10-31T08:30:00Z",
+          "source": "netfilter",
+          "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+          "verdict": "observed",
+          "port": 4444,
+          "remote_class": "internet",
+          "bucket": "example.invalid",
+          "counts": 1,
+          "proposed_label": "decide",
+          "reason": "policy_unusual_port"
+        }
+      ]
+    },
+    "legacy-04": {
+      "window": {
+        "since": "2026-10-31T08:00:00Z",
+        "as_of": "2026-10-31T09:00:00Z",
+        "first_ts": "2026-10-31T08:30:00Z",
+        "last_ts": "2026-10-31T08:30:00Z",
+        "events_in_window": 1,
+        "coverage_gaps": [],
+        "coalesced_short_stalls": {
+          "count": 0,
+          "stalled_ns": 0
+        },
+        "evicted_through": null,
+        "coverage_evicted_through": null,
+        "truncated": false,
+        "slow_ops": {
+          "records": [],
+          "kinds": {},
+          "dropped_through": null
+        }
+      },
+      "health": {
+        "entries": 1,
+        "events": 1,
+        "signer_cache": 0,
+        "last_event": "2026-10-31T08:30:00Z",
+        "backend_healthy": false,
+        "health_as_of": "2026-10-31T09:00:00Z",
+        "unrecognized": 0,
+        "invalid_json": 0,
+        "unrecognized_samples": null,
+        "nettop_error": "",
+        "netfilter_invalid": 0,
+        "netfilter_rejected_sender": 0,
+        "netfilter_error": "",
+        "mode": "shadow",
+        "line_queue_high_water": {
+          "alf": 0,
+          "netfilter": 0,
+          "max_at": {
+            "alf": null,
+            "netfilter": null
+          }
+        },
+        "shutdown_dropped_lines": {
+          "alf": 0,
+          "netfilter": 0
+        },
+        "run_loop_timing": {
+          "save": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "classification": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "maintenance": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "journal": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          }
+        },
+        "journal_torn_tail": 0
+      },
+      "real_deny": [],
+      "known_fp": {
+        "nettop_policy_raw_ip": {
+          "count": 0,
+          "rows": []
+        },
+        "alf_unknown_or_allow_decide": {
+          "count": 0,
+          "rows": []
+        },
+        "loopback_ssh_limactl_knn": {
+          "count": 0,
+          "rows": []
+        }
+      },
+      "needs_review": [
+        {
+          "ts": "2026-10-31T08:30:00Z",
+          "source": "netfilter",
+          "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+          "verdict": "observed",
+          "port": 8443,
+          "remote_class": "internet",
+          "bucket": "example.invalid",
+          "counts": 1,
+          "proposed_label": "decide",
+          "reason": "knn"
+        }
+      ]
+    },
+    "legacy-05": {
+      "window": {
+        "since": "2026-10-31T08:00:00Z",
+        "as_of": "2026-10-31T09:00:00Z",
+        "first_ts": "2026-10-31T08:30:00Z",
+        "last_ts": "2026-10-31T08:30:00Z",
+        "events_in_window": 1,
+        "coverage_gaps": [],
+        "coalesced_short_stalls": {
+          "count": 0,
+          "stalled_ns": 0
+        },
+        "evicted_through": null,
+        "coverage_evicted_through": null,
+        "truncated": false,
+        "slow_ops": {
+          "records": [],
+          "kinds": {},
+          "dropped_through": null
+        }
+      },
+      "health": {
+        "entries": 1,
+        "events": 1,
+        "signer_cache": 0,
+        "last_event": "2026-10-31T08:30:00Z",
+        "backend_healthy": false,
+        "health_as_of": "2026-10-31T09:00:00Z",
+        "unrecognized": 0,
+        "invalid_json": 0,
+        "unrecognized_samples": null,
+        "nettop_error": "",
+        "netfilter_invalid": 0,
+        "netfilter_rejected_sender": 0,
+        "netfilter_error": "",
+        "mode": "shadow",
+        "line_queue_high_water": {
+          "alf": 0,
+          "netfilter": 0,
+          "max_at": {
+            "alf": null,
+            "netfilter": null
+          }
+        },
+        "shutdown_dropped_lines": {
+          "alf": 0,
+          "netfilter": 0
+        },
+        "run_loop_timing": {
+          "save": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "classification": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "maintenance": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "journal": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          }
+        },
+        "journal_torn_tail": 0
+      },
+      "real_deny": [],
+      "known_fp": {
+        "nettop_policy_raw_ip": {
+          "count": 0,
+          "rows": []
+        },
+        "alf_unknown_or_allow_decide": {
+          "count": 0,
+          "rows": []
+        },
+        "loopback_ssh_limactl_knn": {
+          "count": 0,
+          "rows": []
+        }
+      },
+      "needs_review": [
+        {
+          "ts": "2026-10-31T08:30:00Z",
+          "source": "netfilter",
+          "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+          "verdict": "observed",
+          "port": 4444,
+          "remote_class": "internet-raw-ip",
+          "bucket": "example.invalid",
+          "counts": 1,
+          "proposed_label": "decide",
+          "reason": "policy_raw_ip"
+        }
+      ]
+    },
+    "legacy-06": {
+      "window": {
+        "since": "2026-10-31T08:00:00Z",
+        "as_of": "2026-10-31T09:00:00Z",
+        "first_ts": "2026-10-31T08:30:00Z",
+        "last_ts": "2026-10-31T08:30:00Z",
+        "events_in_window": 1,
+        "coverage_gaps": [],
+        "coalesced_short_stalls": {
+          "count": 0,
+          "stalled_ns": 0
+        },
+        "evicted_through": null,
+        "coverage_evicted_through": null,
+        "truncated": false,
+        "slow_ops": {
+          "records": [],
+          "kinds": {},
+          "dropped_through": null
+        }
+      },
+      "health": {
+        "entries": 1,
+        "events": 1,
+        "signer_cache": 0,
+        "last_event": "2026-10-31T08:30:00Z",
+        "backend_healthy": false,
+        "health_as_of": "2026-10-31T09:00:00Z",
+        "unrecognized": 0,
+        "invalid_json": 0,
+        "unrecognized_samples": null,
+        "nettop_error": "",
+        "netfilter_invalid": 0,
+        "netfilter_rejected_sender": 0,
+        "netfilter_error": "",
+        "mode": "shadow",
+        "line_queue_high_water": {
+          "alf": 0,
+          "netfilter": 0,
+          "max_at": {
+            "alf": null,
+            "netfilter": null
+          }
+        },
+        "shutdown_dropped_lines": {
+          "alf": 0,
+          "netfilter": 0
+        },
+        "run_loop_timing": {
+          "save": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "classification": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "maintenance": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "journal": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          }
+        },
+        "journal_torn_tail": 0
+      },
+      "real_deny": [],
+      "known_fp": {
+        "nettop_policy_raw_ip": {
+          "count": 0,
+          "rows": []
+        },
+        "alf_unknown_or_allow_decide": {
+          "count": 0,
+          "rows": []
+        },
+        "loopback_ssh_limactl_knn": {
+          "count": 0,
+          "rows": []
+        }
+      },
+      "needs_review": [
+        {
+          "ts": "2026-10-31T08:30:00Z",
+          "source": "netfilter",
+          "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+          "verdict": "observed",
+          "port": 4444,
+          "remote_class": "internet",
+          "bucket": "example.invalid",
+          "counts": 1,
+          "proposed_label": "decide",
+          "reason": "policy_unsigned_outbound"
+        }
+      ]
+    },
+    "legacy-07": {
+      "window": {
+        "since": "2026-10-31T08:00:00Z",
+        "as_of": "2026-10-31T09:00:00Z",
+        "first_ts": "2026-10-31T08:30:00Z",
+        "last_ts": "2026-10-31T08:30:00Z",
+        "events_in_window": 1,
+        "coverage_gaps": [],
+        "coalesced_short_stalls": {
+          "count": 0,
+          "stalled_ns": 0
+        },
+        "evicted_through": null,
+        "coverage_evicted_through": null,
+        "truncated": false,
+        "slow_ops": {
+          "records": [],
+          "kinds": {},
+          "dropped_through": null
+        }
+      },
+      "health": {
+        "entries": 1,
+        "events": 1,
+        "signer_cache": 0,
+        "last_event": "2026-10-31T08:30:00Z",
+        "backend_healthy": false,
+        "health_as_of": "2026-10-31T09:00:00Z",
+        "unrecognized": 0,
+        "invalid_json": 0,
+        "unrecognized_samples": null,
+        "nettop_error": "",
+        "netfilter_invalid": 0,
+        "netfilter_rejected_sender": 0,
+        "netfilter_error": "",
+        "mode": "shadow",
+        "line_queue_high_water": {
+          "alf": 0,
+          "netfilter": 0,
+          "max_at": {
+            "alf": null,
+            "netfilter": null
+          }
+        },
+        "shutdown_dropped_lines": {
+          "alf": 0,
+          "netfilter": 0
+        },
+        "run_loop_timing": {
+          "save": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "classification": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "maintenance": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "journal": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          }
+        },
+        "journal_torn_tail": 0
+      },
+      "real_deny": [],
+      "known_fp": {
+        "nettop_policy_raw_ip": {
+          "count": 0,
+          "rows": []
+        },
+        "alf_unknown_or_allow_decide": {
+          "count": 0,
+          "rows": []
+        },
+        "loopback_ssh_limactl_knn": {
+          "count": 0,
+          "rows": []
+        }
+      },
+      "needs_review": [
+        {
+          "ts": "2026-10-31T08:30:00Z",
+          "source": "netfilter",
+          "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+          "verdict": "observed",
+          "port": 4444,
+          "remote_class": "lan",
+          "bucket": "example.invalid",
+          "counts": 1,
+          "proposed_label": "decide",
+          "reason": "policy_exposed_service"
+        }
+      ]
+    },
+    "legacy-08": {
+      "window": {
+        "since": "2026-10-31T08:00:00Z",
+        "as_of": "2026-10-31T09:00:00Z",
+        "first_ts": "2026-10-31T08:30:00Z",
+        "last_ts": "2026-10-31T08:30:00Z",
+        "events_in_window": 1,
+        "coverage_gaps": [],
+        "coalesced_short_stalls": {
+          "count": 0,
+          "stalled_ns": 0
+        },
+        "evicted_through": null,
+        "coverage_evicted_through": null,
+        "truncated": false,
+        "slow_ops": {
+          "records": [],
+          "kinds": {},
+          "dropped_through": null
+        }
+      },
+      "health": {
+        "entries": 1,
+        "events": 1,
+        "signer_cache": 0,
+        "last_event": "2026-10-31T08:30:00Z",
+        "backend_healthy": false,
+        "health_as_of": "2026-10-31T09:00:00Z",
+        "unrecognized": 0,
+        "invalid_json": 0,
+        "unrecognized_samples": null,
+        "nettop_error": "",
+        "netfilter_invalid": 0,
+        "netfilter_rejected_sender": 0,
+        "netfilter_error": "",
+        "mode": "shadow",
+        "line_queue_high_water": {
+          "alf": 0,
+          "netfilter": 0,
+          "max_at": {
+            "alf": null,
+            "netfilter": null
+          }
+        },
+        "shutdown_dropped_lines": {
+          "alf": 0,
+          "netfilter": 0
+        },
+        "run_loop_timing": {
+          "save": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "classification": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "maintenance": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          },
+          "journal": {
+            "last_ns": 0,
+            "max_ns": 0,
+            "count": 0,
+            "max_at": null
+          }
+        },
+        "journal_torn_tail": 0
+      },
+      "real_deny": [
+        {
+          "ts": "2026-10-31T08:30:00Z",
+          "source": "netfilter",
+          "app": "/Applications/Synthetic.app/Contents/MacOS/Synthetic",
+          "verdict": "deny",
+          "port": 443,
+          "remote_class": "internet",
+          "bucket": "example.invalid",
+          "counts": 1,
+          "proposed_label": "decide",
+          "reason": "hard_non_allow"
+        }
+      ],
+      "known_fp": {
+        "nettop_policy_raw_ip": {
+          "count": 0,
+          "rows": []
+        },
+        "alf_unknown_or_allow_decide": {
+          "count": 0,
+          "rows": []
+        },
+        "loopback_ssh_limactl_knn": {
+          "count": 0,
+          "rows": []
+        }
+      },
+      "needs_review": []
+    }
+  }
+}
