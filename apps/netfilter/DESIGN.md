@@ -2,9 +2,10 @@
 
 Status: **maintained tool** (owner decision 2026-10-23: "доделываем его до
 ума"), observe-only by default. It started on 2026-10-22 as a per-app outbound
-visibility prototype ("own Little Snitch"). The decision specs (owner quotes,
-architecture, kill path, journal, digest contract) are board resources of
-STORY-261023-qbc86k; this note describes what is built.
+visibility prototype ("own Little Snitch"). Mac Bastion `AXIOM-001` and
+`SPEC-002` govern safety, identity, protected enforcement and incident journals.
+The historical decisions from STORY-261023-qbc86k informed that contract;
+this note describes the source, not the installed extension's verified capabilities.
 
 ## Shape
 
@@ -27,10 +28,12 @@ does one thing, prints a single result line and exits non-zero on failure.
   tunnel, no transparent proxy and no DNS proxy.
 - `startFilter`: apply `NEFilterSettings(rules: [], defaultAction:
   .filterData)`, so every new non-loopback flow reaches `handleNewFlow`.
-- `handleNewFlow`: log the flow, then return `.allow()` at once. There is
-  no `filterDataVerdict` follow-up, so no data inspection and no added
-  latency beyond one log call.
-- Never `.drop()`. No code path can block a flow.
+- Without a valid protect-list, `handleNewFlow` logs the flow and returns
+  `.allow()` at once. Protected flows are also allowed immediately.
+- With a valid protect-list, other flows remain under data filtering and
+  active explicit blocks can return `.drop()`. The guarded kill path below
+  describes this behavior; no payload is retained and the classifier never
+  enforces a decision by itself.
 
 ## Event (one JSON object per flow)
 

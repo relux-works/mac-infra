@@ -2,6 +2,15 @@
 
 macOS operations tooling and agent skills for local workstation maintenance.
 
+Mac Bastion (`mac-bastion`) is the durable Axiloom ledger. See the
+[2026-11-27 audit](docs/ops-audit-2026-11-27.md) for `AXIOM-001`, `SPEC-001`
+through `SPEC-006`, verification evidence and current coverage limits.
+Use private `/tmp` or `$TMPDIR` directories for new scratch and explicit
+artifact paths. Some tool defaults and historical examples below still use
+`.temp/`; their migration remains open in Axiloom. Never test VPN/TUN on this
+Mac: live tunnel testing belongs on `work-mac` after its Claude/Codex sessions
+have been stopped under owner authority.
+
 ## Tools
 
 | Tool | Purpose | Command | Artifacts |

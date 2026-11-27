@@ -86,7 +86,16 @@ func TestProtectListFileTrust(t *testing.T) {
 			case "setuid":
 				must(unix.Chmod(path, 04644))
 			case "setgid":
+				// /tmp may inherit wheel, which a non-member cannot mark
+				// setgid: Darwin silently clears the bit even on chmod success.
+				// Use our own group so this fixture exercises the refusal.
+				must(os.Chown(path, -1, os.Getgid()))
 				must(unix.Chmod(path, 02644))
+				var st unix.Stat_t
+				must(unix.Stat(path, &st))
+				if st.Mode&unix.S_ISGID == 0 {
+					t.Fatal("fixture did not retain the setgid bit")
+				}
 			case "sticky":
 				must(unix.Chmod(path, 01644))
 			case "hard_link":
